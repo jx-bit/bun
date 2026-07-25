@@ -1,0 +1,293 @@
+# Bun OHOS Full Release
+#
+# Builds Bun for HarmonyOS (OHOS) aarch64 on self-hosted ARM64 Linux runner.
+# Outputs binary to shared directory (/mnt/linux_share/ci-test/).
+#
+# Host bundler (Windows/Linux x64) for `bun build --compile` cross-compilation
+# should be built separately — see README-OHOS.md.
+
+name: OHOS Full Release
+
+on:
+  push:
+    tags:
+      - 'ohos-full-v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ohos-full-release
+  cancel-in-progress: false
+
+env:
+  OHOS_SDK_ROOT: /home/user/setup-ohos-sdk
+  OHOS_SYSROOT: /home/user/setup-ohos-sdk/ohos/native/sysroot
+  OHOS_CROSS_LIBS: /home/user/sources/bun/build/ohos-cross-libs
+  OHOS_ICU_DIR: /home/user/sources/bun/build/ohos-icu/target
+  CARGO_INCREMENTAL: 1
+  CARGO_TARGET_DIR: /home/user/sources/bun/build/release-ohos/rust-target
+  NINJA_JOBS: 2
+  WEBKIT_FORK: springmin/WebKit
+  WEBKIT_REF: ohos-aarch64
+
+jobs:
+  ohos-build:
+    name: Build Bun for OHOS (aarch64)
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 300
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Bun source (incremental)
+        run: |
+          LOCAL=/home/user/sources/bun
+          rm -rf bun
+          if [ -d "$LOCAL/.git" ]; then
+            git clone --reference "$LOCAL/.git" \
+              ${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
+            git clone --depth 1 --branch ohos-aarch64 \
+              ${{ github.server_url }}/${{ github.repository }}.git bun
+            cd bun
+            git fetch origin ohos-aarch64 --depth=1
+            git checkout -f FETCH_HEAD
+            echo "✅ Cloned from local reference"
+          else
+            git clone --depth 1 --branch ohos-aarch64 \
+              ${{ github.server_url }}/${{ github.repository }}.git bun
+            echo "⚠️ Full clone (no local reference)"
+          fi
+
+      - name: Restore Rust cargo cache
+        run: |
+          mkdir -p bun/.cargo
+          SRC_CACHE=/home/user/sources/bun/.cargo
+          [ -d "$SRC_CACHE/registry" ] && cp -a "$SRC_CACHE/registry" bun/.cargo/registry 2>/dev/null || true
+
+      - name: Restore Rust incremental build artifacts
+        run: |
+          SRC_TARGET=/home/user/sources/bun/build/release-ohos/rust-target
+          if [ -d "$SRC_TARGET" ]; then
+            mkdir -p bun/build/release-ohos
+            cp -a --link "$SRC_TARGET" bun/build/release-ohos/rust-target 2>/dev/null || \
+            cp -a "$SRC_TARGET" bun/build/release-ohos/rust-target 2>/dev/null || true
+          fi
+
+      - name: Checkout WebKit fork (incremental)
+        run: |
+          LOCAL_WK=/home/user/sources/bun/vendor/WebKit
+          WK_REPO=${{ env.WEBKIT_FORK }}
+          WK_REF=${{ inputs.webkit_ref || env.WEBKIT_REF }}
+          rm -rf bun/vendor/WebKit
+          if [ -d "$LOCAL_WK/.git" ]; then
+            git clone --reference "$LOCAL_WK/.git" --dissociate \
+              --depth 1 --branch "$WK_REF" \
+              "https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
+            cp -a --link "$LOCAL_WK" bun/vendor/WebKit
+            cd bun/vendor/WebKit
+            git remote set-url origin "https://github.com/$WK_REPO.git"
+            git fetch origin "$WK_REF" --depth=1 2>/dev/null || true
+            git checkout -f FETCH_HEAD
+          else
+            git clone --depth 1 --branch "$WK_REF" \
+              "https://github.com/$WK_REPO.git" bun/vendor/WebKit
+          fi
+
+      - name: WebKit version sync check
+        run: |
+          WK_HASH=$(grep "^export const WEBKIT_VERSION" bun/scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
+          if git -C bun/vendor/WebKit cat-file -e "${WK_HASH}" 2>/dev/null; then
+            echo "✅ vendor/WebKit contains ${WK_HASH}"
+          else
+            echo "⚠️ vendor/WebKit missing ${WK_HASH}, build continues"
+          fi
+
+      - name: Install system dependencies
+        run: |
+          if ! rpm -q libatomic &>/dev/null; then
+            dnf install -y libatomic 2>&1 | tail -3
+          fi
+
+      - name: Setup environment
+        run: |
+          echo "OHOS_SDK_ROOT=$OHOS_SDK_ROOT" >> $GITHUB_ENV
+          echo "OHOS_SYSROOT=$OHOS_SYSROOT" >> $GITHUB_ENV
+          echo "OHOS_CROSS_LIBS=$OHOS_CROSS_LIBS" >> $GITHUB_ENV
+          echo "OHOS_ICU_DIR=$OHOS_ICU_DIR" >> $GITHUB_ENV
+          test -d "$OHOS_SDK_ROOT" || { echo "❌ OHOS SDK not found"; exit 1; }
+          mkdir -p bun/build
+          [ -L bun/build/ohos-cross-libs ] && [ "$(readlink bun/build/ohos-cross-libs)" = "$OHOS_CROSS_LIBS" ] || ln -sfn "$OHOS_CROSS_LIBS" bun/build/ohos-cross-libs
+          [ -L bun/build/ohos-icu ] && [ "$(readlink bun/build/ohos-icu)" = "$(dirname $OHOS_ICU_DIR)" ] || ln -sfn "$(dirname $OHOS_ICU_DIR)" bun/build/ohos-icu
+          test -d bun/build/ohos-cross-libs/libcxx/lib || { echo "❌ Cross libs not found"; exit 1; }
+          test -d bun/build/ohos-icu/target/lib || { echo "❌ ICU not found"; exit 1; }
+          echo "PATH=$OHOS_SDK_ROOT/llvm-22/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=$OHOS_SDK_ROOT/llvm-22/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$OHOS_SDK_ROOT/llvm-22/bin/clang++" >> $GITHUB_ENV
+          echo "✅ Environment ready"
+
+      - name: Restore incremental build artifacts
+        run: |
+          CACHE_DIR=/home/user/actions-runner/_work/_cache/ohos-build
+          if [ -d "$CACHE_DIR" ]; then
+            mkdir -p bun/build/release-ohos/deps
+            for dep_dir in deps/WebKit obj vendor; do
+              src="$CACHE_DIR/$dep_dir"
+              dst="bun/build/release-ohos/$dep_dir"
+              [ -d "$src" ] && cp -a --link "$src" "$dst" 2>/dev/null || true
+            done
+          fi
+
+      - name: Extract WebKit version for cache key
+        id: webkit-version
+        run: |
+          WK_VER=$(grep "^export const WEBKIT_VERSION" bun/scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
+          echo "version=${WK_VER}" >> $GITHUB_OUTPUT
+
+      - name: Cache WebKit build
+        uses: actions/cache@v4
+        id: webkit-cache
+        with:
+          path: bun/build/release-ohos/deps/WebKit
+          key: webkit-ohos-rust-ohos-aarch64-${{ steps.webkit-version.outputs.version }}
+
+      - name: Configure Bun build
+        working-directory: bun
+        run: |
+          bun run build:release \
+            --os=ohos \
+            --arch=aarch64 \
+            --webkit=local \
+            --build-dir=build/release-ohos \
+            --ohos-sysroot=$OHOS_SYSROOT \
+            --configure-only
+        env:
+          CI: true
+
+      - name: Patch build.ninja
+        working-directory: bun
+        run: |
+          # Fix host C compiler (dep_host_cc uses LLVM 22 clang, needs system clang)
+          sed -i 's|command = .*/llvm-22/bin/clang $flags -o $out $in|command = /usr/bin/clang $flags -o $out $in|' \
+            build/release-ohos/build.ninja 2>/dev/null || true
+          # Fix -lpthreads → -lpthread (WebKit CMake typo)
+          [ -f build/release-ohos/deps/WebKit/build.ninja ] && \
+            sed -i 's/-lpthreads/-lpthread/g' build/release-ohos/deps/WebKit/build.ninja || true
+          # Fix Rust HOST linker (aarch64-unknown-linux-gnu must use system clang++, not OHOS clang++)
+          if [ -f .cargo/config.toml ]; then
+            sed -i '/\[target\.aarch64-unknown-linux-gnu\]/{n;s|linker = ".*"|linker = "/usr/bin/clang++"|}' .cargo/config.toml
+          fi
+
+      - name: Build WebKit
+        if: steps.webkit-cache.outputs.cache-hit != 'true'
+        working-directory: bun
+        run: |
+          ninja -C build/release-ohos configure-WebKit -j1
+          ninja -C build/release-ohos/deps/WebKit jsc -j$NINJA_JOBS
+
+      - name: Build Bun
+        working-directory: bun
+        run: |
+          # First run may fail on msgpackr-extract (optional npm dep), retry once
+          ninja -C build/release-ohos bun -j$NINJA_JOBS || \
+            ninja -C build/release-ohos bun -j$NINJA_JOBS
+
+      - name: Verify binary
+        working-directory: bun
+        run: |
+          file build/release-ohos/bun
+          ls -lh build/release-ohos/bun
+          file build/release-ohos/bun | grep -q "ELF.*ARM aarch64" || {
+            echo "ERROR: Not an ARM64 ELF binary"
+            file build/release-ohos/bun
+            exit 1
+          }
+          readelf -S build/release-ohos/bun | grep -i bun
+          echo "✅ Binary validation passed"
+
+      - name: Deploy to shared directory
+        working-directory: bun
+        run: |
+          SHARE=/mnt/linux_share/ci-test
+          mkdir -p $SHARE
+          VERSION=$(build/release-ohos/bun --version 2>/dev/null || python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          COMMIT=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          DEST_NAME="bun-ohos-aarch64-${VERSION}-${COMMIT}-${TIMESTAMP}"
+          cp build/release-ohos/bun "$SHARE/${DEST_NAME}.elf"
+          cp build/release-ohos/bun "$SHARE/bun-ohos-aarch64"
+          chmod +x "$SHARE/bun-ohos-aarch64"
+          echo "✅ Deployed to $SHARE/${DEST_NAME}.elf"
+          echo "✅ Latest: $SHARE/bun-ohos-aarch64"
+          ls -lh "$SHARE"/bun-ohos*
+
+  # ===== Linux ARM64 native build (for --compile-executable-path) =====
+  linux-arm64:
+    name: Build Bun for Linux ARM64 (native)
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 300
+    steps:
+      - name: Checkout Bun source (incremental)
+        run: |
+          LOCAL=/home/user/sources/bun
+          rm -rf bun-linux
+          if [ -d "$LOCAL/.git" ]; then
+            git clone --reference "$LOCAL/.git" \
+              ${{ github.server_url }}/${{ github.repository }}.git bun-linux 2>/dev/null || \
+            git clone --depth 1 --branch ohos-aarch64 \
+              ${{ github.server_url }}/${{ github.repository }}.git bun-linux
+            cd bun-linux
+            git fetch origin ohos-aarch64 --depth=1
+            git checkout -f FETCH_HEAD
+            echo "✅ Cloned from local reference"
+          else
+            git clone --depth 1 --branch ohos-aarch64 \
+              ${{ github.server_url }}/${{ github.repository }}.git bun-linux
+            echo "⚠️ Full clone (no local reference)"
+          fi
+
+      - name: Setup environment
+        run: |
+          echo "PATH=/home/user/setup-ohos-sdk/llvm-22/bin:/usr/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=/home/user/setup-ohos-sdk/llvm-22/bin/clang" >> $GITHUB_ENV
+          echo "CXX=/home/user/setup-ohos-sdk/llvm-22/bin/clang++" >> $GITHUB_ENV
+
+      - name: Configure Bun build (Linux ARM64 native)
+        working-directory: bun-linux
+        run: |
+          bun run build:release \
+            --os=linux \
+            --arch=aarch64 \
+            --webkit=prebuilt \
+            --build-dir=build/release-linux \
+            --configure-only
+        env:
+          CI: true
+
+      - name: Build Bun (Linux ARM64)
+        working-directory: bun-linux
+        run: |
+          ninja -C build/release-linux bun -j$NINJA_JOBS || \
+            ninja -C build/release-linux bun -j$NINJA_JOBS
+
+      - name: Verify binary
+        working-directory: bun-linux
+        run: |
+          file build/release-linux/bun
+          ls -lh build/release-linux/bun
+          file build/release-linux/bun | grep -q "ELF.*ARM aarch64" || {
+            echo "ERROR: Not an ARM64 ELF binary"
+            file build/release-linux/bun
+            exit 1
+          }
+          echo "✅ Linux ARM64 binary validation passed"
+
+      - name: Deploy to shared directory
+        working-directory: bun-linux
+        run: |
+          SHARE=/mnt/linux_share/ci-test
+          mkdir -p $SHARE
+          VERSION=$(build/release-linux/bun --version 2>/dev/null || python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          COMMIT=$(git rev-parse --short HEAD)
+          cp build/release-linux/bun "$SHARE/bun-linux-aarch64"
+          chmod +x "$SHARE/bun-linux-aarch64"
+          echo "✅ Linux ARM64 bun deployed to $SHARE/bun-linux-aarch64"
+          ls -lh "$SHARE"/bun-linux*
