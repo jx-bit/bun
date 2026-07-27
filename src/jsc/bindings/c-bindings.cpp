@@ -302,7 +302,9 @@ extern "C" void on_before_reload_process_linux()
     // close all file descriptors except stdin, stdout, stderr and possibly IPC.
     // if you're passing additional file descriptors to Bun, you're probably not passing more than 8.
     // If this fails, it's ultimately okay, we're just trying our best to avoid leaking file descriptors.
+#if !defined(__OHOS__)
     bun_close_range(3, ~0U, CLOSE_RANGE_CLOEXEC);
+#endif
 
     // reset all signals to default
     sigset_t signal_set;
@@ -528,16 +530,16 @@ extern "C" void bun_restore_stdio()
         sigset_t sa;
         int err;
 
-        // We might be a background job that doesn't own the TTY so block SIGTTOU
-        // before making the tcsetattr() call, otherwise that signal suspends us.
-        sigemptyset(&sa);
-        sigaddset(&sa, SIGTTOU);
+    // We might be a background job that doesn't own the TTY so block SIGTTOU
+    // before making the tcsetattr() call, otherwise that signal suspends us.
+    sigemptyset(&sa);
+    sigaddset(&sa, SIGTTOU);
 
-        pthread_sigmask(SIG_BLOCK, &sa, nullptr);
-        do
-            err = tcsetattr(fd, TCSANOW, &termios_to_restore_later[fd]);
-        while (err == -1 && errno == EINTR);
-        pthread_sigmask(SIG_UNBLOCK, &sa, nullptr);
+    pthread_sigmask(SIG_BLOCK, &sa, nullptr);
+    do
+        err = tcsetattr(fd, TCSANOW, &termios_to_restore_later[fd]);
+    while (err == -1 && errno == EINTR);
+    pthread_sigmask(SIG_UNBLOCK, &sa, nullptr);
     }
 #endif
 }
@@ -583,7 +585,9 @@ extern "C" void bun_initialize_process()
     // This is less of an issue for macOS due to posix_spawn
     // This is best effort, not all linux kernels support close_range or CLOSE_RANGE_CLOEXEC
     // To avoid breaking --watch, we skip stdin, stdout, stderr and IPC.
+#if !OS(WINDOWS) && !defined(__OHOS__)
     bun_close_range(4, ~0U, CLOSE_RANGE_CLOEXEC);
+#endif
 #endif
 
 #if OS(LINUX) || OS(DARWIN) || OS(FREEBSD)
