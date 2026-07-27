@@ -82,16 +82,19 @@ jobs:
           if [ -d "$LOCAL/.git" ]; then
             git clone --reference "$LOCAL/.git" \
               ${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
-              git clone --depth 1 --branch ohos-aarch64 \
+              git clone --depth 1 --branch "${{ github.ref_name }}" \
                 ${{ github.server_url }}/${{ github.repository }}.git bun
             cd bun
-            git fetch origin ohos-aarch64 --depth=1
+            # Checkout the commit that triggered this run (push SHA or PR merge),
+            # NOT a hardcoded branch — otherwise CI always builds ohos-aarch64
+            # regardless of which branch/PR was pushed.
+            git fetch origin "${{ github.ref }}" --depth=1
             git checkout -f FETCH_HEAD
-            echo "✅ Cloned from local reference"
+            echo "✅ Cloned from local reference @ ${{ github.sha }}"
           else
-            git clone --depth 1 --branch ohos-aarch64 \
+            git clone --depth 1 --branch "${{ github.ref_name }}" \
               ${{ github.server_url }}/${{ github.repository }}.git bun
-            echo "⚠️  Full clone (no local reference)"
+            echo "⚠️  Full clone (no local reference) @ ${{ github.sha }}"
           fi
 
       - name: Restore Rust cargo cache
