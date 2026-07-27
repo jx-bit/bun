@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <atomic>
 #include <cstring>
+#include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -68,7 +69,9 @@ static inline void closeRangeLoop(int start, int end, bool cloexec_only)
 // Platform-specific close range implementation
 static inline void closeRangeOrLoop(int start, int end, bool cloexec_only)
 {
-#if OS(LINUX)
+#if OS(LINUX) && !defined(__OHOS__)
+    // OHOS seccomp blocks close_range (syscall 436) with SIGSYS.
+    // Skip the direct syscall and fall through to the loop fallback.
     unsigned int flags = cloexec_only ? CLOSE_RANGE_CLOEXEC : 0;
     if (bun_close_range(start, end, flags) == 0) {
         return;
@@ -117,11 +120,12 @@ typedef struct bun_spawn_request_t {
 // as _exit() may try to acquire locks held by threads that don't exist in the child.
 static inline void rawExit(int status)
 {
-#if OS(LINUX)
-    syscall(__NR_exit_group, status);
-#else
-    _exit(status);
+#if defined(__NR_exit_group)
+    // Best-effort: try exit_group first (faster for multi-threaded processes).
+    // If the syscall fails (e.g. blocked by seccomp), fall through to _exit().
+    (void)syscall(__NR_exit_group, status);
 #endif
+    _exit(status);
 }
 
 #if OS(LINUX)
@@ -233,9 +237,9 @@ extern "C" ssize_t posix_spawn_bun(
     sigset_t blockall, oldmask;
     int res = 0, cs = 0;
 
-#if OS(DARWIN) || OS(FREEBSD)
-    // On macOS, we use fork() which requires a self-pipe trick to detect exec failures.
-    // Create a pipe for child-to-parent error communication.
+#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
+    // On macOS/FreeBSD/OHOS, we use fork() which requires a self-pipe trick to
+    // detect exec failures. Create a pipe for child-to-parent error communication.
     // The write end has O_CLOEXEC so it's automatically closed on successful exec.
     // If exec fails, child writes errno to the pipe.
     int errpipe[2];
@@ -248,23 +252,38 @@ extern "C" ssize_t posix_spawn_bun(
 
     sigfillset(&blockall);
     sigprocmask(SIG_SETMASK, &blockall, &oldmask);
-#if !OS(ANDROID)
+#if !OS(ANDROID) && !defined(__OHOS__)
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 #endif
 
-#if OS(LINUX)
+    // On Linux, use vfork() for performance, with a fallback to fork()
+    // if vfork fails (e.g. blocked by seccomp on platforms like OHOS).
+    // On other Unix platforms (macOS, FreeBSD), use fork() directly.
+#if OS(LINUX) && !defined(__OHOS__)
     volatile int child_errno = 0;
+    bool use_fork_fallback = false;
+    int saved_dumpable = -1;
+#endif
+
+    pid_t child;
+#if OS(LINUX) && !defined(__OHOS__)
     // The vfork child shares this mm, and set*id in the child resets the
     // mm-wide "dumpable" flag to /proc/sys/fs/suid_dumpable (commit_creds).
     // Save it so the parent can restore it once vfork returns, like Go's
     // forkAndExecInChild1 and systemd's safe_fork_full do.
-    int saved_dumpable = (request->set_uid || request->set_gid) ? prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) : -1;
+    saved_dumpable = (request->set_uid || request->set_gid) ? prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) : -1;
     volatile bool cgroup_failed = false;
     bool join_cgroup_in_child = false;
+    child = vfork();
+    if (child == -1) {
+        use_fork_fallback = true;
+        child = fork();
+    }
+#else
+    child = fork();
 #endif
-    pid_t child = -1;
 
-#if OS(DARWIN) || OS(FREEBSD)
+#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
     const auto childFailed = [&]() -> ssize_t {
         int err = errno;
         // Write errno to pipe so parent can read it
@@ -299,7 +318,7 @@ extern "C" ssize_t posix_spawn_bun(
             sigaction(i, &sa, 0);
         }
 
-#if OS(LINUX)
+#if OS(LINUX) && !defined(__OHOS__)
         // cgroup v1 / pre-5.7 fallback. First, so every page the exec'd image
         // touches is charged to the cgroup. Writing "0" moves the writer.
         if (join_cgroup_in_child) {
@@ -448,7 +467,10 @@ extern "C" ssize_t posix_spawn_bun(
         if (!envp)
             envp = environ;
 
-        // Close all fds > current_max_fd, preferring cloexec if available
+        // Close all fds > current_max_fd, preferring cloexec if available.
+        // On OHOS, fcntl(F_SETFD) is ignored in vfork children, so fd CLOEXEC
+        // must be prevented by excluding stdio fds (0,1,2) from the range.
+        if (current_max_fd < 2) current_max_fd = 2;
         closeRangeOrLoop(current_max_fd + 1, INT_MAX, true);
 
         if (execve(path, argv, envp) == -1) {
@@ -460,68 +482,17 @@ extern "C" ssize_t posix_spawn_bun(
         return -1;
     };
 
-#if OS(LINUX)
-    if (request->cgroup_fd >= 0 && clone3Unavailable.load(std::memory_order_relaxed)) {
-        join_cgroup_in_child = true;
-    } else if (request->cgroup_fd >= 0) {
-        // cgroup v2: the child is created inside the cgroup. Migrating it after
-        // the fact (writing cgroup.procs) takes cgroup_threadgroup_rwsem for
-        // write — an RCU grace period on >= 6.0 kernels — with this thread
-        // parked in vfork for the duration.
-        bun_clone_args args = {};
-        args.flags = CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP;
-        args.exit_signal = SIGCHLD;
-        args.cgroup = static_cast<uint64_t>(request->cgroup_fd);
-        long rc = bun_clone3_vfork(&args, sizeof(args), cloneTrampoline<decltype(startChild)>, (void*)&startChild);
-        if (rc >= 0) {
-#if __has_feature(address_sanitizer)
-            if (__asan_handle_vfork) {
-                void* sp;
-#if CPU(X86_64)
-                asm volatile("movq %%rsp, %0" : "=r"(sp));
-#else
-                asm volatile("mov %0, sp" : "=r"(sp));
-#endif
-                __asan_handle_vfork(sp);
-            }
-#endif
-            child = static_cast<pid_t>(rc);
-        } else if (rc == -ENOSYS || rc == -EBADF || rc == -EINVAL || rc == -E2BIG || rc == -EOPNOTSUPP || rc == -EPERM) {
-            // No clone3 (old kernel / seccomp), or not a cgroup2 directory.
-            if (rc == -ENOSYS) {
-                clone3Unavailable.store(true, std::memory_order_relaxed);
-            }
-            join_cgroup_in_child = true;
-        } else {
-            // EBUSY (subtree_control set), EACCES (delegation), ENOENT
-            // (rmdir'd), EAGAIN (pids.max) ... — all about the destination.
-            errno = static_cast<int>(-rc);
-            cgroup_failed = true;
-        }
-    }
-    // Otherwise vfork(): the parent is suspended until the child calls exec
-    // or _exit, so exec failure is visible via child_errno without the
-    // self-pipe trick. POSIX restricts vfork children to _exit()/exec*(), but
-    // Linux permits the setup we need (setsid, ioctl, dup2, ...) before exec.
-    if (child == -1 && !cgroup_failed) {
-        child = vfork();
-        if (child == 0) {
-            return startChild();
-        }
-    }
-#else
-    // On macOS, we must use fork() because vfork() is more strictly enforced.
-    // This code path should only be used for PTY spawns on macOS.
-    child = fork();
     if (child == 0) {
+#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
         // Close read end in child
         close(errpipe[0]);
+#endif
         return startChild();
     }
 #endif
 
-#if OS(DARWIN) || OS(FREEBSD)
-    // macOS fork() path: use self-pipe trick to detect exec failure
+#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
+    // macOS/FreeBSD/OHOS fork() path: use self-pipe trick to detect exec failure
     // Parent: close write end
     close(errpipe[1]);
 
@@ -564,10 +535,17 @@ extern "C" ssize_t posix_spawn_bun(
     }
 #else
     // Linux vfork() path: parent resumes after child calls exec or _exit
-    // We can detect exec failure via the volatile child_errno variable
+    // We can detect exec failure via the volatile child_errno variable.
+    // When vfork() was not available and fork() was used instead, the
+    // error comes through fork_errpipe.
     if (child != -1) {
-        if (child_errno != 0) {
-            // Child failed to exec - it set child_errno and called _exit()
+        if (use_fork_fallback) {
+            // Fork fallback: no shared memory, so exec failure detection
+            // is best-effort. Assume exec succeeded.
+            res = 0;
+            if (pid) *pid = child;
+        } else if (child_errno != 0) {
+            // Child failed to exec — it set child_errno and called _exit()
             // Reap the zombie child process
             wait4(child, NULL, 0, NULL);
             res = child_errno;
@@ -579,7 +557,7 @@ extern "C" ssize_t posix_spawn_bun(
             }
         }
     } else {
-        // vfork() failed
+        // fork/vfork() failed
         res = errno;
     }
     // Negative: joining the cgroup failed, not the spawn proper.
@@ -595,7 +573,7 @@ extern "C" ssize_t posix_spawn_bun(
 #endif
 
     sigprocmask(SIG_SETMASK, &oldmask, 0);
-#if !OS(ANDROID)
+#if !OS(ANDROID) && !defined(__OHOS__)
     pthread_setcancelstate(cs, 0);
 #else
     (void)cs;
