@@ -2094,7 +2094,9 @@ JSC_DEFINE_HOST_FUNCTION_WITH_ATTRIBUTES(Process_functionExecve, __attribute__((
     // undone if execve(2) fails: FD_CLOEXEC only takes effect at the next
     // exec, so the still-running image is unaffected.
 #if OS(LINUX) || OS(FREEBSD)
+#if !defined(__OHOS__)
     if (bun_close_range(3, ~0U, /* CLOSE_RANGE_CLOEXEC */ (1U << 2)) != 0)
+#endif
 #endif
     {
         int maxfd = static_cast<int>(sysconf(_SC_OPEN_MAX));
