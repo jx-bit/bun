@@ -1428,6 +1428,16 @@ pub(crate) fn inject(
                 // SAFETY: libc fchmod on a valid native fd.
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
             }
+            #[cfg(target_env = "ohos")]
+            {
+                let out_str = unsafe { core::str::from_utf8_unchecked(zname.as_bytes()) };
+                let out_path = std::path::Path::new(out_str);
+                // The base bun binary is already signed, but we've appended
+                // the JS bundle after the original signature.  Strip the old
+                // .codesign and sign the modified file so the signature
+                // covers the entire standalone binary.
+                let _ = ohos_sign::sign_selfsign_inplace_with_strip(out_path);
+            }
             return cloned_executable_fd;
         }
         _ => {
