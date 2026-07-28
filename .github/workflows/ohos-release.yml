@@ -61,16 +61,16 @@ jobs:
           rm -rf bun
           if [ -d "$LOCAL/.git" ]; then
             git clone --reference "$LOCAL/.git" \
-              ${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
             git clone --depth 1 --branch ohos-aarch64 \
-              ${{ github.server_url }}/${{ github.repository }}.git bun
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
             cd bun
             git fetch origin ohos-aarch64 --depth=1
             git checkout -f FETCH_HEAD
             echo "✅ Cloned from local reference"
           else
             git clone --depth 1 --branch ohos-aarch64 \
-              ${{ github.server_url }}/${{ github.repository }}.git bun
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
             echo "⚠️ Full clone (no local reference)"
           fi
 
@@ -98,15 +98,15 @@ jobs:
           if [ -d "$LOCAL_WK/.git" ]; then
             git clone --reference "$LOCAL_WK/.git" --dissociate \
               --depth 1 --branch "$WK_REF" \
-              "https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
             cp -a --link "$LOCAL_WK" bun/vendor/WebKit
             cd bun/vendor/WebKit
-            git remote set-url origin "https://github.com/$WK_REPO.git"
+            git remote set-url origin "https://ghfast.top/https://github.com/$WK_REPO.git"
             git fetch origin "$WK_REF" --depth=1 2>/dev/null || true
             git checkout -f FETCH_HEAD
           else
             git clone --depth 1 --branch "$WK_REF" \
-              "https://github.com/$WK_REPO.git" bun/vendor/WebKit
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit
           fi
 
       - name: WebKit version sync check
