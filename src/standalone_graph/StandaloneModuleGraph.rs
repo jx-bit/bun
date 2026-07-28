@@ -344,6 +344,16 @@ mod elf {
     /// `&[u8]` here would freeze it to read-only and make the later
     /// `from_bytes` writable subslices UB under Stacked Borrows.
     pub(super) fn get_data() -> Option<(*mut u8, usize)> {
+        #[cfg(target_env = "ohos")]
+        {
+            // Primary: open /proc/self/exe + locate .bun section by FILE OFFSET
+            // + mmap. Bypasses PIE vaddr relocations entirely — more robust than
+            // vaddr+load_base (which miscomputes when PT_LOAD[0].vaddr != 0).
+            if let Some(data) = ohos_primary_get_data() {
+                return Some(data);
+            }
+            // Fallback below: vaddr + PIE load base (when /proc/self/exe unreadable).
+        }
         // SAFETY: FFI call.
         let vaddr_ptr = unsafe { Bun__getStandaloneModuleGraphELFVaddr() };
         if vaddr_ptr.is_null() {
@@ -406,6 +416,125 @@ mod elf {
                         return Some(base);
                     }
                 }
+            }
+        }
+        None
+    }
+
+    /// OHOS primary: open /proc/self/exe, locate the `.bun` section by FILE
+    /// OFFSET (sh_offset) via the ELF section header table, then mmap it
+    /// MAP_PRIVATE so JSC can mutate bytecode in place. Independent of vaddr
+    /// / PIE relocations — works as long as /proc/self/exe is readable.
+    #[cfg(target_env = "ohos")]
+    fn ohos_primary_get_data() -> Option<(*mut u8, usize)> {
+        use std::fs::File;
+        use std::os::fd::AsRawFd;
+        use std::ptr;
+        let file = File::open("/proc/self/exe").ok()?;
+        let (sh_offset, sh_size) = locate_bun_section(&file)?;
+        let mut hdr = [0u8; 8];
+        read_at(&file, sh_offset, &mut hdr)?;
+        let byte_count = u64::from_le_bytes(hdr) as usize;
+        if byte_count.checked_add(8)? != sh_size as usize {
+            return None;
+        }
+        let mapping = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                sh_size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                sh_offset as i64,
+            )
+        };
+        if mapping == libc::MAP_FAILED {
+            return None;
+        }
+        Some((unsafe { (mapping as *mut u8).add(8) }, byte_count))
+    }
+
+    #[cfg(target_env = "ohos")]
+    const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+    #[cfg(target_env = "ohos")]
+    const EHDR_E_SHOFF: usize = 0x28;
+    #[cfg(target_env = "ohos")]
+    const EHDR_E_SHENTSIZE: usize = 0x3a;
+    #[cfg(target_env = "ohos")]
+    const EHDR_E_SHNUM: usize = 0x3c;
+    #[cfg(target_env = "ohos")]
+    const EHDR_E_SHSTRNDX: usize = 0x3e;
+    #[cfg(target_env = "ohos")]
+    const SHDR_SIZE: usize = 0x40;
+    #[cfg(target_env = "ohos")]
+    const SHDR_SH_NAME: usize = 0x00;
+    #[cfg(target_env = "ohos")]
+    const SHDR_SH_OFFSET: usize = 0x18;
+    #[cfg(target_env = "ohos")]
+    const SHDR_SH_SIZE: usize = 0x20;
+    #[cfg(target_env = "ohos")]
+    const BUN_SECTION_NAME: &[u8] = b".bun\0";
+
+    #[cfg(target_env = "ohos")]
+    fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> Option<()> {
+        use std::os::fd::AsRawFd;
+        let n = unsafe {
+            libc::pread64(
+                file.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                offset as i64,
+            )
+        };
+        if n < 0 || n as usize != buf.len() {
+            return None;
+        }
+        Some(())
+    }
+
+    /// Walk the ELF section header table to find `.bun`; return (sh_offset, sh_size).
+    #[cfg(target_env = "ohos")]
+    fn locate_bun_section(file: &std::fs::File) -> Option<(u64, u64)> {
+        let mut ehdr = [0u8; 64];
+        read_at(file, 0, &mut ehdr)?;
+        if ehdr[0..4] != ELF_MAGIC {
+            return None;
+        }
+        let shoff = u64::from_le_bytes(ehdr[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].try_into().ok()?);
+        let shentsize =
+            u16::from_le_bytes(ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2].try_into().ok()?);
+        let shnum = u16::from_le_bytes(ehdr[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].try_into().ok()?);
+        let shstrndx =
+            u16::from_le_bytes(ehdr[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2].try_into().ok()?);
+        if shentsize != SHDR_SIZE as u16 || shstrndx >= shnum {
+            return None;
+        }
+        let shstrtab_shoff = shoff + (shstrndx as u64) * SHDR_SIZE as u64;
+        let mut shstrtab_shdr = [0u8; 64];
+        read_at(file, shstrtab_shoff, &mut shstrtab_shdr)?;
+        let shstrtab_offset = u64::from_le_bytes(
+            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
+        );
+        let shstrtab_size =
+            u64::from_le_bytes(shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
+        let shstrtab_size_usize = shstrtab_size as usize;
+        let mut shstrtab = vec![0u8; shstrtab_size_usize];
+        read_at(file, shstrtab_offset, &mut shstrtab)?;
+        for i in 0..shnum {
+            let shdr_off = shoff + (i as u64) * SHDR_SIZE as u64;
+            let mut shdr = [0u8; 64];
+            read_at(file, shdr_off, &mut shdr)?;
+            let name_off =
+                u32::from_le_bytes(shdr[SHDR_SH_NAME..SHDR_SH_NAME + 4].try_into().ok()?) as usize;
+            if name_off + 5 <= shstrtab_size_usize
+                && &shstrtab[name_off..name_off + 5] == BUN_SECTION_NAME
+            {
+                let sec_offset = u64::from_le_bytes(
+                    shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
+                );
+                let sec_size =
+                    u64::from_le_bytes(shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
+                return Some((sec_offset, sec_size));
             }
         }
         None
