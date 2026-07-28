@@ -81,9 +81,9 @@ jobs:
           rm -rf bun
           if [ -d "$LOCAL/.git" ]; then
             git clone --reference "$LOCAL/.git" \
-              ${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
               git clone --depth 1 --branch "${{ github.ref_name }}" \
-                ${{ github.server_url }}/${{ github.repository }}.git bun
+                https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
             cd bun
             # Checkout the commit that triggered this run (push SHA or PR merge),
             # NOT a hardcoded branch — otherwise CI always builds ohos-aarch64
@@ -93,7 +93,7 @@ jobs:
             echo "✅ Cloned from local reference @ ${{ github.sha }}"
           else
             git clone --depth 1 --branch "${{ github.ref_name }}" \
-              ${{ github.server_url }}/${{ github.repository }}.git bun
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
             echo "⚠️  Full clone (no local reference) @ ${{ github.sha }}"
           fi
 
@@ -133,10 +133,10 @@ jobs:
             # Hardlink from local checkout — ~5s instead of 1h+ cloning WebKit via network
             git clone --reference "$LOCAL_WK/.git" --dissociate \
               --depth 1 --branch "$WK_REF" \
-              "https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
             cp -a --link "$LOCAL_WK" bun/vendor/WebKit
             cd bun/vendor/WebKit
-            git remote set-url origin "https://github.com/$WK_REPO.git"
+            git remote set-url origin "https://ghfast.top/https://github.com/$WK_REPO.git"
             git fetch origin "$WK_REF" --depth=1 2>/dev/null || true
             # Must use FETCH_HEAD — local branch from the initial clone
             # still points to the old ref and `git checkout "$WK_REF"` would
@@ -145,7 +145,7 @@ jobs:
             echo "✅ WebKit cloned from local reference"
           else
             git clone --depth 1 --branch "$WK_REF" \
-              "https://github.com/$WK_REPO.git" bun/vendor/WebKit
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit
             echo "⚠️  Full WebKit clone (no local reference)"
           fi
 
