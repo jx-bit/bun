@@ -359,6 +359,18 @@ mod elf {
         // Format at target: [u64 payload_len][payload bytes]
         // Synthesize a `*mut u8` directly so the provenance carries write
         // permission for the in-place bytecode mutation done by JSC.
+        #[cfg(target_env = "ohos")]
+        let target = {
+            // OHOS binaries are PIE: the link-time vaddr must shift by the
+            // ASLR load base. /proc/self/maps is readable even when
+            // /proc/self/exe is execute-only; its first file-backed mapping
+            // at offset 0 is the ELF PT_LOAD header — its start is the PIE
+            // base (hmdfs maps the header r--p, not r-xp, so matching on
+            // execute permission misses it).
+            let load_base = ohos_pie_load_base()?;
+            (load_base.wrapping_add(vaddr as usize)) as *mut u8
+        };
+        #[cfg(not(target_env = "ohos"))]
         let target = vaddr as *mut u8;
         // SAFETY: target points to 8-byte little-endian length prefix.
         let payload_len =
@@ -368,6 +380,35 @@ mod elf {
         }
         // SAFETY: payload_len bytes follow the 8-byte header at `target`.
         Some((unsafe { target.add(8) }, payload_len as usize))
+    }
+
+    /// OHOS PIE load base: scan /proc/self/maps for the first file-backed
+    /// mapping at offset 0 (the ELF PT_LOAD header). Its start address is the
+    /// ASLR base the kernel loaded the PIE image at.
+    #[cfg(target_env = "ohos")]
+    fn ohos_pie_load_base() -> Option<usize> {
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        for line in maps.lines() {
+            let mut c = line.split_whitespace();
+            let addr_range = c.next()?;
+            c.next(); // perms
+            let file_off = c.next()?;
+            c.next(); // dev
+            let inode = c.next().unwrap_or("0");
+            let path = c.next().unwrap_or("");
+            if file_off == "00000000"
+                && inode != "0"
+                && !path.is_empty()
+                && !path.starts_with('[')
+            {
+                if let Some(start) = addr_range.split('-').next() {
+                    if let Ok(base) = usize::from_str_radix(start, 16) {
+                        return Some(base);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
