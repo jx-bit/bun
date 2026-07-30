@@ -44,8 +44,18 @@ runs:
         esac
         curl -LO "${{ inputs.download-url }}/${release}/${target}.zip" --retry 5
         unzip ${target}.zip
-        mkdir -p ${{ runner.temp }}/.bun/bin
-        mv ${target}/bun* ${{ runner.temp }}/.bun/bin/
-        chmod +x ${{ runner.temp }}/.bun/bin/*
-        ln -fs ${{ runner.temp }}/.bun/bin/bun ${{ runner.temp }}/.bun/bin/bunx
-        echo "${{ runner.temp }}/.bun/bin" >> ${GITHUB_PATH}
+        # runner.temp on Windows is "D:\a\_temp" — bare backslashes get eaten
+        # by bash (\a -> a, \_ -> _), mangling the path to "D:a_temp". Capture
+        # into a var and slash-convert so mkdir/mv/ln resolve the real dir on
+        # both Git Bash (Windows) and POSIX hosts (no-op there).
+        BUN_TMP="${{ runner.temp }}"
+        BUN_TMP="${BUN_TMP//\\//}"
+        mkdir -p "$BUN_TMP/.bun/bin"
+        mv ${target}/bun* "$BUN_TMP/.bun/bin/"
+        chmod +x "$BUN_TMP/.bun/bin/"*
+        # bunx = bun alias. On Windows Git Bash, ln -s may fall back to a
+        # copy or fail entirely if symlink support is off; cp is a safe
+        # fallback (bunx just needs to exec bun). On POSIX ln -s works.
+        ln -fs "$BUN_TMP/.bun/bin/bun" "$BUN_TMP/.bun/bin/bunx" 2>/dev/null \
+          || cp -f "$BUN_TMP/.bun/bin/bun"* "$BUN_TMP/.bun/bin/bunx"
+        echo "$BUN_TMP/.bun/bin" >> ${GITHUB_PATH}

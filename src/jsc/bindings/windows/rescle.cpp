@@ -112,7 +112,7 @@ inline T round(T value, int modula = 4)
 std::wstring ReadFileToString(const wchar_t* filename)
 {
     std::wifstream wif(filename);
-    wif.imbue(std::locale(std::locale::empty(), new std::codecvt_utf8<wchar_t>));
+    wif.imbue(std::locale(std::locale(), new std::codecvt_utf8<wchar_t>));
     std::wstringstream wss;
     wss << wif.rdbuf();
     return wss.str();

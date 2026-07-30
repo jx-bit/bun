@@ -6202,7 +6202,7 @@ pub mod RTLD {
 /// C-compatible entry point for `dlopen` — called from C++ as `Bun__dlopen`.
 /// OHOS: if dlopen fails with EPERM (unsigned .node/.so), sign and retry.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Bun__dlopen(path: *const c_char, flags: c_int) -> *mut c_void {
+pub unsafe extern "C" fn Bun__dlopen(path: *const c_char, flags: core::ffi::c_int) -> *mut c_void {
     // SAFETY: caller guarantees `path` is a valid NUL-terminated C string.
     let z = unsafe { ZStr::from_c_ptr(path) };
     dlopen(z, flags).unwrap_or(core::ptr::null_mut())

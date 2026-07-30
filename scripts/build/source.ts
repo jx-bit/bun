@@ -631,15 +631,20 @@ export function registerDepRules(n: Ninja, cfg: Config): void {
   // would add --target which breaks cross-compiles. cfg.hostCc (not cfg.cc):
   // when cross-compiling for windows, cc is clang-cl and defaults to a
   // *-windows-msvc triple — host tools must stay plain clang.
-  // Post-link sign for OHOS host: HarmonyOS rejects unsigned ELFs at exec.
-  // Uses binary-sign-tool (from ohos-sdk build dep, always available at build
-  // time) — ohos-selfsign is compiled later inside the same ninja graph and
-  // cannot be used here.
-  const hostCcCmd =
-    `${q(cfg.hostCc)} $flags -o $out $in` +
-    ` && { command -v binary-sign-tool >/dev/null 2>&1` +
-    ` && binary-sign-tool sign -selfSign 1 -inFile $out -outFile $out.signed >/dev/null 2>&1` +
-    ` && mv -f $out.signed $out && chmod +x $out; :; }`;
+  // Post-link sign for OHOS host only: HarmonyOS rejects unsigned ELFs at
+  // exec. Uses binary-sign-tool (from ohos-sdk build dep, always available at
+  // build time) — ohos-selfsign is compiled later inside the same ninja graph
+  // and cannot be used here. Gated on cfg.ohos: on linux the sign check is a
+  // no-op shell (`command -v` fails, `:;` exits 0) but wastes a spawn per
+  // host-tool link; on windows the POSIX `{ ...; }` / `>/dev/null` syntax
+  // isn't valid for ninja's cmd.exe invocation and lld-link receives `&&`,
+  // `{`, `command` etc. as input files (observed on windows-latest CI).
+  const hostCcCmd = cfg.ohos
+    ? `${q(cfg.hostCc)} $flags -o $out $in` +
+      ` && { command -v binary-sign-tool >/dev/null 2>&1` +
+      ` && binary-sign-tool sign -selfSign 1 -inFile $out -outFile $out.signed >/dev/null 2>&1` +
+      ` && mv -f $out.signed $out && chmod +x $out; :; }`
+    : `${q(cfg.hostCc)} $flags -o $out $in`;
   n.rule("dep_host_cc", {
     command: hostCcCmd,
     description: "host-cc $out",
