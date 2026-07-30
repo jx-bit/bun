@@ -216,6 +216,18 @@ export const webkit: Dependency = {
         for (const lib of ["libJavaScriptCore.a", "libWTF.a", "libbmalloc.a"]) {
           symlinkSync(join(ohosRoot, "lib", lib), join(destDir, "lib", lib));
         }
+        // bun-webkit does not bundle ICU (OHOS uses icu4c@78 separately).
+        // prebuiltIcuLibs() returns lib/libicu*.a relative to destDir, so the
+        // link command expects them in the webkit cache dir. Symlink from the
+        // ohos-icu scaffold (cfg.ohosIcuDir, default build/ohos-icu/target).
+        if (cfg.ohosIcuDir) {
+          for (const lib of ["libicudata.a", "libicui18n.a", "libicuuc.a"]) {
+            const icuSrc = join(cfg.ohosIcuDir!, "lib", lib);
+            if (existsSync(icuSrc)) {
+              symlinkSync(icuSrc, join(destDir, "lib", lib));
+            }
+          }
+        }
         const inc = join(ohosRoot, "include", "webkit");
         symlinkSync(join(inc, "JavaScriptCore"), join(destDir, "include", "JavaScriptCore"));
         symlinkSync(join(inc, "wtf"), join(destDir, "include", "wtf"));
