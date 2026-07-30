@@ -1111,7 +1111,11 @@ pub mod fs {
         ) -> crate::CrateResult<&'static mut EntriesOption> {
             if bun_core::FeatureFlags::ENABLE_ENTRY_CACHE {
                 let mut get_or_put_result = self.entries.get_or_put(dir)?;
-                if err == crate::Error::Sys(bun_errno::SystemErrno::ENOENT) {
+                let is_not_found = err == crate::Error::Sys(bun_errno::SystemErrno::ENOENT)
+                    || (cfg!(target_env = "ohos")
+                        && (err == crate::Error::Sys(bun_errno::SystemErrno::EACCES)
+                            || err == crate::Error::Sys(bun_errno::SystemErrno::EPERM)));
+                if is_not_found {
                     self.entries.mark_not_found(get_or_put_result);
                     return Ok(temp_entries_option_write(EntriesOption::Err(
                         dir_entry::Err {
@@ -1671,9 +1675,47 @@ pub mod fs {
             {
                 return b"/data/local/tmp";
             }
-            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "android")))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
-                b"/tmp"
+                // OHOS /tmp is read-only erofs. Check TMPDIR environment
+                // first, then fall back to known-writable paths.
+                #[cfg(target_env = "ohos")]
+                {
+                    // Respect explicit TMPDIR from the environment.
+                    if let Some(tmp) = env_var::TMPDIR.get_not_empty() {
+                        if !tmp.is_empty() {
+                            return tmp;
+                        }
+                    }
+                    // Check if /tmp is actually writable.
+                    if unsafe { libc::access(b"/tmp\0".as_ptr() as *const libc::c_char, libc::W_OK) } == 0
+                    {
+                        return b"/tmp";
+                    }
+                    // Fallback order: $HOME/tmp → /data/storage/el2/base/tmp
+                    if let Some(home) = env_var::HOME.get_not_empty() {
+                        let mut buf = [0u8; 2048];
+                        let len = home.len().min(buf.len() - 5);
+                        buf[..len].copy_from_slice(&home[..len]);
+                        buf[len..len + 4].copy_from_slice(b"/tmp");
+                        buf[len + 4] = 0;
+                        if unsafe { libc::access(buf.as_ptr() as *const libc::c_char, libc::W_OK) } == 0 {
+                            let tmp = &buf[..len + 4];
+                            let leaked = tmp.to_vec().leak();
+                            return &leaked[..];
+                        }
+                    }
+                    let candidate = b"/data/storage/el2/base/tmp\0";
+                    if unsafe { libc::access(candidate.as_ptr() as *const libc::c_char, libc::W_OK) } == 0 {
+                        return b"/data/storage/el2/base/tmp";
+                    }
+                    // Last resort: return /tmp even if read-only.
+                    b"/tmp"
+                }
+                #[cfg(not(target_env = "ohos"))]
+                {
+                    b"/tmp"
+                }
             }
         }
 

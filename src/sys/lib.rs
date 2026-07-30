@@ -2138,18 +2138,18 @@ mod posix_impl {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     mod linux_statx {
         // glibc: libc 0.2.x exposes the full surface directly.
-        #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+        #[cfg(all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos"))))]
         pub(super) use libc::{
             STATX_ATIME, STATX_BLOCKS, STATX_BTIME, STATX_CTIME, STATX_GID, STATX_INO, STATX_MODE,
             STATX_MTIME, STATX_NLINK, STATX_SIZE, STATX_TYPE, STATX_UID, statx,
         };
 
-        // musl/Android: `libc` gates `statx`/`STATX_*` behind a build-script
+        // musl/Android/OHOS: `libc` gates `statx`/`STATX_*` behind a build-script
         // `musl_v1_2_3` cfg that cross-compiles can't trigger, and bionic's
         // `statx()` wrapper requires API 30. Define the kernel-ABI struct +
         // bits ourselves and dispatch via raw `syscall` — works on every
         // Linux ABI.
-        #[cfg(any(target_env = "musl", target_os = "android"))]
+        #[cfg(any(target_env = "musl", target_env = "ohos", target_os = "android"))]
         mod raw {
             #![allow(non_camel_case_types)]
             use core::ffi::{c_char, c_int, c_uint};
@@ -2225,7 +2225,7 @@ mod posix_impl {
                 unsafe { libc::syscall(libc::SYS_statx, dirfd, path, flags, mask, buf) as c_int }
             }
         }
-        #[cfg(any(target_env = "musl", target_os = "android"))]
+        #[cfg(any(target_env = "musl", target_env = "ohos", target_os = "android"))]
         pub(super) use raw::*;
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2777,14 +2777,38 @@ mod posix_impl {
     }
     pub fn fchmodat(dir: impl AsFd, path: &ZStr, mode: Mode, flags: i32) -> Maybe<()> {
         let dir = dir.as_fd();
-        check_p!(
-            // SAFETY: `dir` is a live fd (or AT_FDCWD); `ZStr::as_ptr()` is a
-            // valid NUL-terminated C string.
-            unsafe { libc::fchmodat(dir.native(), path.as_ptr(), mode as libc::mode_t, flags) },
-            Tag::fchmodat,
-            path
-        );
-        Ok(())
+        #[cfg(target_env = "ohos")]
+        {
+            // OHOS seccomp blocks fchmodat2 (syscall 452) which newer glibc
+            // uses internally for fchmodat(). Call SYS_fchmodat (53 on aarch64)
+            // directly so seccomp doesn't SIGSYS us.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_fchmodat as libc::c_long,
+                    dir.native() as libc::c_long,
+                    path.as_ptr() as libc::c_long,
+                    mode as libc::c_long,
+                    flags as libc::c_long,
+                )
+            };
+            if rc != 0 {
+                let errno = crate::linux::errno();
+                return Err(Error::from_code_int(errno, Tag::fchmodat)
+                    .with_path(path.as_bytes()));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_env = "ohos"))]
+        {
+            check_p!(
+                // SAFETY: `dir` is a live fd (or AT_FDCWD); `ZStr::as_ptr()` is a
+                // valid NUL-terminated C string.
+                unsafe { libc::fchmodat(dir.native(), path.as_ptr(), mode as libc::mode_t, flags) },
+                Tag::fchmodat,
+                path
+            );
+            Ok(())
+        }
     }
     /// `lchmod` is BSD/Darwin-only; Linux: `fchmodat(.., AT_SYMLINK_NOFOLLOW)`.
     pub fn lchmod(path: &ZStr, mode: Mode) -> Maybe<()> {
@@ -5368,9 +5392,9 @@ pub mod linux {
     // `time_t == c_long == i64` on every libc, so spell it `i64` on musl to
     // sidestep the deprecation without changing layout. The `const _` below
     // guards the layout-identical-to-`libc::timespec` invariant.
-    #[cfg(target_env = "musl")]
+    #[cfg(any(target_env = "musl", target_env = "ohos"))]
     type time_t = i64;
-    #[cfg(not(target_env = "musl"))]
+    #[cfg(not(any(target_env = "musl", target_env = "ohos")))]
     type time_t = libc::time_t;
 
     /// kernel-shaped timespec (`sec`/`nsec`, no `tv_` prefix).
@@ -6174,10 +6198,35 @@ pub mod RTLD {
     pub const LOCAL: i32 = 0;
 }
 
+
+/// C-compatible entry point for `dlopen` — called from C++ as `Bun__dlopen`.
+/// OHOS: if dlopen fails with EPERM (unsigned .node/.so), sign and retry.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Bun__dlopen(path: *const c_char, flags: core::ffi::c_int) -> *mut c_void {
+    // SAFETY: caller guarantees `path` is a valid NUL-terminated C string.
+    let z = unsafe { ZStr::from_c_ptr(path) };
+    dlopen(z, flags).unwrap_or(core::ptr::null_mut())
+}
+
 /// `dlopen(filename, flags)`. Windows → `LoadLibraryExW` (UTF-8 → UTF-16).
 pub fn dlopen(filename: &ZStr, flags: i32) -> Option<*mut c_void> {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_env = "ohos")))]
     {
+        // SAFETY: filename is NUL-terminated.
+        let p = unsafe { libc::dlopen(filename.as_ptr(), flags) };
+        if p.is_null() { None } else { Some(p) }
+    }
+    #[cfg(target_env = "ohos")]
+    {
+        fn ensure_signed(path: &ZStr) {
+            let path_str = core::str::from_utf8(path.as_bytes()).unwrap_or("");
+            let p = std::path::Path::new(path_str);
+            if ohos_sign::has_codesign(&std::fs::read(p).unwrap_or_default()) {
+                return;
+            }
+            let _ = ohos_sign::sign_selfsign_inplace(p);
+        }
+        ensure_signed(filename);
         // SAFETY: filename is NUL-terminated.
         let p = unsafe { libc::dlopen(filename.as_ptr(), flags) };
         if p.is_null() { None } else { Some(p) }

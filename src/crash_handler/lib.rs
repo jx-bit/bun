@@ -1675,6 +1675,26 @@ mod draft {
         );
     }
 
+    #[cfg(target_env = "ohos")]
+    extern "C" fn handle_sigsys_posix(_sig: c_int, _info: *mut libc::siginfo_t, ctx: *mut c_void) {
+        // OHOS seccomp blocked a syscall. Skip the SVC instruction and
+        // return -ENOSYS so the caller sees a recoverable error instead of
+        // being killed with SIGSYS. This mirrors what Android's bionic libc
+        // does internally.
+        const ENOSYS: i64 = 38;
+        let uc = ctx as *mut libc::ucontext_t;
+        unsafe {
+            // Advance PC past the SVC #0 instruction (4 bytes on aarch64)
+            // so execution continues after the blocked syscall.
+            let pc = &raw mut (*uc).uc_mcontext.pc;
+            *pc = (*pc).wrapping_add(4);
+            // Set x0 (return register) to -ENOSYS so callers see ENOSYS
+            // and can fall back to alternative implementations.
+            let regs = &raw mut (*uc).uc_mcontext.regs;
+            (*regs)[0] = (-ENOSYS) as libc::c_ulong;
+        }
+    }
+
     #[cfg(unix)]
     static DID_REGISTER_SIGALTSTACK: AtomicBool = AtomicBool::new(false);
     /// 512K alternate signal stack. The kernel writes here during signal delivery;
@@ -1714,6 +1734,14 @@ mod draft {
             libc::sigaction(libc::SIGILL, act_ptr, core::ptr::null_mut());
             libc::sigaction(libc::SIGBUS, act_ptr, core::ptr::null_mut());
             libc::sigaction(libc::SIGFPE, act_ptr, core::ptr::null_mut());
+            #[cfg(target_env = "ohos")]
+            {
+                let mut sigsys: libc::sigaction = bun_core::ffi::zeroed();
+                sigsys.sa_sigaction = handle_sigsys_posix as *const () as usize;
+                sigsys.sa_flags = libc::SA_SIGINFO;
+                let _ = libc::sigemptyset(&raw mut sigsys.sa_mask);
+                libc::sigaction(libc::SIGSYS, &raw const sigsys, core::ptr::null_mut());
+            }
         }
         Ok(())
     }

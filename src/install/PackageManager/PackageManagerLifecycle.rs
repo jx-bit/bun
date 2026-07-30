@@ -413,6 +413,30 @@ impl PackageManager {
         path.append(original_path.as_slice())?;
         script_env.put(b"PATH", path.slice())?;
 
+        #[cfg(target_env = "ohos")]
+        {
+            // node-gyp/make find C++ via $CC/$CXX. OHOS SDK clang (LLVM 15) lacks
+            // C++20 <source_location>; route to a newer clang via $OHOS_CC/$OHOS_CXX
+            // + $OHOS_SYSROOT. OHOS_CC unconditionally OVERRIDES any pre-existing CC
+            // (the install env defaults CC="clang", which lacks source_location).
+            if let Ok(cc) = std::env::var("OHOS_CC") {
+                let _ = script_env.put(b"CC", cc.as_bytes());
+            } else if script_env.get(b"CC").unwrap_or(b"").is_empty() {
+                let _ = script_env.put(b"CC", b"clang");
+            }
+            if let Ok(cxx) = std::env::var("OHOS_CXX") {
+                let _ = script_env.put(b"CXX", cxx.as_bytes());
+            } else if script_env.get(b"CXX").unwrap_or(b"").is_empty() {
+                let _ = script_env.put(b"CXX", b"clang++");
+            }
+            if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
+                let flag = format!("--sysroot={}", sysroot);
+                let _ = script_env.put(b"CFLAGS", flag.as_bytes());
+                let _ = script_env.put(b"CXXFLAGS", flag.as_bytes());
+                let _ = script_env.put(b"LDFLAGS", flag.as_bytes());
+            }
+        }
+
         // Ownership transfers to `LifecycleScriptSubprocess`, which
         // re-uses it across every `spawn_next_script` in the chain. Move the
         // owning `NullDelimitedEnvMap` by value so its `K=V\0` buffers outlive

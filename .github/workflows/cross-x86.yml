@@ -1,0 +1,211 @@
+# Cross-compile Bun for windows-x64 on an aarch64 Linux host (no image, no
+# bake). Spike / pilot — runs alongside build-x86.yml's native windows-x64
+# leg; green + verified it can replace that leg later. linux-x64 cross will
+# join this matrix in a follow-up (it needs the upstream config.ts linux-gnu
+# cross block cherry-picked first, see ohos-cross-compile-linux-win.md §3.1).
+#
+# Host: ubuntu-24.04-arm (aarch64, pinned — not *-latest).
+# Target: x86_64-pc-windows-msvc.
+# Toolchain: installed fresh each run (no container image). This is slower
+# than a baked image but proves the pipeline end-to-end with no image-
+# maintenance overhead.
+#   - LLVM 21 from apt.llvm.org (arm64 packages exist for noble) provides
+#     clang-cl / lld-link / llvm-lib / llvm-rc / llvm-objdump. tools.ts
+#     picks these by TARGET os (windows) regardless of host.
+#   - Rust nightly-2026-07-20 (matches rust-toolchain.toml) + the
+#     x86_64-pc-windows-msvc target + rust-src (for -Zbuild-std on Tier 3
+#     edge cases — harmless if unused).
+#   - xwin sysroot: fetched on demand at configure time by
+#     winsysroot.ts::ensureWindowsSysroot() into cacheDir/winsysroot. xwin
+#     0.9.0 ships an aarch64-unknown-linux-musl binary, so it runs natively
+#     on the aarch64 host. SDK/CRT versions are pinned in winsysroot.ts
+#     (10.0.26100 / 14.44.17.14) — do NOT override here.
+#
+# Zero source changes expected: config.ts 1038-1076 + winsysroot.ts +
+# rust.ts 699-700/871 + flags.ts 113/1015 + tools.ts msvcTarget branch are
+# all in place on ohos-aarch64 already (see
+# ohos-cross-compile-linux-win.md §4 / appendix B).
+#
+# ThinLTO stays OFF (default): config.ts ltoDefault excludes windows cross
+# (LLVM ThinLTO miscompile on x86-64 JSC). Do not add --lto=on.
+
+name: Cross-compile Bun (aarch64 host -> windows-x64)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cross-x86-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: nightly-2026-07-20
+  # Pin CC/CXX so configure picks the freshly-installed clang-21 over
+  # whatever older clang the runner image ships. Note: these are the HOST
+  # compiler for build-time codegen tools; the target compiler is clang-cl,
+  # selected by tools.ts based on target os=windows, NOT by CC.
+  CC: clang
+  CXX: clang++
+
+jobs:
+  build:
+    name: cross ${{ matrix.label }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows
+            arch: x64
+            exe: bun.exe
+            build-dir: build/cross-windows-x64
+
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      # ── Host toolchain: LLVM 21 + build tools ──────────────────────────
+      # ubuntu-24.04-arm ships an older clang; tools.ts enforces
+      # LLVM_VERSION_RANGE ">=21.1.0 <23.0.0", so install LLVM 21 from
+      # apt.llvm.org (arm64 noble packages confirmed). `all` pulls clang-cl,
+      # lld-link, llvm-lib, llvm-rc, llvm-objdump as part of clang-21/lld-21.
+      - name: Install LLVM 21 + build tools
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build cmake build-essential git curl wget gnupg lsb-release \
+            libxml2-dev nasm pkg-config file binutils
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 || { echo "llvm.sh failed"; exit 1; }
+          # Surface the -21 binaries as the unversioned names tools.ts's
+          # findLlvmTool() looks for (it searches PATH for "clang", "clang-cl",
+          # "lld-link", "llvm-lib", "llvm-rc", "llvm-objdump", ...). The
+          # clang-21 deb ships clang-cl-21; symlink the MSVC drivers too.
+          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip \
+                   llvm-objcopy llvm-objdump llvm-readelf clang-cl lld-link \
+                   llvm-lib llvm-rc llvm-mt; do
+            sudo ln -sf "/usr/bin/$t-21" "/usr/bin/$t"
+          done
+          sudo ln -sf /usr/bin/clang-21 /usr/bin/cc
+          sudo ln -sf /usr/bin/clang++-21 /usr/bin/c++
+          echo "=== versions ==="
+          clang --version | head -1
+          clang-cl --version 2>&1 | head -1 || true
+          lld-link --version 2>&1 | head -1 || true
+          cmake --version | head -1
+          ninja --version
+
+      # ── Rust ───────────────────────────────────────────────────────────
+      # rust-toolchain.toml pins nightly-2026-07-20. Install with the
+      # windows-msvc target + rust-src (rust.ts rustCanCrossFromLinux
+      # returns true for windows when a winsysroot is present).
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+          components: rust-src
+
+      - name: Print rustc / cargo
+        run: |
+          rustc --version
+          cargo --version
+          rustc --print sysroot
+          rustup target list --installed
+
+      # ── Bun (codegen runtime) ──────────────────────────────────────────
+      # configure.ts findBun() needs bun for `bun install` + codegen. The
+      # repo's setup-bun action pulls a released linux-aarch64 bun (host
+      # arch). The windows setup-bun path bug (build-x86.yml) does NOT
+      # trigger — we're on a linux host.
+      - name: Setup Bun (codegen)
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: bun install (root)
+        run: |
+          bun --version
+          bun install --frozen-lockfile 2>&1 | tail -20 || bun install 2>&1 | tail -20
+
+      - name: bun install (src/node-fallbacks)
+        run: |
+          cd src/node-fallbacks
+          bun install --frozen-lockfile 2>&1 | tail -20 || bun install 2>&1 | tail -20
+
+      # ── Configure + build ──────────────────────────────────────────────
+      # Explicit --os/--arch: host is always aarch64, target must NOT be
+      # inferred from host. --webkit=prebuilt is mandatory for windows cross
+      # (config.ts 1069 rejects --webkit=local). LTO stays default (off).
+      # winsysroot.ts::ensureWindowsSysroot() runs during configure and
+      # splats xwin into cacheDir/winsysroot on first run (~10-15min).
+      - name: Configure + build Bun
+        run: |
+          set -eo pipefail
+          echo "=== toolchain ==="
+          clang --version | head -1
+          echo "=== build:release (windows-x64 cross, webkit=prebuilt) ==="
+          bun scripts/build.ts \
+            --profile=release \
+            --os=${{ matrix.os }} \
+            --arch=${{ matrix.arch }} \
+            --webkit=prebuilt \
+            --build-dir=${{ matrix.build-dir }} 2>&1 | tee build.log; rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "=== build failed (rc=$rc) — first errors ==="
+            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot" build.log | head -50 || true
+            echo "=== last 80 lines ==="
+            tail -80 build.log || true
+            exit 1
+          fi
+          echo "=== build OK ==="
+
+      # ── Verify binary ──────────────────────────────────────────────────
+      - name: Verify binary
+        run: |
+          set -e
+          OUT="${{ matrix.build-dir }}/${{ matrix.exe }}"
+          # Fallback: some profiles name the output bun-profile(.exe).
+          [ -f "$OUT" ] || OUT="${{ matrix.build-dir }}/bun-profile.exe"
+          [ -f "$OUT" ] || { echo "ERROR: binary not found at $OUT"; ls -la "${{ matrix.build-dir }}"; exit 1; }
+          echo "=== binary ==="
+          ls -lh "$OUT"
+          file "$OUT" || true
+          file "$OUT" | grep -iqE "PE32|MS-DOS|Windows" || { echo "ERROR: not a Windows PE"; exit 1; }
+          echo "=== PE arch (llvm-objdump) ==="
+          llvm-objdump -f "$OUT" | grep -iE "architecture|file format" || true
+          echo "=== validation OK ==="
+
+      - name: Dump failure diagnostics
+        if: failure()
+        run: |
+          echo "=== build dir ==="; ls -la "${{ matrix.build-dir }}" 2>&1 | head -30 || true
+          echo "=== first 80 error lines from build.log ==="
+          grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot" build.log 2>/dev/null | head -80 || true
+          echo "=== last 150 lines of build.log ==="
+          tail -150 build.log 2>/dev/null || true
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-cross-${{ matrix.label }}
+          path: ${{ matrix.build-dir }}/${{ matrix.exe }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.label }}
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
