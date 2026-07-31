@@ -98,7 +98,7 @@ struct DatabaseSyncOpenConfiguration {
 class JSDatabaseSync final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags;
 
     DECLARE_INFO;
@@ -327,7 +327,7 @@ private:
 class JSStatementSync final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags;
 
     DECLARE_INFO;
@@ -531,7 +531,7 @@ private:
 class JSStatementSyncIterator final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags;
 
     DECLARE_INFO;
@@ -615,7 +615,7 @@ private:
 class JSNodeSqliteSession final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags;
 
     DECLARE_INFO;
@@ -734,7 +734,7 @@ private:
 class JSNodeSqliteLimits final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags | JSC::OverridesGetOwnPropertySlot | JSC::OverridesPut | JSC::OverridesGetOwnPropertyNames | JSC::ProhibitsPropertyCaching;
 
     DECLARE_INFO;
@@ -784,7 +784,7 @@ private:
 class JSNodeSqliteTagStore final : public JSC::JSDestructibleObject {
 public:
     using Base = JSC::JSDestructibleObject;
-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
+    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
     static constexpr unsigned StructureFlags = Base::StructureFlags;
 
     DECLARE_INFO;
