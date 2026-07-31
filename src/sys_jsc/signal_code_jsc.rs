@@ -31,9 +31,14 @@ pub fn from_js(arg: JSValue, global_this: &JSGlobalObject) -> JsResult<SignalCod
         // SignalCode is non-exhaustive over `u8`, so construct via the public
         // ctor instead of a transmute.
         return Ok(SignalCode(sig64 as u8));
-    } else if arg.is_string() {
-        // SAFETY: `is_string()` ⇒ `as_string()` returns a non-null JSString cell;
-        // borrowed for `.length()` only.
+    } else if (cfg!(target_env = "ohos") && arg.is_string())
+        || (!cfg!(target_env = "ohos") && arg.is_string_literal())
+    {
+        // SAFETY: on OHOS the WebKit fork exposes `is_string()` as the string
+        // predicate; elsewhere `is_string_literal()` is the documented contract
+        // for `as_string()` (see JSValue.rs: `debug_assert!(is_string_literal())`).
+        // Either ⇒ `as_string()` returns a non-null JSString cell; borrowed for
+        // `.length()` only.
         if unsafe { &*arg.as_string() }.length() == 0 {
             return Ok(SignalCode::DEFAULT);
         }

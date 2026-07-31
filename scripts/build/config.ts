@@ -96,6 +96,13 @@ export interface Config {
    * quoteArgs(), tool executable suffixes. See Host type docs.
    */
   host: Host;
+  /**
+   * True when the linked binary can execute on this host (same os+arch, and on
+   * linux same abi). Distinct from `crossTarget === undefined`: a native-arch
+   * linux-gnu build still passes --target/--sysroot for glibc pinning but the
+   * output runs fine here.
+   */
+  canRunOnHost: boolean;
 
   // ─── Platform file conventions ───
   // Centralized so a new target (or a forgotten .exe) is one edit away.
@@ -779,8 +786,10 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const assertions = partial.assertions ?? (debug || asan);
 
   // Resolved early because the LTO defaults below need it (the windows
-  // -baseline WebKit prebuilt has no -lto variant).
-  const baseline = partial.baseline ?? false;
+  // -baseline WebKit prebuilt has no -lto variant). Defaults to `x64` so
+  // x64 builds pick the Nehalem baseline (pre-2013 CPUs) unless overridden;
+  // other arches (aarch64/ohos) default to false.
+  const baseline = partial.baseline ?? x64;
 
   // LTO: default on for CI release non-asan non-assertions builds on Linux
   // and on darwin cross-compiles. Windows is NOT in the default even though
@@ -1166,6 +1175,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     x64,
     arm64,
     host,
+    canRunOnHost: os === host.os && arch === host.arch && (!linux || abi === (detectLinuxAbi() ?? abi)),
     exeSuffix,
     objSuffix,
     libPrefix,
