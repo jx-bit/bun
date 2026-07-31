@@ -34,7 +34,8 @@ name: OHOS Build (GitHub-hosted)
 on:
   push:
     branches:
-      - claude/ohos-github-ci
+      - ohos-aarch64          # main OHOS integration branch — every push verifies the github-hosted build
+      - claude/ohos-*         # keep iteration branches triggering for dev cycles
   workflow_dispatch:
 
 concurrency:
@@ -45,9 +46,11 @@ env:
   # Public anonymous-pull container image (sync-ci-image.yml in
   # social4hyq/homebrew-core mirrors it from Huawei SWR to GHCR on the same
   # Azure backbone as the runners; package is set public so no docker login
-  # is needed). Pin to a dated tag — `:latest` is not published/refreshed;
-  # social4hyq pins via the OHOS_CI_IMAGE repo variable (last sync 2026-07-28).
-  IMAGE: ghcr.io/social4hyq/ci-runner:2026-07-28
+  # is needed). Pinned to an immutable digest resolved from the :2026-07-28
+  # tag — social4hyq refreshes the tag via sync-ci-image.yml, which would
+  # silently roll our build environment. Bump manually after validating a
+  # new social4hyq sync. (Last tag: 2026-07-28.)
+  IMAGE: ghcr.io/social4hyq/ci-runner@sha256:46cea9b718608544f31c571604b5b78277d6dab69cdd17017eeac6f3e09ed6de
   CONTAINER: ohos
   WORK_IN_CONTAINER: /work
   # Rust nightly OHOS host toolchain — matches rust-toolchain.toml channel.
