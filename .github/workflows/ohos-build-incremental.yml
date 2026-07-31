@@ -11,18 +11,18 @@
 #   - Only reconfigure when build scripts change
 #   - WebKit build cached separately (only rebuilds on version change)
 #
-# Trigger: manual (workflow_dispatch) or push to ohos-aarch64
+# Trigger: manual only (workflow_dispatch). This workflow requires the
+# self-hosted OHOS runner with a pre-populated toolchain (OHOS SDK, llvm-22,
+# cross-libs at /home/user/..., ccache, /mnt/linux_share). On pushes to
+# ohos-aarch64 it kept firing on a runner without that toolchain and failing
+# within ~1min (docker/clang not found) — pure noise. The github-hosted
+# `ohos-build-github.yml` now verifies every push to ohos-aarch64; this
+# workflow stays available for manual ccache-accelerated incremental runs
+# when the self-hosted OHOS runner is known to be healthy.
 
 name: OHOS Build (incremental)
 
 on:
-  push:
-    branches:
-      - ohos-aarch64
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'test/**'
   workflow_dispatch:
 
 concurrency:
