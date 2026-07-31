@@ -1,7 +1,7 @@
 # Standard x86_64 / arm64 Bun builds on GitHub-hosted runners (no OHOS, no
 # Buildkite). This is the non-OHOS leg of the "unified CI matrix":
-#   linux-x64   -> ubuntu-latest        (x86_64 GNU)
-#   windows-x64 -> windows-latest       (x86_64 MSVC, native)
+#   linux-x64   -> ubuntu-24.04         (x86_64 GNU)
+#   windows-x64 -> windows-2025         (x86_64 MSVC, native)
 #   linux-arm64 -> ubuntu-24.04-arm     (aarch64 GNU, optional 4th leg)
 #
 # The OHOS aarch64 build lives in ohos-build-github.yml and is NOT touched
@@ -11,7 +11,7 @@
 #
 # Build strategy: `--profile=release` (webkit=prebuilt, lto=false, native
 # host target). The release profile resolves target os/arch from the host,
-# so on ubuntu-latest it produces a linux-x64 `bun` ELF and on windows-latest
+# so on ubuntu-24.04 it produces a linux-x64 `bun` ELF and on windows-2025
 # a windows-x64 `bun.exe` PE. WebKit is fetched as a prebuilt tarball from
 # oven-sh/WebKit GitHub releases (scripts/build/deps/webkit.ts prebuiltUrl),
 # so we never compile WebKit from source — keeps the run under ~20min.
@@ -48,11 +48,11 @@ jobs:
       matrix:
         include:
           - label: linux-x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             exe: bun
             build-dir: build/release-x86-linux-x64
           - label: windows-x64
-            runner: windows-latest
+            runner: windows-2025
             exe: bun.exe
             build-dir: build/release-x86-windows-x64
           - label: linux-arm64
@@ -93,7 +93,7 @@ jobs:
           ninja --version
 
       # ── Windows toolchain ──────────────────────────────────────────────
-      # windows-latest ships VS 2022 (build.ts finds it via vs-shell.ps1),
+      # windows-2025 ships VS 2022 (build.ts finds it via vs-shell.ps1),
       # cmake, ninja, and Strawberry perl. LLVM is preinstalled on the image
       # but its version drifts below the 21.1 floor tools.ts enforces, so
       # install the latest chocolatey LLVM (22.1.7 at writing — within the
