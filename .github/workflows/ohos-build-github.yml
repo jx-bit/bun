@@ -15,12 +15,15 @@
 # bun on github-hosted CI daily; this workflow points the same toolchain at
 # ljy9812/bun's own source instead of social4hyq/ohos-bun.
 #
-# WebKit: `--webkit=prebuilt` — pour the `bun-webkit` bottle (social4hyq/core)
-# which ships prebuilt libJavaScriptCore.a / libWTF.a / libbmalloc.a + headers
-# for OHOS aarch64. This skips the WebKit from-source compile (which failed at
-# iter 28, step 812/3080). social4hyq's bun.rb formula uses the same path.
-# `OHOS_WEBKIT_ROOT=$(brew --prefix bun-webkit)` tells bun's webkit.ts where
-# to find the archives; the build symlinks them into its cache dir.
+# WebKit: `--webkit=local` — clone `springmin/WebKit` at a pinned commit
+# (WEBKIT_REF, matching WEBKIT_VERSION in scripts/build/deps/webkit.ts) and
+# compile JSC/WTF/bmalloc from source. This decouples us from the
+# social4hyq/core/bun-webkit bottle, whose version drift (social4hyq bumped to
+# 34c01d1339 while bun's webkit.ts pins c9296e353e) broke compilation — the
+# bottle's new JSModuleRecord API doesn't match bun's C++ bindings. The
+# from-source build is cached via actions/cache (keyed on WEBKIT_REF +
+# webkit.ts hash) so only the first run on a ref pays the ~20-40min cost.
+# Mirrors the pattern already green on self-hosted ohos-build-rust.yml.
 #
 # KEY DESIGN: per-command `docker exec` (mirrors social4hyq's setup-container.sh
 # + build.sh / lib.sh `cexec` helper). Every brew/bun command runs in its own
@@ -36,7 +39,14 @@ on:
     branches:
       - ohos-aarch64          # main OHOS integration branch — every push verifies the github-hosted build
       - claude/ohos-*         # keep iteration branches triggering for dev cycles
+      - claude/land-github-webkit-local  # this decoupling branch
   workflow_dispatch:
+    inputs:
+      webkit_ref:
+        description: 'WebKit fork commit to build against (defaults to the pinned WEBKIT_REF)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: ohos-build-github-${{ github.ref }}
@@ -59,7 +69,17 @@ env:
   RUST_DATE: "2026-07-20"
   RUST_VER: "nightly-2026-07-20"
   WEBKIT_FORK: springmin/WebKit
-  WEBKIT_REF: ohos-aarch64
+  # Pinned to c9296e353e365ecf — the WEBKIT_VERSION pin in
+  # scripts/build/deps/webkit.ts. Floating the ohos-aarch64 branch of
+  # springmin/WebKit is unsafe: it moved to 8172ab945d8e (oven-sh main merge)
+  # which removed JSModuleRecord declaredVariables/lexicalVariables and changed
+  # create() signature; bun's BunAnalyzeTranspiledModule.cpp still uses the old
+  # API. Must match webkit.ts exactly or the C++ compile breaks. Override via
+  # workflow_dispatch.webkit_ref for testing.
+  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
+  # WebKit JSC compile is memory-heavy per file; -j2 matches the self-hosted
+  # runner setting and avoids OOM on the 16GB ubuntu-24.04-arm runner.
+  NINJA_JOBS: 2
   # Homebrew env kept identical to social4hyq's lib.sh BREW_ENV.
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
 
@@ -133,7 +153,7 @@ jobs:
           # for clang+lld alone, observed iter 20).
           # Retry once after 90s: atomgit CDN has transient 404s (social4hyq build.sh).
           for i in 1 2; do
-            if docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && '"$BREW_ENV"' brew install --force-bottle --verbose ohos-sdk llvm@21 social4hyq/core/icu4c@78 social4hyq/core/bun-webkit bun-bootstrap cmake ninja gperf perl python ruby openssl@3 libxml2 zlib' 2>&1 | tee install.log; then
+            if docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && '"$BREW_ENV"' brew install --force-bottle --verbose ohos-sdk llvm@21 social4hyq/core/icu4c@78 bun-bootstrap cmake ninja gperf perl python ruby openssl@3 libxml2 zlib' 2>&1 | tee install.log; then
               break
             fi
             [ "$i" = "2" ] && { echo "ERROR: brew install failed twice"; exit 1; }
@@ -141,9 +161,7 @@ jobs:
             sleep 90
           done
           # Verify kegs landed (brew --prefix lies for uninstalled formulae).
-          docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && for f in ohos-sdk llvm@21 icu4c@78 bun-webkit bun-bootstrap; do p=$(brew --prefix "$f"); test -d "$p" || { echo "ERROR: $f not installed at $p"; exit 1; }; echo "OK $f -> $p"; done'
-          # bun-webkit must ship the three static archives webkit.ts symlinks.
-          docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && WK=$(brew --prefix bun-webkit); for a in libJavaScriptCore.a libWTF.a libbmalloc.a; do test -f "$WK/lib/$a" || { echo "ERROR: $WK/lib/$a missing"; exit 1; }; done; echo "bun-webkit archives OK at $WK"'
+          docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && for f in ohos-sdk llvm@21 icu4c@78 bun-bootstrap; do p=$(brew --prefix "$f"); test -d "$p" || { echo "ERROR: $f not installed at $p"; exit 1; }; echo "OK $f -> $p"; done'
 
       - name: Install Rust nightly OHOS host toolchain
         run: |
@@ -186,10 +204,58 @@ jobs:
             "$RUST_HOME/bin/cargo" --version
           '
 
-      # WebKit source checkout is skipped: --webkit=prebuilt uses the bun-webkit
-      # bottle archives (libJavaScriptCore.a / libWTF.a / libbmalloc.a) instead
-      # of compiling vendor/WebKit from source. Saves ~15min clone + the WebKit
-      # ninja build that failed at iter 28.
+      # WebKit source: clone springmin/WebKit at the pinned WEBKIT_REF. The
+      # shallow fetch of a single commit keeps the download small (vs a
+      # default-branch clone). GitHub supports fetching by SHA for public repos,
+      # so this works without a branch/tag ref. Done on the host (git is on the
+      # ubuntu runner); the container sees it at /work/vendor/WebKit via the
+      # volume mount.
+      - name: Checkout WebKit fork (pinned)
+        run: |
+          WK_REF="${{ inputs.webkit_ref || env.WEBKIT_REF }}"
+          echo "WebKit ref: $WK_REF"
+          rm -rf vendor/WebKit
+          mkdir -p vendor/WebKit
+          cd vendor/WebKit
+          git init
+          git remote add origin https://github.com/${{ env.WEBKIT_FORK }}.git
+          git fetch --depth 1 origin "$WK_REF"
+          git checkout FETCH_HEAD
+          echo "=== vendor/WebKit HEAD ==="
+          git rev-parse HEAD
+          git log -1 --oneline
+
+      - name: WebKit version sync check
+        run: |
+          WK_HASH=$(grep "^export const WEBKIT_VERSION" scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
+          echo "scripts/build/deps/webkit.ts pins: $WK_HASH"
+          if git -C vendor/WebKit cat-file -e "${WK_HASH}" 2>/dev/null; then
+            echo "✅ vendor/WebKit contains ${WK_HASH}"
+          else
+            echo "⚠️  vendor/WebKit missing ${WK_HASH} — fetching from upstream oven-sh/WebKit"
+            cd vendor/WebKit
+            git remote add upstream https://github.com/oven-sh/WebKit.git 2>/dev/null || true
+            git fetch upstream main --depth=200 2>/dev/null || echo "⚠️  upstream fetch failed (network)"
+            if git cat-file -e "${WK_HASH}" 2>/dev/null; then
+              echo "⚠️  commit ${WK_HASH} found upstream but not in fork pin — build may fail if bun needs it"
+            else
+              echo "⚠️  cannot verify ${WK_HASH}; continuing (fork pin should be sufficient)"
+            fi
+          fi
+
+      - name: Extract WebKit version for cache key
+        id: webkit-version
+        run: |
+          WK_VER=$(grep "^export const WEBKIT_VERSION" scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
+          echo "version=${WK_VER}" >> "$GITHUB_OUTPUT"
+          echo "Cache key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${WK_VER}"
+
+      - name: Cache WebKit build
+        uses: actions/cache@v4
+        id: webkit-cache
+        with:
+          path: build/release-ohos/deps/WebKit
+          key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}
 
       - name: Scaffold OHOS cross-libs + ICU
         run: |
@@ -298,11 +364,6 @@ jobs:
             export RUSTUP_TOOLCHAIN="'"$RUST_VER"'"
             export OHOS_SDK_ROOT="$SDK"
             export OHOS_SYSROOT="$SYSROOT"
-            # bun-webkit bottle provides libJavaScriptCore.a / libWTF.a /
-            # libbmalloc.a + headers. webkit.ts (cfg.ohos + prebuilt) symlinks
-            # these into the cache dir, skipping the WebKit from-source build.
-            export OHOS_WEBKIT_ROOT="$(brew --prefix bun-webkit)"
-            test -d "$OHOS_WEBKIT_ROOT/lib" || { echo "ERROR: bun-webkit not at $OHOS_WEBKIT_ROOT"; exit 1; }
             export LD_LIBRARY_PATH="/tmp/rust-libs:$(brew --prefix openssl@3)/lib:$(brew --prefix libxml2)/lib:$(brew --prefix zlib)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             export TMPDIR=/data/storage/el2/base/tmp
             # cargo needs SSL certs to download crates from crates.io.
@@ -324,15 +385,44 @@ jobs:
             clang --version | head -1
             "$BUN_BIN" --version
 
-            echo "=== build:release --os=ohos (webkit=prebuilt) ==="
+            # Split build: configure -> configure-WebKit -> patch -lpthreads ->
+            # build. The patch must run AFTER cmake generates deps/WebKit/build.ninja
+            # (via configure-WebKit) but BEFORE ninja links jsc. The one-step
+            # scripts/build.ts cannot insert a patch mid-build, so we split.
+            # Mirrors self-hosted ohos-build-rust.yml patch #2.
+            echo "=== configure (webkit=local, --configure-only) ==="
             "$BUN_BIN" scripts/build.ts \
               --profile=release \
               --os=ohos \
               --arch=aarch64 \
-              --webkit=prebuilt \
+              --webkit=local \
               --build-dir=build/release-ohos \
               --ohos-sdk-root="$SDK" \
-              --ohos-sysroot="$SYSROOT" 2>&1 | tee /tmp/build.log; rc=$?; if [ "$rc" -ne 0 ]; then
+              --ohos-sysroot="$SYSROOT" \
+              --configure-only 2>&1 | tee /tmp/build.log
+
+            echo "=== configure-WebKit (cmake generates deps/WebKit/build.ninja) ==="
+            ninja -C build/release-ohos configure-WebKit -j1 2>&1 | tee -a /tmp/build.log
+
+            # WebKit CMake FindThreads emits -lpthreads (plural) which does not
+            # exist; the lib is -lpthread (singular). webkit.ts sets
+            # CMAKE_THREAD_LIBS_INIT="-lpthread" but FindThreads ignores it
+            # (cmake warning: CMAKE_HAVE_THREADS_LIBRARY unused). Patch the
+            # generated build.ninja directly, same as self-hosted does.
+            echo "=== patch -lpthreads -> -lpthread in deps/WebKit/build.ninja ==="
+            if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
+              sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
+              echo "patched, $(grep -c -- -lpthread build/release-ohos/deps/WebKit/build.ninja) -lpthread occurrences now"
+            else
+              echo "WARNING: deps/WebKit/build.ninja not found, -lpthreads patch skipped"
+            fi
+
+            echo "=== build (ninja bun, -j${{ env.NINJA_JOBS }}) ==="
+            set +e
+            ninja -C build/release-ohos bun -j${{ env.NINJA_JOBS }} 2>&1 | tee -a /tmp/build.log
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
                 echo "=== build failed (rc=$rc) — first errors ==="
                 grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|thread.*panic|could not|not found|missing" /tmp/build.log | head -50
                 echo "=== context around first FAILED ==="
@@ -369,12 +459,58 @@ jobs:
           docker exec "$CONTAINER" bash -lc '
             cd "'"$WORK_IN_CONTAINER"'" || true
             echo "=== build dir ==="; ls -la build/release-ohos/ 2>&1 | head -30
-            echo "=== first 80 error lines from build.log ==="
-            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|could not|not found|missing" /tmp/build.log 2>/dev/null | head -80
-            echo "=== last 100 lines of build.log ==="
-            tail -100 /tmp/build.log 2>/dev/null || true
-            echo "=== ninja build dir logs ==="; find build/release-ohos -name "*.log" -exec tail -20 {} \; 2>/dev/null | tail -80
+            echo "=== context around first FAILED (50 before, 15 after) ==="
+            line=$(grep -n "FAILED:" /tmp/build.log 2>/dev/null | head -1 | cut -d: -f1)
+            if [ -n "$line" ]; then
+              echo "FAILED at line $line"
+              sed -n "$((line-50)),$((line+15))p" /tmp/build.log 2>/dev/null
+            else
+              echo "no FAILED line found in build.log"
+            fi
+            echo "=== non-Generating WebKit lines (compile/error steps) ==="
+            grep "\[WebKit\]" /tmp/build.log 2>/dev/null | grep -v "Generating \.\." | grep -v "Performing Test\|Looking for\|Platform-specific\|^Build Bun" | tail -50
+            echo "=== signal/OOM/crash lines ==="
+            grep -iE "Killed|Signal|Segmentation|Cannot|Unable|No such file|Permission denied|core dumped|SIGKILL|Out of memory|fatal:|aborted" /tmp/build.log 2>/dev/null | head -30
+            echo "=== last 200 lines of build.log ==="
+            tail -200 /tmp/build.log 2>/dev/null || true
+            echo "=== WebKit inner .ninja_log (last 30) ==="
+            tail -30 build/release-ohos/deps/WebKit/.ninja_log 2>/dev/null || echo "(no .ninja_log)"
           ' || true
+
+      # stream.ts writes to FD 3 (sideband) which can lose buffered output on
+      # failure — the WebKit compile error is invisible in build.log. Re-run
+      # the inner WebKit ninja DIRECTLY (bypassing stream.ts) so the compiler
+      # error goes to the step's stdout/stderr, captured by GitHub Actions.
+      # -j1 for sequential, readable output. The cache restores partial build
+      # state; ninja resumes at the failed step and reproduces the error.
+      - name: Re-run WebKit build to capture error
+        if: failure()
+        run: |
+          docker exec "$CONTAINER" bash -lc '
+            set +e
+            . /etc/profile.d/brew.sh
+            cd "'"$WORK_IN_CONTAINER"'"
+            RUST_HOME=/data/storage/el2/base/tmp/rust-'"$RUST_VER"'
+            LLVM=$(brew --prefix llvm@21)
+            SDK=$(brew --prefix ohos-sdk)
+            SYSROOT="$SDK/native/sysroot"
+            BOOT=$(brew --prefix bun-bootstrap)
+            export PATH="$RUST_HOME/bin:$LLVM/bin:$BOOT/bin:$PWD/.bin:$PATH"
+            export CC="$LLVM/bin/clang"
+            export CXX="$LLVM/bin/clang++"
+            export OHOS_SDK_ROOT="$SDK"
+            export OHOS_SYSROOT="$SYSROOT"
+            export LD_LIBRARY_PATH="/tmp/rust-libs:$(brew --prefix openssl@3)/lib:$(brew --prefix libxml2)/lib:$(brew --prefix zlib)/lib"
+            export TMPDIR=/data/storage/el2/base/tmp
+            export SSL_CERT_FILE="$(brew --prefix)/etc/ca-certificates/cert.pem"
+            export CURL_CA_BUNDLE="$SSL_CERT_FILE"
+            echo "=== re-running WebKit inner ninja directly (-j1, bypass stream.ts) ==="
+            ninja -C build/release-ohos/deps/WebKit jsc -j1 2>&1 | tail -120
+          ' || true
+
+      - name: Copy build.log out of container
+        if: failure()
+        run: docker cp "$CONTAINER":/tmp/build.log build.log || echo "::warning::could not copy build.log"
 
       - name: Upload build log
         if: failure()
@@ -383,5 +519,6 @@ jobs:
           name: ohos-build-log
           path: |
             install.log
+            build.log
           if-no-files-found: ignore
           retention-days: 7
