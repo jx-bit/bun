@@ -43,9 +43,9 @@ on:
   workflow_dispatch:
     inputs:
       webkit_ref:
-        description: 'WebKit fork branch/tag to build against'
+        description: 'WebKit fork branch/tag/commit to build against'
         required: false
-        default: 'ohos-aarch64'
+        default: 'c9296e353e365ecf0de82f273bb0a88a3df465be'
         type: string
 
 concurrency:
@@ -64,9 +64,13 @@ env:
   RUSTC_WRAPPER: ""
   # Build parallelism — 11GB RAM limit on self-hosted runner
   NINJA_JOBS: 2
-  # WebKit fork
+  # WebKit fork — pinned to c9296e353e (the WEBKIT_VERSION pin in
+  # scripts/build/deps/webkit.ts). Floating ohos-aarch64 branch moved to
+  # 8172ab945d8e (oven-sh main merge) which removed JSModuleRecord
+  # declaredVariables/lexicalVariables and changed create() signature;
+  # bun's BunAnalyzeTranspiledModule.cpp still uses the old API.
   WEBKIT_FORK: springmin/WebKit
-  WEBKIT_REF: ohos-aarch64
+  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
 
 jobs:
   build:
@@ -140,8 +144,10 @@ jobs:
             git fetch origin "$WK_REF" --depth=1 2>/dev/null || true
             # Must use FETCH_HEAD — local branch from the initial clone
             # still points to the old ref and `git checkout "$WK_REF"` would
-            # skip the just-fetched HEAD.
-            git checkout -f FETCH_HEAD
+            # skip the just-fetched HEAD. Fall back to checking out WK_REF
+            # directly when the fetch is silently skipped but the local
+            # reference already contains the commit (the pinned-sha case).
+            git checkout -f FETCH_HEAD 2>/dev/null || git checkout -f "$WK_REF"
             echo "✅ WebKit cloned from local reference"
           else
             git clone --depth 1 --branch "$WK_REF" \
@@ -274,11 +280,32 @@ jobs:
           print('✅ Patched Rust host linker to system clang++')
           " || echo "⚠️ Could not patch .cargo/config.toml"
           fi
-          # 4. 添加 RUSTUP 镜像 (中国网络环境加速)
+          # 4. RUSTUP 镜像: rsproxy.cn 首选 → tuna fallback → github 直连兜底
+          #    self-hosted runner 到 rsproxy 偶发不可达 (run 30622355212)
           if ! grep -q "RUSTUP_DIST_SERVER" build/release-ohos/build.ninja 2>/dev/null; then
-            sed -i 's|--env=CARGO_HOME=/home/user/.cargo|--env=CARGO_HOME=/home/user/.cargo --env=RUSTUP_DIST_SERVER=https://rsproxy.cn --env=RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup|g' \
+            RUST_DATE=$(grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' rust-toolchain.toml | head -1 | cut -d- -f2-)
+            RUSTUP_DIST_SERVER=""
+            RUSTUP_UPDATE_ROOT=""
+            for mirror in \
+              "https://rsproxy.cn|https://rsproxy.cn/rustup" \
+              "https://mirrors.tuna.tsinghua.edu.cn/rustup|https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup" \
+              "https://static.rust-lang.org|https://static.rust-lang.org/rustup"; do
+              dist_server=$(echo "$mirror" | cut -d'|' -f1)
+              if curl -sfI --max-time 6 "$dist_server/dist/$RUST_DATE/channel-rust-nightly.toml.sha256" -o /dev/null 2>&1; then
+                RUSTUP_DIST_SERVER="$dist_server"
+                RUSTUP_UPDATE_ROOT=$(echo "$mirror" | cut -d'|' -f2)
+                break
+              fi
+            done
+            if [ -z "$RUSTUP_DIST_SERVER" ]; then
+              echo "⚠️  No rustup mirror reachable, defaulting to rsproxy.cn"
+              RUSTUP_DIST_SERVER="https://rsproxy.cn"
+              RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+            fi
+            echo "✅ Selected RUSTUP mirror: $RUSTUP_DIST_SERVER"
+            sed -i "s|--env=CARGO_HOME=/home/user/.cargo|--env=CARGO_HOME=/home/user/.cargo --env=RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER --env=RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT|g" \
               build/release-ohos/build.ninja 2>/dev/null || true
-            echo "✅ Added RUSTUP mirror config"
+            echo "✅ Added RUSTUP mirror config ($RUSTUP_DIST_SERVER)"
           fi
 
       - name: Build WebKit
