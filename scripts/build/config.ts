@@ -380,6 +380,8 @@ export interface PartialConfig {
   freebsdSysroot?: string;
   /** FreeBSD release version (default: FREEBSD_VERSION_DEFAULT). Only used when os=freebsd. */
   freebsdVersion?: string;
+  /** Linux glibc sysroot (pinned old glibc/libstdc++). Only used when linux && abi=gnu. */
+  linuxSysroot?: string;
   /** OHOS sysroot path. Only used when os=ohos. */
   ohosSysroot?: string;
   /** OHOS SDK root. Auto-detected if not provided. */
@@ -580,6 +582,32 @@ export function detectFreebsdSysroot(arch: Arch): string | undefined {
     if (existsSync(join(p, "usr", "include", "sys", "param.h"))) return p;
   }
   return undefined;
+}
+
+/**
+ * Locate the linux-gnu sysroot: ubuntu:20.04 (glibc 2.31) + gcc-13 libstdc++,
+ * matching the WebKit prebuilt's build environment. Arch-specific. See
+ * install_linux_glibc_sysroot() in scripts/bootstrap.sh.
+ */
+export function detectLinuxGlibcSysroot(arch: Arch): string | undefined {
+  const looksValid = (p: string) => existsSync(join(p, "usr", "include", "c++", "13"));
+  const env = process.env.LINUX_GLIBC_SYSROOT;
+  if (env && looksValid(env)) return env;
+  const candidate = arch === "aarch64" ? "/opt/linux-sysroot-glibc-arm64" : "/opt/linux-sysroot-glibc";
+  return looksValid(candidate) ? candidate : undefined;
+}
+
+/**
+ * Locate a linux-musl sysroot — alpine rootfs with musl + modern libstdc++;
+ * see install_linux_musl_sysroot() in scripts/bootstrap.sh. Checks env var then
+ * well-known install paths. Arch-specific. Returns undefined if none found.
+ */
+export function detectLinuxMuslSysroot(arch: Arch): string | undefined {
+  const looksValid = (p: string) => existsSync(join(p, "usr", "lib", "libc.so"));
+  const env = process.env.LINUX_MUSL_SYSROOT;
+  if (env && looksValid(env)) return env;
+  const candidate = arch === "aarch64" ? "/opt/linux-sysroot-musl-arm64" : "/opt/linux-sysroot-musl";
+  return looksValid(candidate) ? candidate : undefined;
 }
 
 /**
@@ -1020,6 +1048,45 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     }
   }
 
+  // ─── Linux-gnu/musl sysroot + target ───
+  // Every CI linux-gnu build (native AND cross-arch) uses the ubuntu:20.04 +
+  // gcc-13 sysroot so the glibc verneed matches what the --wrap list covers
+  // and the libstdc++ ABI matches the WebKit prebuilt. musl uses an
+  // alpine-derived sysroot. Local dev without a sysroot builds native.
+  if (linux && abi !== "android" && crossTarget === undefined) {
+    const llvmArch = x64 ? "x86_64" : "aarch64";
+    const hostAbi = host.os === "linux" ? detectLinuxAbi() : undefined;
+    const isCross = arch !== host.arch || abi !== hostAbi;
+    if (abi === "musl") {
+      sysroot = detectLinuxMuslSysroot(arch);
+      if (sysroot !== undefined || isCross) {
+        crossTarget = `${llvmArch}-alpine-linux-musl`;
+        if (sysroot === undefined) {
+          const p = arch === "aarch64" ? "/opt/linux-sysroot-musl-arm64" : "/opt/linux-sysroot-musl";
+          throw new BuildError(`--os=linux --arch=${arch} --abi=musl requires a musl sysroot when cross-compiling`, {
+            hint: `Set LINUX_MUSL_SYSROOT or provision ${p} (see install_linux_musl_sysroot() in scripts/bootstrap.sh).`,
+          });
+        }
+      }
+    } else {
+      sysroot =
+        partial.linuxSysroot !== undefined
+          ? isAbsolute(partial.linuxSysroot)
+            ? partial.linuxSysroot
+            : resolve(cwd, partial.linuxSysroot)
+          : detectLinuxGlibcSysroot(arch);
+      if (sysroot !== undefined || isCross) {
+        crossTarget = `${llvmArch}-linux-gnu`;
+        if (sysroot === undefined) {
+          const p = arch === "aarch64" ? "/opt/linux-sysroot-glibc-arm64" : "/opt/linux-sysroot-glibc";
+          throw new BuildError(`--os=linux --arch=${arch} --abi=gnu cross-compile requires a glibc sysroot`, {
+            hint: `Set LINUX_GLIBC_SYSROOT or provision ${p} (see install_linux_glibc_sysroot() in scripts/bootstrap.sh).`,
+          });
+        }
+      }
+    }
+  }
+
   // ─── OHOS ───
   let ohosSysroot: string | undefined;
   let ohosSdkRoot: string | undefined;
@@ -1224,7 +1291,16 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     rustLld: toolchain.rustLld,
     rustLlvmVersion: toolchain.rustLlvmVersion,
     rustSysroot: toolchain.rustSysroot,
-    strip: ld64StripSwap?.strip ?? toolchain.strip,
+    // Cross strips: linux-gnu uses <triple>-strip (GNU, handles -R .eh_frame
+    // fully; host strip rejects foreign-arch ELF); other cross targets use
+    // llvm-strip.
+    strip:
+      ld64StripSwap?.strip ??
+      (crossTarget !== undefined
+        ? linux && abi === "gnu" && existsSync(`/usr/bin/${crossTarget}-strip`)
+          ? `/usr/bin/${crossTarget}-strip`
+          : (toolchain.llvmStrip ?? toolchain.strip)
+        : toolchain.strip),
     dsymutil: toolchain.dsymutil,
     bun: toolchain.bun,
     jsRuntime: toolchain.jsRuntime,

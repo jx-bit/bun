@@ -748,6 +748,16 @@ export const bunOnlyFlags: Flag[] = [
     desc: "Treat most warnings as errors; suppress known-noisy ones",
   },
   {
+    // Linux gnu cross-compile (e.g. aarch64 host -> x86_64-linux-gnu): with
+    // --target set, clang strictly checks -Wundefined-var-template even
+    // though the template static's definition lives in the WebKit prebuilt
+    // static lib (resolved at link time). Native linux-x64 (host==target)
+    // and clang-cl (windows cross) don't trip this. -Werror escalates it.
+    flag: "-Wno-undefined-var-template",
+    when: c => c.linux && c.abi === "gnu" && c.crossTarget !== undefined && c.arch !== c.host.arch,
+    desc: "Linux gnu cross: suppress -Wundefined-var-template (WebKit template statics resolved at link)",
+  },
+  {
     // Debug adds -Werror=unused; release omits it (vars used only in ASSERT)
     flag: ["-Werror=unused", "-Wno-unused-function"],
     when: c => c.unix && c.debug,
@@ -1234,6 +1244,11 @@ export const linkerFlags: Flag[] = [
   },
 
   // ─── Linux ───
+  {
+    flag: c => [`--target=${c.crossTarget!}`, `--sysroot=${c.sysroot!}`],
+    when: c => c.linux && c.abi !== "android" && c.crossTarget !== undefined && c.sysroot !== undefined,
+    desc: "linux sysroot link (gnu: ubuntu:20.04+gcc-13; musl: alpine)",
+  },
   {
     // Wrap glibc symbols whose default version on a modern build host is
     // > 2.17. Each __wrap_X in workaround-missing-symbols.cpp pins to the
