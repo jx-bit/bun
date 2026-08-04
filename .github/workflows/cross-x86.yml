@@ -1,4 +1,4 @@
-# Cross-compile Bun for x86_64 targets on an aarch64 Linux host (no image, no
+# Cross-compile Bun for foreign targets on an aarch64 Linux host (no image, no
 # bake). Spike / pilot — runs alongside build-x86.yml's native legs; green +
 # verified they can replace those legs later.
 #
@@ -13,14 +13,25 @@
 #     /opt/linux-sysroot-glibc (provisioned inline per-run — see the
 #     "Install linux-x64 sysroot" step, mirroring
 #     bootstrap.sh::install_linux_glibc_sysroot).
+#   - darwin-arm64 (arm64-apple-macosx) — net-new lane, no macOS runner needed.
+#     clang --target=arm64-apple-macosx + -isysroot <SDK> + ld64.lld (lld's
+#     Mach-O port). The macOS SDK (MacOSX26.5.sdk, ~60MB) is fetched at
+#     configure time by the vendored xmac tool (scripts/build/xmac.mjs) from
+#     Apple's public software-update CDN — same model as xwin for Windows, not
+#     baked into any image (Apple SDK license). xmac needs `xz` on PATH. Rust
+#     aarch64-apple-darwin (Tier 2 prebuilt std). WebKit prebuilt
+#     bun-webkit-macos-arm64-lto.tar.gz. ThinLTO defaults ON for darwin cross
+#     (config.ts ltoDefault covers `darwinCross`). No source changes expected —
+#     the fork already carries the full darwin cross path (config.ts 1186-1228,
+#     macos-sdk.ts, rust.ts, xmac.mjs). See ohos-cross-compile-darwin-arm64.md.
 #
 # Toolchain: installed fresh each run (no container image). This is slower
 # than a baked image but proves the pipeline end-to-end with no image-
 # maintenance overhead.
 #   - LLVM 21 from apt.llvm.org (arm64 packages exist for noble) provides
 #     clang / clang++ / lld / llvm-ar plus clang-cl / lld-link / llvm-lib /
-#     llvm-rc / llvm-objdump for the windows leg. tools.ts picks these by
-#     TARGET os regardless of host.
+#     llvm-rc / llvm-objdump for the windows leg, ld64.lld + dsymutil for the
+#     darwin leg. tools.ts picks these by TARGET os regardless of host.
 #   - Rust nightly-2026-07-20 (matches rust-toolchain.toml) + the per-leg
 #     rust target + rust-src (for -Zbuild-std on Tier 3 edge cases —
 #     harmless if unused).
@@ -33,6 +44,9 @@
 #     libc6-dev etc. + oven-sh/WebKit gcc-13 libstdc++ debs). The
 #     --wrap list in flags.ts covers the 2.31 -> 2.17 tail, so the binary
 #     stays glibc-2.17 portable.
+#   - darwin-arm64: macOS SDK fetched at configure time by xmac.mjs (pin
+#     MACOS_SDK_VERSION = "26.5" in macos-sdk.ts). ld64.lld + llvm-strip +
+#     dsymutil come from the same LLVM 21 install.
 #
 # Source changes on this branch:
 #   - config.ts: cherry-picked the linux-gnu/musl cross block + detect
@@ -41,12 +55,16 @@
 #   - NodeSqlite.h / NodeVM.h / JSWrappingFunction.h: qualify
 #     DestructionMode enumerators (needed by clang-cl on the windows leg;
 #     see ohos-cross-compile-windows-x64-spike.md iter 2).
+#   - darwin-arm64: NO source changes — the darwin cross path is already in
+#     the fork (config.ts, macos-sdk.ts, rust.ts, xmac.mjs).
 #
 # ThinLTO: linux gnu cross defaults to ON (config.ts ltoDefault covers
-# `linux || darwinCross`). windows-x64 stays OFF (LLVM ThinLTO miscompile
-# on x86-64 JSC). Do not add --lto=on to the windows leg.
+# `linux || darwinCross`). darwin-arm64 cross also defaults to ON (same
+# ltoDefault branch — `darwinCross` is set when host.os != "darwin").
+# windows-x64 stays OFF (LLVM ThinLTO miscompile on x86-64 JSC). Do not add
+# --lto=on to the windows leg.
 
-name: Cross-compile Bun (aarch64 host -> x86_64)
+name: Cross-compile Bun (aarch64 host)
 
 on:
   workflow_dispatch:
@@ -60,8 +78,8 @@ env:
   # Pin CC/CXX so configure picks the freshly-installed clang-21 over
   # whatever older clang the runner image ships. Note: these are the HOST
   # compiler for build-time codegen tools; the target compiler is selected
-  # by tools.ts based on target os (clang for linux, clang-cl for windows),
-  # NOT by CC.
+  # by tools.ts based on target os (clang for linux, clang-cl for windows,
+  # clang --target=*-apple-macosx for darwin), NOT by CC.
   CC: clang
   CXX: clang++
 
@@ -88,6 +106,19 @@ jobs:
             exe: bun.exe
             build-dir: build/cross-windows-x64
             rust-target: x86_64-pc-windows-msvc
+          # darwin-arm64: arm64-apple-macosx. macOS SDK fetched at configure
+          # time by xmac.mjs (Apple CDN, ~60MB). ld64.lld + llvm-strip +
+          # dsymutil from LLVM 21. Rust aarch64-apple-darwin (Tier 2 prebuilt
+          # std). WebKit prebuilt bun-webkit-macos-arm64-lto.tar.gz. ThinLTO
+          # defaults ON for darwinCross. No source changes — the fork already
+          # carries the full darwin cross path (config.ts 1186-1228).
+          - label: darwin-arm64
+            os: darwin
+            arch: aarch64
+            abi: ""
+            exe: bun
+            build-dir: build/cross-darwin-arm64
+            rust-target: aarch64-apple-darwin
 
     steps:
       - name: Checkout Bun source
@@ -101,10 +132,14 @@ jobs:
       # LLVM_VERSION_RANGE ">=21.1.0 <23.0.0", so install LLVM 21 from
       # apt.llvm.org (arm64 noble packages confirmed). `all` pulls clang-cl,
       # lld-link, llvm-lib, llvm-rc, llvm-objdump as part of clang-21/lld-21.
+      # lld-21 also ships ld64.lld-21 (lld's Mach-O port, needed for the
+      # darwin leg) and llvm-21 ships dsymutil-21 + llvm-strip-21.
       # binutils-x86-64-linux-gnu provides /usr/bin/x86_64-linux-gnu-strip
       # (GNU strip that fully handles -R .eh_frame on x86-64 ELF; the host's
       # aarch64 strip rejects foreign-arch ELF). config.ts's cross strip
       # block prefers it over llvm-strip when present.
+      # xz-utils: required by xmac.mjs to extract the macOS SDK .pkg payload
+      # (darwin leg only; harmless for the other legs).
       - name: Install LLVM 21 + build tools
         run: |
           set -e
@@ -112,7 +147,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             ninja-build cmake build-essential git curl wget gnupg lsb-release \
             libxml2-dev nasm pkg-config file binutils \
-            binutils-x86-64-linux-gnu
+            binutils-x86-64-linux-gnu xz-utils
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 21 || { echo "llvm.sh failed"; exit 1; }
@@ -120,9 +155,12 @@ jobs:
           # findLlvmTool() looks for (it searches PATH for "clang", "clang-cl",
           # "lld-link", "llvm-lib", "llvm-rc", "llvm-objdump", ...). The
           # clang-21 deb ships clang-cl-21; symlink the MSVC drivers too.
-          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip \
-                   llvm-objcopy llvm-objdump llvm-readelf clang-cl lld-link \
-                   llvm-lib llvm-rc llvm-mt; do
+          # ld64.lld + dsymutil are darwin-cross-only (lld's Mach-O port and
+          # the DWARF dSYM tool) — symlinking them is harmless on the other
+          # legs (tools.ts only resolves them when the target is darwin).
+          for t in clang clang++ lld ld.lld ld64.lld llvm-ar llvm-ranlib \
+                   llvm-strip llvm-objcopy llvm-objdump llvm-readelf \
+                   clang-cl lld-link llvm-lib llvm-rc llvm-mt dsymutil; do
             sudo ln -sf "/usr/bin/$t-21" "/usr/bin/$t"
           done
           sudo ln -sf /usr/bin/clang-21 /usr/bin/cc
@@ -131,14 +169,16 @@ jobs:
           clang --version | head -1
           clang-cl --version 2>&1 | head -1 || true
           lld-link --version 2>&1 | head -1 || true
+          ld64.lld --version 2>&1 | head -1 || true
+          dsymutil --version 2>&1 | head -1 || true
           cmake --version | head -1
           ninja --version
 
       # ── Rust ───────────────────────────────────────────────────────────
       # rust-toolchain.toml pins nightly-2026-07-20. Install with the
       # per-leg target + rust-src. rust.ts rustCanCrossFromLinux returns
-      # true for both linux (all arches) and windows (when a winsysroot is
-      # present).
+      # true for linux (all arches), windows (when a winsysroot is present),
+      # and darwin (Tier 2 prebuilt std — a staticlib needs no Mach-O link).
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
@@ -258,12 +298,17 @@ jobs:
       # ── Configure + build ──────────────────────────────────────────────
       # Explicit --os/--arch: host is always aarch64, target must NOT be
       # inferred from host. --webkit=prebuilt is mandatory for windows cross
-      # (config.ts 1069 rejects --webkit=local). LTO: linux gnu cross defaults
-      # ON (ltoDefault covers `linux`); windows stays default (off).
+      # (config.ts 1069 rejects --webkit=local) and for darwin cross (same
+      # block — --webkit=local would need a macOS native cmake). LTO: linux
+      # gnu cross and darwin cross both default ON (ltoDefault covers
+      # `linux || darwinCross`); windows stays default (off).
       # --ci=true: for windows, config.ts 1052 only auto-resolves the winsysroot
       # into cacheDir/winsysroot (so ensureWindowsSysroot() fetches xwin) when
       # `ci || buildkite`. For linux it isn't needed for sysroot detection
       # (detectLinuxGlibcSysroot has no ci gate) but keeps cacheDir per-build.
+      # For darwin, ensureMacosSdk() runs at configure time (called from
+      # configure()) and xmac-downloads MacOSX26.5.sdk into cacheDir when not
+      # already present — `--ci=true` keeps that cache per-build-dir.
       # (build-x86.yml's native legs don't need this — host.os matches target.)
       - name: Configure + build Bun
         run: |
@@ -281,7 +326,7 @@ jobs:
             --build-dir=${{ matrix.build-dir }} 2>&1 | tee build.log; rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "=== build failed (rc=$rc) — first errors ==="
-            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot|sysroot" build.log | head -50 || true
+            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|ld64\.lld|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot|sysroot|xmac|macos-sdk|MacOSX|isysroot|mach-o|Mach-O" build.log | head -50 || true
             echo "=== last 80 lines ==="
             tail -80 build.log || true
             exit 1
@@ -309,6 +354,14 @@ jobs:
             readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
             echo "=== version requirements (verneed) — must be <= 2.31 sysroot / 2.17 wrap floor ==="
             readelf -V "$OUT" 2>/dev/null | grep -iE "GLIBC|Version" | head -30 || true
+          elif [ "${{ matrix.os }}" = "darwin" ]; then
+            file "$OUT" | grep -iqE "Mach-O.*arm64|Mach-O 64-bit.*arm64" || { echo "ERROR: not a Mach-O arm64"; exit 1; }
+            echo "=== Mach-O arch (llvm-objdump) ==="
+            llvm-objdump -f "$OUT" | grep -iE "architecture|file format" || true
+            echo "=== Mach-O headers (llvm-objdump -h) ==="
+            llvm-objdump -h "$OUT" 2>/dev/null | head -30 || true
+            echo "=== LC_BUILD_VERSION (deployment target) ==="
+            llvm-objdump --macho --private-headers "$OUT" 2>/dev/null | grep -iE "LC_BUILD_VERSION|minos|platform|sdk" || true
           else
             file "$OUT" | grep -iqE "PE32|MS-DOS|Windows" || { echo "ERROR: not a Windows PE"; exit 1; }
             echo "=== PE arch (llvm-objdump) ==="
@@ -321,7 +374,7 @@ jobs:
         run: |
           echo "=== build dir ==="; ls -la "${{ matrix.build-dir }}" 2>&1 | head -30 || true
           echo "=== first 80 error lines from build.log ==="
-          grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot|sysroot|c\+\+|GLIBC|libc" build.log 2>/dev/null | head -80 || true
+          grep -inE "error\[|error:|fatal error|undefined reference|ld: error|lld-link:|ld64\.lld|collect2:|cannot find|FAILED:|panic|not found|missing|xwin|winsysroot|sysroot|xmac|macos-sdk|MacOSX|isysroot|mach-o|Mach-O|c\+\+|GLIBC|libc|apple-macosx" build.log 2>/dev/null | head -80 || true
           echo "=== last 150 lines of build.log ==="
           tail -150 build.log 2>/dev/null || true
 
