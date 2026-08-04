@@ -453,6 +453,23 @@ jobs:
             echo "=== validation OK (compile-only; signing + on-device run stay on 鸿蒙 PC) ==="
           '
 
+      - name: Copy binary out of container
+        if: success()
+        run: |
+          docker cp "$CONTAINER":"$WORK_IN_CONTAINER"/build/release-ohos/bun bun-ohos-aarch64 || \
+          docker cp "$CONTAINER":"$WORK_IN_CONTAINER"/build/release-ohos/bun-profile bun-ohos-aarch64 || \
+          { echo "ERROR: could not copy bun out of container"; exit 1; }
+          ls -lh bun-ohos-aarch64
+          file bun-ohos-aarch64 || true
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-ohos-aarch64
+          path: bun-ohos-aarch64
+          retention-days: 90
+
       - name: Dump failure diagnostics
         if: failure()
         run: |
