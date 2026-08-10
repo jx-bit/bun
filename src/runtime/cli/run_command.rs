@@ -59,6 +59,18 @@ fn runner_arena() -> &'static bun_alloc::Arena {
     crate::cli::cli_arena()
 }
 
+/// OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd(),
+/// which can fail on hmdfs/tmpfs. If cwd is "/" or empty, use $HOME instead.
+#[cfg(target_env = "ohos")]
+pub(crate) fn ohos_set_pwd(env: &mut DotEnv::Loader<'_>, cwd: &[u8]) {
+    let pwd = if cwd == b"/" || cwd.is_empty() {
+        bun_core::env_var::HOME::get().unwrap_or(cwd)
+    } else {
+        cwd
+    };
+    env.map.put(b"PWD", pwd).expect("unreachable");
+}
+
 // Passthrough-arg shell escaping. The escape tables + helpers are the lower-tier
 // `bun_shell_parser` crate's canonical copy — import them so future fixes to
 // the shell escaper cannot silently diverge.
@@ -268,6 +280,10 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         use_system_shell: bool,
         shell_path: Option<&[u8]>,
     ) -> crate::Result<()> {
+        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
+        #[cfg(target_env = "ohos")]
+        ohos_set_pwd(env, cwd);
+
         let shell_search_path = shell_path.unwrap_or_else(|| env.get(b"PATH").unwrap_or(b""));
         let shell_bin =
             Self::find_shell(shell_search_path, cwd).ok_or(crate::Error::MissingShell)?;
@@ -623,32 +639,54 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         let root_dir_info: bun_resolver::DirInfoRef =
             match this_transpiler.resolver.read_dir_info(top_level_dir) {
                 Err(err) => {
-                    if !log_errors {
+                    // OHOS: EPERM/EACCES on getcwd/openat is not fatal (SELinux).
+                    // Fall back to $HOME which is always readable.
+                    if cfg!(target_env = "ohos")
+                        && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
+                            || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES))
+                    {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        this_transpiler
+                            .resolver
+                            .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
+                            .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
+                            .ok_or(crate::Error::CouldntReadCurrentDirectory)?
+                    } else if !log_errors {
                         return Err(crate::Error::CouldntReadCurrentDirectory);
+                    } else {
+                        // SAFETY: `ctx.log` set in `create_context_data` (single-
+                        // threaded CLI startup), process-lifetime.
+                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                            Output::error_writer(),
+                        ));
+                        pretty_errorln!(
+                            "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
+                            bstr::BStr::new(err.name()),
+                            bun_core::fmt::QuotedFormatter {
+                                text: top_level_dir
+                            },
+                        );
+                        Output::flush();
+                        return Err(err.into());
                     }
-                    // SAFETY: `ctx.log` set in `create_context_data` (single-
-                    // threaded CLI startup), process-lifetime.
-                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                        Output::error_writer(),
-                    ));
-                    pretty_errorln!(
-                        "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
-                        bstr::BStr::new(err.name()),
-                        bun_core::fmt::QuotedFormatter {
-                            text: top_level_dir
-                        },
-                    );
-                    Output::flush();
-                    return Err(err.into());
                 }
                 Ok(None) => {
-                    // SAFETY: see `Err` arm above.
-                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                        Output::error_writer(),
-                    ));
-                    pretty_errorln!("error loading current directory");
-                    Output::flush();
-                    return Err(crate::Error::CouldntReadCurrentDirectory);
+                    if cfg!(target_env = "ohos") {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        this_transpiler
+                            .resolver
+                            .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
+                            .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
+                            .ok_or(crate::Error::CouldntReadCurrentDirectory)?
+                    } else {
+                        // SAFETY: see `Err` arm above.
+                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                            Output::error_writer(),
+                        ));
+                        pretty_errorln!("error loading current directory");
+                        Output::flush();
+                        return Err(crate::Error::CouldntReadCurrentDirectory);
+                    }
                 }
                 Ok(Some(info)) => info,
             };
@@ -2142,6 +2180,10 @@ impl RunCommand {
         original_script_for_bun_run: Option<&[u8]>,
     ) -> crate::Result<::core::convert::Infallible> {
         use crate::api::bun_process::{Status as SpawnStatus, sync};
+
+        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
+        #[cfg(target_env = "ohos")]
+        ohos_set_pwd(env, cwd);
 
         let mut argv: Vec<Box<[u8]>> = Vec::with_capacity(1 + passthrough.len());
         argv.push(executable.to_vec().into_boxed_slice());

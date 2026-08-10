@@ -32,6 +32,23 @@ impl Symlinker {
 
     pub fn ensure_symlink(&mut self, strategy: Strategy) -> bun_sys::Result<()> {
         match strategy {
+            Strategy::IgnoreFailure => {
+                return match self.symlink() {
+                    Ok(()) => Ok(()),
+                    Err(symlink_err) => match symlink_err.get_errno() {
+                        Errno::ENOENT => {
+                            let Some(dest_parent) = self.dest.dirname() else {
+                                return Ok(());
+                            };
+
+                            let _ = Fd::cwd().make_path(dest_parent);
+                            let _ = self.symlink();
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    },
+                };
+            }
             Strategy::ExpectMissing => {
                 return match self.symlink() {
                     Ok(()) => Ok(()),
@@ -151,4 +168,5 @@ impl Symlinker {
 pub enum Strategy {
     ExpectExisting,
     ExpectMissing,
+    IgnoreFailure,
 }

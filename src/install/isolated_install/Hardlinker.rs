@@ -271,6 +271,23 @@ impl Hardlinker {
                                             self.dest.slice_z(),
                                         ) {
                                             sys::Result::Ok(()) => {}
+                                            sys::Result::Err(link_err2)
+                                                if matches!(
+                                                    link_err2.get_errno(),
+                                                    sys::E::EPERM | sys::E::EACCES
+                                                ) =>
+                                            {
+                                                if crate::copy_file_fallback(
+                                                    entry.dir,
+                                                    entry.basename,
+                                                    Fd::cwd(),
+                                                    self.dest.slice_z(),
+                                                )
+                                                .is_err()
+                                                {
+                                                    break 'body Some(link_err2);
+                                                }
+                                            }
                                             sys::Result::Err(link_err2) => {
                                                 break 'body Some(link_err2);
                                             }
@@ -289,9 +306,42 @@ impl Hardlinker {
                                             self.dest.slice_z(),
                                         ) {
                                             sys::Result::Ok(()) => {}
+                                            sys::Result::Err(link_err2)
+                                                if matches!(
+                                                    link_err2.get_errno(),
+                                                    sys::E::EPERM | sys::E::EACCES
+                                                ) =>
+                                            {
+                                                if crate::copy_file_fallback(
+                                                    entry.dir,
+                                                    entry.basename,
+                                                    Fd::cwd(),
+                                                    self.dest.slice_z(),
+                                                )
+                                                .is_err()
+                                                {
+                                                    break 'body Some(link_err2);
+                                                }
+                                            }
                                             sys::Result::Err(link_err2) => {
                                                 break 'body Some(link_err2);
                                             }
+                                        }
+                                    }
+                                    sys::E::EPERM | sys::E::EACCES => {
+                                        let Some(dest_parent) = self.dest.dirname() else {
+                                            break 'body Some(link_err1);
+                                        };
+                                        let _ = Fd::cwd().make_path(dest_parent);
+                                        if crate::copy_file_fallback(
+                                            entry.dir,
+                                            entry.basename,
+                                            Fd::cwd(),
+                                            self.dest.slice_z(),
+                                        )
+                                        .is_err()
+                                        {
+                                            break 'body Some(link_err1);
                                         }
                                     }
                                     _ => break 'body Some(link_err1),

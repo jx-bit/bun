@@ -1642,12 +1642,28 @@ impl<'a> PackageInstall<'a> {
                                 match err.get_errno() {
                                     sys::E::EEXIST => {
                                         let _ = sys::unlinkat(destination_dir, entry.path);
-                                        sys::linkat(
+                                        match sys::linkat(
                                             entry.dir,
                                             entry.basename,
                                             destination_dir.fd(),
                                             entry.path,
-                                        )?;
+                                        ) {
+                                            Ok(()) => {}
+                                            Err(retry_err)
+                                                if matches!(
+                                                    retry_err.get_errno(),
+                                                    sys::E::EPERM | sys::E::EACCES
+                                                ) =>
+                                            {
+                                                crate::copy_file_fallback(
+                                                    entry.dir,
+                                                    entry.basename,
+                                                    destination_dir.fd(),
+                                                    entry.path,
+                                                )?;
+                                            }
+                                            Err(retry_err) => return Err(retry_err.into()),
+                                        }
                                     }
                                     sys::E::EXDEV => {
                                         return Err(crate::Error::NotSameFileSystem);
@@ -1656,6 +1672,14 @@ impl<'a> PackageInstall<'a> {
                                         return Err(crate::Error::Sys(
                                             bun_errno::SystemErrno::ENXIO,
                                         ));
+                                    }
+                                    sys::E::EPERM | sys::E::EACCES => {
+                                        crate::copy_file_fallback(
+                                            entry.dir,
+                                            entry.basename,
+                                            destination_dir.fd(),
+                                            entry.path,
+                                        )?;
                                     }
                                     _ => return Err(err.into()),
                                 }
@@ -1841,12 +1865,48 @@ impl<'a> PackageInstall<'a> {
                             if let Err(err) =
                                 sys::symlinkat(target, destination_dir.fd(), entry.path)
                             {
-                                if err.get_errno() != sys::E::EEXIST {
-                                    return Err(err.into());
+                                match err.get_errno() {
+                                    sys::E::EEXIST => {
+                                        let _ = sys::unlinkat(destination_dir, entry.path);
+                                        match sys::symlinkat(
+                                            entry.basename,
+                                            destination_dir.fd(),
+                                            entry.path,
+                                        ) {
+                                            Ok(()) => {}
+                                            Err(retry_err)
+                                                if matches!(
+                                                    retry_err.get_errno(),
+                                                    sys::E::EPERM | sys::E::EACCES
+                                                ) =>
+                                            {
+                                                crate::copy_file_fallback(
+                                                    destination_dir.fd(),
+                                                    entry.path,
+                                                    destination_dir.fd(),
+                                                    entry.path,
+                                                )?;
+                                            }
+                                            Err(retry_err) => return Err(retry_err.into()),
+                                        }
+                                    }
+                                    sys::E::EPERM | sys::E::EACCES => {
+                                        let Some(dir) = path::dirname(entry.path.as_bytes()) else {
+                                            return Err(err.into());
+                                        };
+                                        let _ = bun_sys::MakePath::make_path::<OSPathChar>(
+                                            destination_dir,
+                                            dir,
+                                        );
+                                        crate::copy_file_fallback(
+                                            destination_dir.fd(),
+                                            entry.path,
+                                            destination_dir.fd(),
+                                            entry.path,
+                                        )?;
+                                    }
+                                    _ => return Err(err.into()),
                                 }
-
-                                let _ = sys::unlinkat(destination_dir, entry.path);
-                                sys::symlinkat(entry.basename, destination_dir.fd(), entry.path)?;
                             }
 
                             real_file_count += 1;

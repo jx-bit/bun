@@ -3558,15 +3558,6 @@ mod posix_platform_specific_v8_apis {
         -> *mut c_void;
     }
 }
-// OHOS uses LLVM libc++ which mangles std::function as NSt3__18function (same as Apple/FreeBSD).
-#[cfg(all(not(windows), target_env = "ohos"))]
-mod posix_platform_specific_v8_apis {
-    use core::ffi::c_void;
-    unsafe extern "C" {
-        pub(super) fn _ZN2v85Array3NewENS_5LocalINS_7ContextEEEmNSt3__18functionIFNS_10MaybeLocalINS_5ValueEEEvEEE()
-        -> *mut c_void;
-    }
-}
 #[cfg(all(
     not(windows),
     not(target_os = "android"),
@@ -4567,8 +4558,6 @@ pub fn fix_dead_code_elimination() {
     #[cfg(all(not(windows), target_os = "android"))]
     keep_symbols!(posix_platform_specific_v8_apis::_ZN2v85Array3NewENS_5LocalINS_7ContextEEEmNSt6__ndk18functionIFNS_10MaybeLocalINS_5ValueEEEvEEE);
     #[cfg(all(not(windows), any(target_os = "macos", target_os = "freebsd")))]
-    keep_symbols!(posix_platform_specific_v8_apis::_ZN2v85Array3NewENS_5LocalINS_7ContextEEEmNSt3__18functionIFNS_10MaybeLocalINS_5ValueEEEvEEE);
-    #[cfg(all(not(windows), target_env = "ohos"))]
     keep_symbols!(posix_platform_specific_v8_apis::_ZN2v85Array3NewENS_5LocalINS_7ContextEEEmNSt3__18functionIFNS_10MaybeLocalINS_5ValueEEEvEEE);
     #[cfg(all(
         not(windows),

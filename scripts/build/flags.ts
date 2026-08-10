@@ -1203,9 +1203,18 @@ export const linkerFlags: Flag[] = [
   },
   {
     flag: c => [
+      // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
+      // crtendS.o). clang auto-adds them, failing bun link. -nostartfiles
+      // skips crt begin/end (keeps compiler-rt + libc). Explicit musl crt.
+      // NOT -nodefaultlibs (would drop compiler-rt — see webkit.ts).
+      "-nostartfiles",
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/Scrt1.o`,
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crti.o`,
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crtn.o`,
       `-L${c.ohosCrossLibs!}/libcxx/lib`,
       `-L${c.ohosCrossLibs!}/libcxxabi/lib`,
       `-L${c.ohosCrossLibs!}/libunwind/lib`,
+      `-L${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos`,
       c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
       "-lc++",
       "-lc++abi",
@@ -1213,7 +1222,7 @@ export const linkerFlags: Flag[] = [
       "-lc",
     ].filter(f => f !== ""),
     when: c => c.ohos,
-    desc: "OHOS: link LLVM 22 libc++ + libc++abi + libunwind + dynamic libc",
+    desc: "OHOS: link __n1 libc++ + libc++abi + libunwind + musl crt (-nostartfiles)",
   },
   {
     flag: [
@@ -1240,14 +1249,37 @@ export const linkerFlags: Flag[] = [
     desc: "OHOS: LLD alignment warnings → ignore (SCTLR_EL1.A is 0 on aarch64)",
   },
   {
+    // OHOS: restrict .dynsym to Bun__dlopen only (local: *;). Exporting the
+    // full v8/napi/uv symbol set (dynamic-list + linker.lds v8::*) makes the
+    // binary depend on device-side symbol resolution, which breaks when the
+    // built-in v8::Array::New mangling (__1 vs __n1) doesn't match the
+    // device libc++_shared.so. With local: *; the device never resolves
+    // v8/napi/uv symbols, so ABI is irrelevant — matches sb-fy-sb's working
+    // build. Also saves ~1.8MB/process (20K → 459 .dynsym entries, avoids
+    // OOM on the 31GB no-swap device during full test runs).
+    // --undefined keeps uSockets SSL symbols that gc-sections would strip
+    // (referenced only from Rust) + Bun__dlopen + the .bun section.
     flag: c => [
-      "-Wl,-Bsymbolic-functions",
-      "-rdynamic",
-      `-Wl,--dynamic-list=${c.cwd}/src/symbols.dyn`,
-      `-Wl,--version-script=${c.cwd}/src/linker.lds`,
+      "-Wl,--gc-sections",
+      "-Wl,--export-dynamic",
+      `-Wl,--version-script=${c.cwd}/src/symbols.dyn`,
+      "-Wl,--undefined=us_ssl_pop_pending_session",
+      "-Wl,--undefined=us_ssl_pop_pending_keylog",
+      "-Wl,--undefined=us_ssl_enable_pending_events",
+      "-Wl,--undefined=us_socket_write_check_error",
+      "-Wl,--undefined=us_internal_ssl_loop_state_save",
+      "-Wl,--undefined=us_internal_ssl_loop_state_restore",
+      "-Wl,--undefined=us_ssl_parse_pkcs12",
+      "-Wl,--undefined=us_ssl_ctx_add_ca_cert",
+      "-Wl,--undefined=us_socket_get_tos",
+      "-Wl,--undefined=us_socket_sni_resolve",
+      "-Wl,--undefined=us_socket_set_tos",
+      "-Wl,--undefined=us_socket_tls_feed",
+      "-Wl,--undefined=Bun__dlopen",
+      "-Wl,--undefined=BUN_COMPILED",
     ],
-    when: c => c.ohos,
-    desc: "OHOS: dynamic symbol list + version script (mirror linux block; exposes napi_/node_api_ for .node dlopen)",
+    when: c => c.release && c.ohos,
+    desc: "OHOS: restrict .dynsym to Bun__dlopen (local:*) + force-keep uSockets SSL/.bun symbols",
   },
 
   // ─── Linux ───
