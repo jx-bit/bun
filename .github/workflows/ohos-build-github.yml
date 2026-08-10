@@ -1,91 +1,71 @@
-# OHOS Bun build on a GitHub-hosted ARM runner (no self-hosted 鸿蒙 PC).
+# OHOS Bun build on a GitHub-hosted ARM runner using the social4hyq OHOS
+# container (Harmonybrew musl userspace). The container provides the full
+# OHOS toolchain (llvm@21, ohos-sdk, icu4c@78, bun-webkit bottles) via brew
+# — no self-compiled __n1 cross-libs needed (replaces the fragile bare-ubuntu
+# + self-compiled __n1 path that produced a different ABI than self-hosted).
 #
-# Migrates the OHOS aarch64 build off the self-hosted HarmonyOS PC runner onto
-# github-hosted `ubuntu-24.04-arm` (free for public repos). The self-hosted
-# `ohos-build-rust.yml` is preserved as a fallback; this workflow is the
-# migration target.
+# Container approach (not GHA `container:` field): the image is a musl
+# userspace that doesn't support the glibc node runner GHA requires, so we
+# `docker run -d` + `docker exec` (same as social4hyq/homebrew-core's
+# bottle-build.yml + .github/scripts/).
 #
-# Strategy (path A): run the build inside the public `ghcr.io/social4hyq/ci-runner`
-# container, which ships an OHOS musl userspace + Homebrew tap with the OHOS
-# SDK, llvm@21, icu4c@78, bun-webkit and binary-sign-tool as bottles. The
-# container runs on GitHub's Linux kernel, which does NOT enforce OHOS
-# .codesign on exec — so this workflow verifies COMPILATION only (file +
-# readelf on the produced ELF); signing + on-device execution stay on the
-# 鸿蒙 PC. social4hyq/homebrew-core already proved this container builds OHOS
-# bun on github-hosted CI daily; this workflow points the same toolchain at
-# ljy9812/bun's own source instead of social4hyq/ohos-bun.
+# We do NOT run social4hyq's bun.rb formula (it builds social4hyq/ohos-bun
+# source, not our jy-bun). Instead: trust the tap → `brew install
+# --only-dependencies` pours the formula's deps → manually stage rust-nightly
+# (a resource, skipped by --only-dependencies) → run
+# .github/scripts/build-ohos-container.sh which replicates the formula's
+# install-block env (ohos-cross-libs/ohos-icu scaffolding, LD_LIBRARY_PATH,
+# CC/CXX) to build OUR source with --webkit=local.
 #
-# WebKit: `--webkit=local` — clone `springmin/WebKit` at a pinned commit
-# (WEBKIT_REF, matching WEBKIT_VERSION in scripts/build/deps/webkit.ts) and
-# compile JSC/WTF/bmalloc from source. This decouples us from the
-# social4hyq/core/bun-webkit bottle, whose version drift (social4hyq bumped to
-# 34c01d1339 while bun's webkit.ts pins c9296e353e) broke compilation — the
-# bottle's new JSModuleRecord API doesn't match bun's C++ bindings. The
-# from-source build is cached via actions/cache (keyed on WEBKIT_REF +
-# webkit.ts hash) so only the first run on a ref pays the ~20-40min cost.
-# Mirrors the pattern already green on self-hosted ohos-build-rust.yml.
+# ABI: container llvm@21 cross-libs are __1 (same as self-hosted Harmonybrew).
+# After commit 6269b7c0 (deleted napi_body.rs __n1 branch) + symbols.dyn
+# local:* (only Bun__dlopen exported), v8 is not referenced → runs on device
+# (same as self-hosted).
 #
-# KEY DESIGN: per-command `docker exec` (mirrors social4hyq's setup-container.sh
-# + build.sh / lib.sh `cexec` helper). Every brew/bun command runs in its own
-# fresh `bash -lc` login shell, so the shellenv PATH is reloaded from scratch
-# each time and brew-trust/bun-install PATH disturbance (a harmonybrew quirk
-# that defeated 17 rounds of single-shell attempts) cannot cascade. Do NOT
-# collapse these into one multi-line `docker exec` — that reintroduces the bug.
+# Signing: NOT done in CI. install-bun-ohos.sh signs the binary on the OHOS
+# device at install time (binary-sign-tool -selfSign). Matches the prior
+# bare-ubuntu github-hosted build (build 25), which ran on device this way.
 
-name: OHOS Build (GitHub-hosted)
+name: OHOS Build (GitHub-hosted, social4hyq container)
 
 on:
   push:
     branches:
-      - ohos-aarch64          # main OHOS integration branch — every push verifies the github-hosted build
-      - claude/ohos-*         # keep iteration branches triggering for dev cycles
-      - claude/land-github-webkit-local  # this decoupling branch
+      - ohos-aarch64
+      - claude/ohos-*
   workflow_dispatch:
     inputs:
       webkit_ref:
-        description: 'WebKit fork commit to build against (defaults to the pinned WEBKIT_REF)'
+        description: 'WebKit fork commit (defaults to pinned WEBKIT_REF)'
         required: false
         default: ''
-        type: string
 
 concurrency:
   group: ohos-build-github-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 env:
-  # Public anonymous-pull container image (sync-ci-image.yml in
-  # social4hyq/homebrew-core mirrors it from Huawei SWR to GHCR on the same
-  # Azure backbone as the runners; package is set public so no docker login
-  # is needed). Pinned to an immutable digest resolved from the :2026-07-28
-  # tag — social4hyq refreshes the tag via sync-ci-image.yml, which would
-  # silently roll our build environment. Bump manually after validating a
-  # new social4hyq sync. (Last tag: 2026-07-28.)
-  IMAGE: ghcr.io/social4hyq/ci-runner@sha256:46cea9b718608544f31c571604b5b78277d6dab69cdd17017eeac6f3e09ed6de
+  # social4hyq ci-runner image (GHCR mirror of Harmonybrew SWR image).
+  # TODO: digest-pin via vars.OHOS_CI_IMAGE for reproducibility (see
+  # social4hyq sync-ci-image.yml). Using :latest for initial bring-up.
+  OHOS_CI_IMAGE: ghcr.io/social4hyq/ci-runner:latest
   CONTAINER: ohos
-  WORK_IN_CONTAINER: /work
-  # Rust nightly OHOS host toolchain — matches rust-toolchain.toml channel.
-  # OHOS is Tier 3 (no prebuilt rust-std); bun uses -Zbuild-std, so rust-src
-  # is required. These are the same tarballs social4hyq's bun.rb formula uses.
-  RUST_DATE: "2026-07-20"
-  RUST_VER: "nightly-2026-07-20"
-  WEBKIT_FORK: springmin/WebKit
-  # Pinned to c9296e353e365ecf — the WEBKIT_VERSION pin in
-  # scripts/build/deps/webkit.ts. Floating the ohos-aarch64 branch of
-  # springmin/WebKit is unsafe: it moved to 8172ab945d8e (oven-sh main merge)
-  # which removed JSModuleRecord declaredVariables/lexicalVariables and changed
-  # create() signature; bun's BunAnalyzeTranspiledModule.cpp still uses the old
-  # API. Must match webkit.ts exactly or the C++ compile breaks. Override via
-  # workflow_dispatch.webkit_ref for testing.
-  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
-  # WebKit JSC compile is memory-heavy per file; -j2 matches the self-hosted
-  # runner setting and avoids OOM on the 16GB ubuntu-24.04-arm runner.
-  NINJA_JOBS: 2
-  # Homebrew env kept identical to social4hyq's lib.sh BREW_ENV.
+  TAP: social4hyq/core
+  # In-container tap path (baked into the ci-runner image). Used for the
+  # git safe.directory fix that `brew trust` depends on.
+  TAP_IN_CONTAINER: /storage/Users/currentUser/.harmonybrew/Homebrew/Library/Taps/social4hyq/homebrew-core
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+  WEBKIT_FORK: springmin/WebKit
+  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
+  RUST_TOOLCHAIN: nightly-2026-07-20
+  NINJA_JOBS: 2
 
 jobs:
   build:
-    name: Build Bun for OHOS (aarch64, github-hosted)
+    name: Build Bun for OHOS (aarch64, social4hyq container)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
 
@@ -95,121 +75,139 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Pull OHOS ci-runner container
-        run: docker pull "$IMAGE"
-
-      # One container for the whole job. seccomp=unconfined: default docker
-      # profile blocks io_uring_setup, which bun depends on.
-      - name: Start OHOS container
+      # ── Start social4hyq OHOS container ──────────────────────────
+      # docker run (not GHA container:) — musl userspace incompatible
+      # with GHA's glibc node runner. seccomp=unconfined for io_uring.
+      - name: Pull and start OHOS container
         run: |
+          docker pull "$OHOS_CI_IMAGE"
           docker run -d --name "$CONTAINER" --init \
             --security-opt seccomp=unconfined \
-            -v "$GITHUB_WORKSPACE:$WORK_IN_CONTAINER" \
-            "$IMAGE" sleep infinity
-          # OHOS musl userspace setup (mirrors social4hyq's setup-container.sh):
-          # the bottle ELFs' PT_INTERP targets the real-device loader paths, so
-          # symlink them into place. The Linux kernel does not check .codesign,
-          # so unsigned ELFs (rust toolchain, build outputs) exec fine here.
-          docker exec "$CONTAINER" bash -lc '
-            set -e
-            mkdir -p /data/local/tmp /system/bin /system/lib /data/storage/el2/base/tmp
-            ln -sf /bin/sh /system/bin/sh
-            ln -sf /lib/ld-musl-aarch64.so.1 /system/lib/ld-musl-aarch64.so.1
-            # cargo sparse protocol straight to crates.io (git protocol too slow on Azure)
-            mkdir -p /root/.cargo
-            printf "[registries.crates-io]\nprotocol = \"sparse\"\n\n[net]\ngit-fetch-with-cli = true\nretry = 3\n" > /root/.cargo/config.toml
-            # Persist the brew shellenv so every later `bash -lc` finds brew.
-            # brew is on the login-shell PATH in the :2026-07-28 image but its
-            # install location is not one of the usual Linuxbrew paths.
-            mkdir -p /etc/profile.d
-            BREW=$(command -v brew) || { echo "brew not found on PATH"; exit 1; }
-            "$BREW" shellenv > /etc/profile.d/brew.sh
-            brew --version
-            git config --global --add safe.directory "'"$WORK_IN_CONTAINER"'"
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          '
+            -v "$GITHUB_WORKSPACE:/workspace/bun" \
+            "$OHOS_CI_IMAGE" sleep infinity
 
-      # Each brew call below is its own `docker exec bash -lc` — a fresh login
-      # shell that sources /etc/profile.d/brew.sh, so brew trust / brew update
-      # cannot disturb the PATH seen by the next call. This is the social4hyq
-      # `cexec` pattern (lib.sh); do NOT merge them.
-
-      - name: brew tap social4hyq/core
-        run: docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && brew tap social4hyq/core https://github.com/social4hyq/homebrew-core.git'
-
-      - name: brew trust social4hyq/core
-        run: docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && brew trust social4hyq/core'
-
-      - name: brew update (refresh bottle index)
-        run: docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && brew update --quiet || echo "::warning::brew update failed; continuing with baked index"'
-
-      - name: brew install dependencies
+      - name: Configure container (paths + cargo + tap TRUST)
         run: |
-          # --force-bottle: pour bottles instead of building from source.
-          # --build-bottle (used by social4hyq's build.sh) forces source builds
-          # because they CREATE bottles; we only INSTALL deps, so we want the
-          # prebuilt bottles. Without this, llvm@21 builds from source (~30min
-          # for clang+lld alone, observed iter 20).
-          # Retry once after 90s: atomgit CDN has transient 404s (social4hyq build.sh).
+          # OHOS device path simulation: bun/WebKit ELFs' PT_INTERP targets
+          # real-device paths (/system/bin/sh, /system/lib/ld-musl-aarch64.so.1).
+          # musl tmpfile() also hardcodes /data/local/tmp. (social4hyq
+          # setup-container.sh lines 12-16.)
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /data/local/tmp /system/bin /system/lib && \
+             ln -sf /bin/sh /system/bin/sh && \
+             ln -sf /lib/ld-musl-aarch64.so.1 /system/lib/ld-musl-aarch64.so.1'
+          # cargo sparse registry + git-fetch-with-cli (social4hyq lib.sh).
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /root/.cargo && \
+             printf "[registries.crates-io]\nprotocol = \"sparse\"\n\n[net]\ngit-fetch-with-cli = true\nretry = 3\n" > /root/.cargo/config.toml'
+          # The tap is baked into the image at TAP_IN_CONTAINER. `brew trust`
+          # persists the tap's origin_url reference via a git query on that
+          # dir — register safe.directory first so dubious-ownership (host
+          # UID vs container root) doesn't make the query silently return nil
+          # and store a stale reference. (social4hyq setup-container.sh
+          # lines 30-94 document this exact ordering bug.)
+          docker exec "$CONTAINER" bash -lc \
+            "git config --global --add safe.directory $TAP_IN_CONTAINER || true"
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew tap $TAP || true"
+          # CRITICAL: `brew trust` MUST run after the safe.directory fix above.
+          # Without trust, `brew install --only-dependencies social4hyq/core/bun`
+          # silently refuses to load TRANSITIVE deps from the tap
+          # (bun-bootstrap, bun-webkit — loaded via depends_on, not named on
+          # the command line, so they hit the trust check that explicitly-
+          # named formulas bypass) → "Refusing to load formula ... from
+          # untrusted tap" → ZERO deps install (brew is transactional) →
+          # openssl@3 missing → cargo "Error relocating SSL_get_error" → 127.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew trust $TAP"
+
+      # ── Install toolchain deps (bun formula's dependencies) ──────
+      # `brew install --only-dependencies` pours every depends_on of bun.rb
+      # (llvm@21, ohos-sdk, icu4c@78, bun-bootstrap, openssl@3, cmake, ninja,
+      # ...) without running bun's install block (we build our own source).
+      # rust-nightly is a `resource` (not a formula) — --only-dependencies
+      # skips resources, so we stage it manually in the next step.
+      - name: Install brew deps (bun formula deps only)
+        run: |
+          set -e
+          # Refresh the formula index first: the baked index can reference
+          # bottles the CDN has pruned (stale 404 that fails identically on
+          # every retry). (social4hyq build.sh line 39.)
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew update --quiet" \
+            || echo "::warning::brew update failed; continuing with baked index"
+          # Retry once after 90s for transient atomgit CDN 404s (social4hyq
+          # build.sh lines 41-48 — brew reuses partial work).
+          # --build-bottle (not --include-build: Harmonybrew's brew fork does
+          # not recognize --include-build) pours deps including :build ones
+          # (llvm@21, ohos-sdk, icu4c@78, bun-bootstrap, openssl@3, cmake,
+          # ninja all marked :build in bun.rb). --only-dependencies alone
+          # pours ONLY runtime deps (just `node`) → llvm@21 missing → build
+          # dies downstream. --build-bottle implies --include-build semantics;
+          # it's exactly what social4hyq build.sh uses.
+          # No --force-bottle: it is mutually exclusive with --build-bottle.
           for i in 1 2; do
-            if docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && '"$BREW_ENV"' brew install --force-bottle --verbose ohos-sdk llvm@21 social4hyq/core/icu4c@78 bun-bootstrap cmake ninja gperf perl python ruby openssl@3 libxml2 zlib' 2>&1 | tee install.log; then
+            if docker exec "$CONTAINER" bash -lc \
+              "$BREW_ENV brew install --only-dependencies --build-bottle $TAP/bun" 2>&1 | tail -40; then
               break
             fi
-            [ "$i" = "2" ] && { echo "ERROR: brew install failed twice"; exit 1; }
-            echo "::warning::brew install attempt $i failed, retrying in 90s (atomgit transient 404)"
+            [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; exit 1; }
+            echo "::warning::brew install attempt $i failed, retrying in 90s"
             sleep 90
           done
-          # Verify kegs landed (brew --prefix lies for uninstalled formulae).
-          docker exec "$CONTAINER" bash -lc '. /etc/profile.d/brew.sh && for f in ohos-sdk llvm@21 icu4c@78 bun-bootstrap; do p=$(brew --prefix "$f"); test -d "$p" || { echo "ERROR: $f not installed at $p"; exit 1; }; echo "OK $f -> $p"; done'
-
-      - name: Install Rust nightly OHOS host toolchain
-        run: |
+          # Trust rejections are SILENT (exit 0) — verify key deps actually
+          # installed, else the build fails cryptically downstream. (social4hyq
+          # build.sh lines 51-54.)
           docker exec "$CONTAINER" bash -lc '
-            set -e
-            . /etc/profile.d/brew.sh
-            # rust-nightly OHOS musl ELFs (cargo/rustc) dynamically link
-            # libssl/libcrypto, libz, libxml2. brew superenv strips system lib
-            # paths and bottled zlib/libxml2 are keg-only / ship only versioned
-            # .so, so the musl loader cannot resolve the unversioned NEEDED
-            # names (libz.so). Search every plausible lib dir for the .so files,
-            # gather them into /tmp/rust-libs, and create the unversioned
-            # symlinks the loader looks for.
-            mkdir -p /tmp/rust-libs
-            SEARCH_DIRS="/lib /usr/lib $(brew --prefix)/lib $(brew --prefix openssl@3)/lib $(brew --prefix libxml2)/lib $(brew --prefix zlib)/lib"
-            for name in libz libssl libcrypto libxml2; do
-              for f in $(find $SEARCH_DIRS -name "${name}.so*" 2>/dev/null | sort -u); do
-                ln -sf "$f" "/tmp/rust-libs/$(basename "$f")"
-              done
-              if [ ! -e "/tmp/rust-libs/${name}.so" ]; then
-                cand=$(ls "/tmp/rust-libs/${name}.so."* 2>/dev/null | head -1)
-                [ -n "$cand" ] && ln -sf "$(basename "$cand")" "/tmp/rust-libs/${name}.so"
-              fi
+            for f in llvm@21 ohos-sdk icu4c@78 bun-bootstrap openssl@3 cmake ninja; do
+              p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
+                && echo "OK  $f -> $p" \
+                || { echo "::error::$f NOT installed (silent trust rejection? check brew trust)"; exit 1; }
             done
-            echo "=== /tmp/rust-libs ==="; ls -la /tmp/rust-libs/
-            RUST_HOME=/data/storage/el2/base/tmp/rust-'"$RUST_VER"'
-            if [ -x "$RUST_HOME/bin/rustc" ]; then
-              echo "rust already installed at $RUST_HOME"
+            echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
+            echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
+            echo "=== openssl@3 lib ==="; ls "$(brew --prefix openssl@3)/lib"/libssl* 2>/dev/null | head -3
+          '
+
+      # ── Install rust-nightly (resource, not a brew formula) ──────
+      # bun.rb's install block stages this resource to /data/storage/el2/base/tmp.
+      # --only-dependencies skips the install block, so we do it manually.
+      # musl Rust host (aarch64-unknown-linux-ohos) for -Zbuild-std.
+      # No ELF signing: the container runs a Linux kernel (not OHOS), so
+      # unsigned cargo execs fine — the musl loader does not check .codesign
+      # (confirmed empirically: cargo reached symbol-relocation before failing
+      # on OpenSSL, not an exec-refusal/signing error).
+      - name: Install rust-nightly (OHOS musl host)
+        run: |
+          docker exec -e RUST_TOOLCHAIN="$RUST_TOOLCHAIN" "$CONTAINER" bash -lc '
+            RUST_HOME="/data/storage/el2/base/tmp/rust-${RUST_TOOLCHAIN}"
+            if [ ! -f "$RUST_HOME/BREW_SIGNED_OK" ]; then
+              echo "=== downloading rust-nightly ${RUST_TOOLCHAIN} ==="
+              curl -fsSL "https://static.rust-lang.org/dist/2026-07-20/rust-nightly-aarch64-unknown-linux-ohos.tar.gz" -o /tmp/rust-host.tar.gz
+              tar xf /tmp/rust-host.tar.gz -C /tmp
+              sh /tmp/rust-nightly-aarch64-unknown-linux-ohos/install.sh --prefix="$RUST_HOME" --disable-ldconfig
+              echo "=== downloading rust-src ==="
+              curl -fsSL "https://static.rust-lang.org/dist/2026-07-20/rust-src-nightly.tar.gz" -o /tmp/rust-src.tar.gz
+              tar xf /tmp/rust-src.tar.gz -C /tmp
+              sh /tmp/rust-src-nightly/install.sh --prefix="$RUST_HOME" --disable-ldconfig
+              rm -rf /tmp/rust-*.tar.gz /tmp/rust-nightly-* /tmp/rust-src-nightly
+              touch "$RUST_HOME/BREW_SIGNED_OK"
+              echo "=== rust installed to $RUST_HOME ==="
             else
-              mkdir -p "$RUST_HOME"
-              cd /tmp
-              curl -fsSL -o rust-host.tar.gz "https://static.rust-lang.org/dist/'"$RUST_DATE"'/rust-nightly-aarch64-unknown-linux-ohos.tar.gz"
-              curl -fsSL -o rust-src.tar.gz "https://static.rust-lang.org/dist/'"$RUST_DATE"'/rust-src-nightly.tar.gz"
-              tar xzf rust-host.tar.gz && (cd rust-nightly-aarch64-unknown-linux-ohos && sh ./install.sh --prefix="$RUST_HOME" --disable-ldconfig)
-              tar xzf rust-src.tar.gz && (cd rust-src-nightly && sh ./install.sh --prefix="$RUST_HOME" --disable-ldconfig)
-              rm -rf rust-host.tar.gz rust-src.tar.gz rust-nightly-aarch64-unknown-linux-ohos rust-src-nightly
+              echo "=== rust already installed ==="
             fi
-            export LD_LIBRARY_PATH="/tmp/rust-libs:${LD_LIBRARY_PATH:-}"
+            # cargo links libssl/libcrypto/libz (git2/registry transport);
+            # rustc does NOT — that is why `rustc --version` passed while
+            # `cargo --version` hit "Error loading shared library libssl.so"
+            # → "Error relocating cargo: SSL_get_error: symbol not found" → 127.
+            # Same LD_LIBRARY_PATH the build script sets later, but the cargo
+            # verification below runs BEFORE that script — inject here too.
+            # (bun.rb lines 195-199 document this exact cargo/openssl failure.)
+            # Paths use opt/<name>/lib (formula_opt_lib), NOT lib/<name>/lib.
+            BREW_PREFIX=$(brew --prefix)
+            export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/opt/libxml2/lib:$BREW_PREFIX/opt/zlib/lib:${LD_LIBRARY_PATH:-}"
             "$RUST_HOME/bin/rustc" --version
             "$RUST_HOME/bin/cargo" --version
           '
 
-      # WebKit source: clone springmin/WebKit at the pinned WEBKIT_REF. The
-      # shallow fetch of a single commit keeps the download small (vs a
-      # default-branch clone). GitHub supports fetching by SHA for public repos,
-      # so this works without a branch/tag ref. Done on the host (git is on the
-      # ubuntu runner); the container sees it at /work/vendor/WebKit via the
-      # volume mount.
+      # ── WebKit fork (pinned, --webkit=local) ─────────────────────
       - name: Checkout WebKit fork (pinned)
         run: |
           WK_REF="${{ inputs.webkit_ref || env.WEBKIT_REF }}"
@@ -223,319 +221,136 @@ jobs:
           git checkout FETCH_HEAD
           echo "=== vendor/WebKit HEAD ==="
           git rev-parse HEAD
-          git log -1 --oneline
-
-      - name: WebKit version sync check
-        run: |
-          WK_HASH=$(grep "^export const WEBKIT_VERSION" scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
-          echo "scripts/build/deps/webkit.ts pins: $WK_HASH"
-          if git -C vendor/WebKit cat-file -e "${WK_HASH}" 2>/dev/null; then
-            echo "✅ vendor/WebKit contains ${WK_HASH}"
-          else
-            echo "⚠️  vendor/WebKit missing ${WK_HASH} — fetching from upstream oven-sh/WebKit"
-            cd vendor/WebKit
-            git remote add upstream https://github.com/oven-sh/WebKit.git 2>/dev/null || true
-            git fetch upstream main --depth=200 2>/dev/null || echo "⚠️  upstream fetch failed (network)"
-            if git cat-file -e "${WK_HASH}" 2>/dev/null; then
-              echo "⚠️  commit ${WK_HASH} found upstream but not in fork pin — build may fail if bun needs it"
-            else
-              echo "⚠️  cannot verify ${WK_HASH}; continuing (fork pin should be sufficient)"
-            fi
-          fi
 
       - name: Extract WebKit version for cache key
         id: webkit-version
         run: |
           WK_VER=$(grep "^export const WEBKIT_VERSION" scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
           echo "version=${WK_VER}" >> "$GITHUB_OUTPUT"
-          echo "Cache key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${WK_VER}"
 
       - name: Cache WebKit build
         uses: actions/cache@v4
         id: webkit-cache
         with:
           path: build/release-ohos/deps/WebKit
-          key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}
+          key: webkit-ohos-container-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-1
 
-      - name: Scaffold OHOS cross-libs + ICU
+      # ── bun install (root + node-fallbacks) ──────────────────────
+      # BUN_INSTALL_IGNORE_SCRIPTS=1 skips esbuild's postinstall (install.js),
+      # which throws "Unsupported platform: openharmony" — esbuild's install.js
+      # uses process.platform, and OHOS node reports "openharmony". That failure
+      # is benign: build-ohos-container.sh bypasses platform detection later via
+      # ESBUILD_BINARY_PATH. But it makes `bun install` exit non-zero, and the
+      # pipe to tail would mask that exit code — so verify the critical packages
+      # (esbuild, lezer-cpp for cppbind) actually landed in node_modules.
+      - name: bun install (root + node-fallbacks)
         run: |
+          BUN=$(docker exec "$CONTAINER" bash -lc 'brew --prefix bun-bootstrap')/bin/bun
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun && $BUN install" 2>&1 | tail -30
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun/src/node-fallbacks && $BUN install" 2>&1 | tail -30
+          # Verify deps actually installed (the | tail above masks the exit code;
+          # esbuild postinstall may have failed without aborting the step).
           docker exec "$CONTAINER" bash -lc '
-            set -e
-            . /etc/profile.d/brew.sh
-            cd "'"$WORK_IN_CONTAINER"'"
-            LLVM=$(brew --prefix llvm@21)
-            ICU=$(brew --prefix icu4c@78)
-            CROSS=build/ohos-cross-libs
-            mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include"
-            ln -sf "$LLVM/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxx/include/v1"
-            ln -sf "$LLVM/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxxabi/include"
-            for d in libcxx libcxxabi libunwind; do
-              mkdir -p "$CROSS/$d/lib"
-              for a in "$LLVM/lib/aarch64-linux-ohos"/*.a; do
-                ln -sf "$a" "$CROSS/$d/lib/$(basename "$a")"
-              done
-            done
-            mkdir -p build/ohos-icu/target/include build/ohos-icu/target/lib build/ohos-icu/host/bin
-            ln -sf "$ICU/include/unicode" build/ohos-icu/target/include/unicode
-            for a in libicudata.a libicui18n.a libicuuc.a; do
-              ln -sf "$ICU/lib/$a" "build/ohos-icu/target/lib/$a"
-            done
-            for t in genrb genccode gencmn pkgdata; do
-              [ -x "$ICU/bin/$t" ] && ln -sf "$ICU/bin/$t" "build/ohos-icu/host/bin/$t" || true
-            done
-            echo "=== scaffold tree ==="
-            ls -la build/ohos-cross-libs/libcxx/include/ build/ohos-icu/target/lib/
+            [ -d /workspace/bun/node_modules/esbuild ] || { echo "ERROR: esbuild not installed"; exit 1; }
+            [ -d /workspace/bun/node_modules/lezer-cpp ] || echo "WARN: lezer-cpp missing (cppbind codegen may fail)"
+            echo "=== node_modules populated ==="
           '
 
-      # bun install: --ignore-scripts because esbuild 0.21.5's postinstall
-      # throws "Unsupported platform: openharmony arm64" — bun-bootstrap reports
-      # process.platform === "openharmony" (not "linux"), and esbuild 0.21.5's
-      # install.js has no openharmony mapping. The esbuild binary itself is a
-      # statically-linked Go ELF that runs fine on the OHOS musl container, so
-      # we skip the postinstall and manually symlink node_modules/.bin/esbuild
-      # to the @esbuild/linux-arm64 native binary. The build invokes esbuild
-      # via the CLI (ninja rule), not the JS API, so a direct symlink to the
-      # native binary works.
-      - name: bun install (root)
+      # ── Scaffold cross-libs + ICU + Configure + build ────────────
+      # Delegates to .github/scripts/build-ohos-container.sh (replicates
+      # social4hyq bun.rb's install-block env). Host vars passed via -e.
+      # GITHUB_SHA: the container has no git (Harmonybrew musl), so config.ts's
+      # getGitRevision() can't `git rev-parse HEAD` and would return "unknown"
+      # (7 chars). That feeds build_options::SHA, and env.rs:58 does
+      # const_str_slice(SHA, 0, 9) → split_at(9) panics "mid > len" (E0080).
+      # getGitRevision checks GITHUB_SHA first (config.ts:1526), so passing it
+      # in gives the full 40-char commit directly.
+      - name: Scaffold + Configure + build Bun for OHOS
         run: |
-          docker exec "$CONTAINER" bash -lc '
-            set -eo pipefail
-            . /etc/profile.d/brew.sh
-            cd "'"$WORK_IN_CONTAINER"'"
-            BUN_BIN="$(brew --prefix bun-bootstrap)/bin/bun"
-            test -x "$BUN_BIN" || { echo "ERROR: bun-bootstrap not at $BUN_BIN"; exit 1; }
-            echo "bun -> $BUN_BIN  ($("$BUN_BIN" --version))"
-            "$BUN_BIN" install --ignore-scripts 2>&1 | tail -20
-            # bun reports platform=openharmony, so @esbuild/linux-arm64 (os:["linux"])
-            # is NOT installed as an optional dep. Download the static Go binary
-            # directly from npm and place it at node_modules/.bin/esbuild.
-            # The binary is platform-independent (static Go ELF, runs on musl).
-            mkdir -p node_modules/.bin
-            # Extract esbuild version from package.json (no node available).
-            ESB_VER=$(grep -oE "\"esbuild\"[^,]*" package.json | head -1 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" || echo "0.21.5")
-            echo "esbuild version: $ESB_VER"
-            cd /tmp && curl -fsSL -o esbuild.tgz "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-${ESB_VER}.tgz"
-            rm -rf esbuild-extract && mkdir esbuild-extract && tar xzf esbuild.tgz -C esbuild-extract
-            cp esbuild-extract/package/bin/esbuild "'"$WORK_IN_CONTAINER"'/node_modules/.bin/esbuild"
-            chmod +x "'"$WORK_IN_CONTAINER"'/node_modules/.bin/esbuild"
-            rm -rf esbuild.tgz esbuild-extract
-            cd "'"$WORK_IN_CONTAINER"'"
-            test -x node_modules/.bin/esbuild && echo "esbuild bin OK ($(node_modules/.bin/esbuild --version))" || { echo "ERROR: esbuild bin not executable"; exit 1; }
-          '
+          set -e
+          docker exec -e RUST_TOOLCHAIN="$RUST_TOOLCHAIN" -e NINJA_JOBS="$NINJA_JOBS" \
+            -e GITHUB_SHA="$GITHUB_SHA" -e GIT_SHA="$GITHUB_SHA" \
+            "$CONTAINER" bash /workspace/bun/.github/scripts/build-ohos-container.sh
 
-      - name: bun install (src/node-fallbacks)
+      # ── Copy binary out + verify ─────────────────────────────────
+      - name: Copy binary + build log out of container
+        if: always()
         run: |
-          docker exec "$CONTAINER" bash -lc '
-            set -eo pipefail
-            . /etc/profile.d/brew.sh
-            cd "'"$WORK_IN_CONTAINER"'/src/node-fallbacks"
-            BUN_BIN="$(brew --prefix bun-bootstrap)/bin/bun"
-            test -x "$BUN_BIN" || { echo "ERROR: bun-bootstrap not at $BUN_BIN"; exit 1; }
-            "$BUN_BIN" install --ignore-scripts 2>&1 | tail -20
-            mkdir -p node_modules/.bin
-            ESB_VER=$(grep -oE "\"esbuild\"[^,]*" package.json | head -1 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" || echo "0.25.12")
-            cd /tmp && curl -fsSL -o esbuild-nf.tgz "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-${ESB_VER}.tgz"
-            rm -rf esbuild-nf-extract && mkdir esbuild-nf-extract && tar xzf esbuild-nf.tgz -C esbuild-nf-extract
-            cp esbuild-nf-extract/package/bin/esbuild "'"$WORK_IN_CONTAINER"'/src/node-fallbacks/node_modules/.bin/esbuild"
-            chmod +x "'"$WORK_IN_CONTAINER"'/src/node-fallbacks/node_modules/.bin/esbuild"
-            rm -rf esbuild-nf.tgz esbuild-nf-extract
-            cd "'"$WORK_IN_CONTAINER"'/src/node-fallbacks"
-            test -x node_modules/.bin/esbuild && echo "node-fallbacks esbuild bin OK" || { echo "ERROR: node-fallbacks esbuild bin not executable"; exit 1; }
-          '
-
-      - name: Configure + build Bun for OHOS
-        run: |
-          docker exec "$CONTAINER" bash -lc '
-            set -eo pipefail
-            . /etc/profile.d/brew.sh
-            cd "'"$WORK_IN_CONTAINER"'"
-            RUST_HOME=/data/storage/el2/base/tmp/rust-'"$RUST_VER"'
-            LLVM=$(brew --prefix llvm@21)
-            SDK=$(brew --prefix ohos-sdk)
-            SYSROOT="$SDK/native/sysroot"
-            test -d "$SYSROOT" || { echo "ERROR: OHOS sysroot not found at $SYSROOT"; exit 1; }
-            BOOT=$(brew --prefix bun-bootstrap)
-
-            export PATH="$RUST_HOME/bin:$LLVM/bin:$BOOT/bin:$PWD/.bin:$PATH"
-            export CC="$LLVM/bin/clang"
-            export CXX="$LLVM/bin/clang++"
-            export CARGO_HOME="$RUST_HOME/cargo"
-            export RUSTUP_HOME="$RUST_HOME"
-            export RUSTUP_TOOLCHAIN="'"$RUST_VER"'"
-            export OHOS_SDK_ROOT="$SDK"
-            export OHOS_SYSROOT="$SYSROOT"
-            export LD_LIBRARY_PATH="/tmp/rust-libs:$(brew --prefix openssl@3)/lib:$(brew --prefix libxml2)/lib:$(brew --prefix zlib)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            export TMPDIR=/data/storage/el2/base/tmp
-            # cargo needs SSL certs to download crates from crates.io.
-            # Without these, cargo fails: "download of config.json failed".
-            export SSL_CERT_FILE="$(brew --prefix)/etc/ca-certificates/cert.pem"
-            export CURL_CA_BUNDLE="$SSL_CERT_FILE"
-            # ninja install stamps run bun install --frozen-lockfile; skip
-            # postinstalls there too (esbuild 0.21.5 postinstall fails on OHOS).
-            export BUN_INSTALL_IGNORE_SCRIPTS=1
-            mkdir -p .bin && ln -sf "$LLVM/bin/llvm-strip" .bin/strip
-
-            # BUN_BIN by absolute path — bun install/build can disturb PATH.
-            BUN_BIN="$BOOT/bin/bun"
-            test -x "$BUN_BIN" || BUN_BIN=$(command -v bun)
-            test -x "$BUN_BIN" || { echo "ERROR: bun not found"; exit 1; }
-            echo "=== toolchain ==="
-            rustc --version
-            cargo --version
-            clang --version | head -1
-            "$BUN_BIN" --version
-
-            # Split build: configure -> configure-WebKit -> patch -lpthreads ->
-            # build. The patch must run AFTER cmake generates deps/WebKit/build.ninja
-            # (via configure-WebKit) but BEFORE ninja links jsc. The one-step
-            # scripts/build.ts cannot insert a patch mid-build, so we split.
-            # Mirrors self-hosted ohos-build-rust.yml patch #2.
-            echo "=== configure (webkit=local, --configure-only) ==="
-            "$BUN_BIN" scripts/build.ts \
-              --profile=release \
-              --os=ohos \
-              --arch=aarch64 \
-              --webkit=local \
-              --build-dir=build/release-ohos \
-              --ohos-sdk-root="$SDK" \
-              --ohos-sysroot="$SYSROOT" \
-              --configure-only 2>&1 | tee /tmp/build.log
-
-            echo "=== configure-WebKit (cmake generates deps/WebKit/build.ninja) ==="
-            ninja -C build/release-ohos configure-WebKit -j1 2>&1 | tee -a /tmp/build.log
-
-            # WebKit CMake FindThreads emits -lpthreads (plural) which does not
-            # exist; the lib is -lpthread (singular). webkit.ts sets
-            # CMAKE_THREAD_LIBS_INIT="-lpthread" but FindThreads ignores it
-            # (cmake warning: CMAKE_HAVE_THREADS_LIBRARY unused). Patch the
-            # generated build.ninja directly, same as self-hosted does.
-            echo "=== patch -lpthreads -> -lpthread in deps/WebKit/build.ninja ==="
-            if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
-              sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
-              echo "patched, $(grep -c -- -lpthread build/release-ohos/deps/WebKit/build.ninja) -lpthread occurrences now"
-            else
-              echo "WARNING: deps/WebKit/build.ninja not found, -lpthreads patch skipped"
-            fi
-
-            echo "=== build (ninja bun, -j${{ env.NINJA_JOBS }}) ==="
-            set +e
-            ninja -C build/release-ohos bun -j${{ env.NINJA_JOBS }} 2>&1 | tee -a /tmp/build.log
-            rc=${PIPESTATUS[0]}
-            set -e
-            if [ "$rc" -ne 0 ]; then
-                echo "=== build failed (rc=$rc) — first errors ==="
-                grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|thread.*panic|could not|not found|missing" /tmp/build.log | head -50
-                echo "=== context around first FAILED ==="
-                line=$(grep -n "FAILED:" /tmp/build.log | head -1 | cut -d: -f1)
-                [ -n "$line" ] && sed -n "$((line-30)),$((line+5))p" /tmp/build.log
-                echo "=== last 60 lines ==="
-                tail -60 /tmp/build.log
-                exit 1
-              fi
-          '
+          mkdir -p build/release-ohos
+          docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun build/release-ohos/bun 2>/dev/null || \
+            docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun-profile build/release-ohos/bun 2>/dev/null || \
+            echo "::warning::no bun binary found to copy out"
+          docker cp "$CONTAINER":/tmp/build.log /tmp/build.log 2>/dev/null || true
 
       - name: Verify binary
-        run: |
-          docker exec "$CONTAINER" bash -lc '
-            cd "'"$WORK_IN_CONTAINER"'"
-            OUT=build/release-ohos/bun
-            [ -f "$OUT" ] || OUT=build/release-ohos/bun-profile
-            echo "=== binary ==="
-            ls -lh "$OUT" 2>&1
-            file "$OUT" 2>&1
-            # `file` on this musl userspace prints "arm64" (lowercase), not
-            # "ARM aarch64" — match case-insensitively against either spelling.
-            file "$OUT" | grep -iqE "ELF.*(arm64|aarch64)" || { echo "ERROR: not an ARM64 ELF"; exit 1; }
-            echo "=== ELF header ==="
-            readelf -h "$OUT" 2>/dev/null | head -20
-            echo "=== NEEDED libs ==="
-            readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
-            echo "=== validation OK (compile-only; signing + on-device run stay on 鸿蒙 PC) ==="
-          '
-
-      - name: Copy binary out of container
         if: success()
         run: |
-          docker cp "$CONTAINER":"$WORK_IN_CONTAINER"/build/release-ohos/bun bun-ohos-aarch64 || \
-          docker cp "$CONTAINER":"$WORK_IN_CONTAINER"/build/release-ohos/bun-profile bun-ohos-aarch64 || \
-          { echo "ERROR: could not copy bun out of container"; exit 1; }
-          ls -lh bun-ohos-aarch64
-          file bun-ohos-aarch64 || true
+          set -e
+          OUT=build/release-ohos/bun
+          echo "=== binary ==="
+          ls -lh "$OUT"
+          file "$OUT"
+          file "$OUT" | grep -iqE "ELF.*(arm64|aarch64)" || { echo "ERROR: not ARM64 ELF"; exit 1; }
+          echo "=== NEEDED libs ==="
+          readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
+          # Correctness criterion (ohos-symbols-dyn-fix + ohos-v8-abi-fix):
+          # v8 must NOT be an undefined symbol — else the device tries to
+          # resolve it against the device's __n1 libcxx and crashes with
+          # "v8::Array::New... symbol not found". symbols.dyn local:* → only
+          # Bun__dlopen exported → v8 UND must be 0.
+          echo "=== v8 undefined symbols (want 0) ==="
+          v8_und=$(readelf --dyn-syms "$OUT" 2>/dev/null | grep -c "_ZN2v8.*UND" || true)
+          echo "v8 UND = $v8_und"
+          [ "$v8_und" -eq 0 ] || { echo "ERROR: v8 UND symbols present — symbols.dyn/flags.ts regression"; exit 1; }
+          echo "=== exported symbols (want only Bun__dlopen) ==="
+          readelf --dyn-syms "$OUT" 2>/dev/null | grep -E "GLOBAL.*T " | head -5
+          echo "=== validation OK ==="
 
-      - name: Upload binary
+      - name: Prepare github-hosted release asset
+        if: success()
+        id: gh_release
+        run: |
+          BIN=build/release-ohos/bun
+          test -f "$BIN" || { echo "FATAL: no bun binary to release"; exit 1; }
+          VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          COMMIT=$(git rev-parse --short HEAD)
+          cp "$BIN" /tmp/bun-ohos-aarch64-github
+          echo "asset_path=/tmp/bun-ohos-aarch64-github" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "✅ Release asset: bun-ohos-aarch64-github (v$VERSION @ $COMMIT)"
+
+      - name: Upload binary artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: bun-ohos-aarch64
-          path: bun-ohos-aarch64
+          name: bun-ohos-aarch64-github
+          path: build/release-ohos/bun
           retention-days: 90
+
+      - name: Upload github-hosted binary to ohos-latest release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ohos-latest
+          files: ${{ steps.gh_release.outputs.asset_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Dump failure diagnostics
         if: failure()
         run: |
-          docker exec "$CONTAINER" bash -lc '
-            cd "'"$WORK_IN_CONTAINER"'" || true
-            echo "=== build dir ==="; ls -la build/release-ohos/ 2>&1 | head -30
-            echo "=== context around first FAILED (50 before, 15 after) ==="
-            line=$(grep -n "FAILED:" /tmp/build.log 2>/dev/null | head -1 | cut -d: -f1)
-            if [ -n "$line" ]; then
-              echo "FAILED at line $line"
-              sed -n "$((line-50)),$((line+15))p" /tmp/build.log 2>/dev/null
-            else
-              echo "no FAILED line found in build.log"
-            fi
-            echo "=== non-Generating WebKit lines (compile/error steps) ==="
-            grep "\[WebKit\]" /tmp/build.log 2>/dev/null | grep -v "Generating \.\." | grep -v "Performing Test\|Looking for\|Platform-specific\|^Build Bun" | tail -50
-            echo "=== signal/OOM/crash lines ==="
-            grep -iE "Killed|Signal|Segmentation|Cannot|Unable|No such file|Permission denied|core dumped|SIGKILL|Out of memory|fatal:|aborted" /tmp/build.log 2>/dev/null | head -30
-            echo "=== last 200 lines of build.log ==="
-            tail -200 /tmp/build.log 2>/dev/null || true
-            echo "=== WebKit inner .ninja_log (last 30) ==="
-            tail -30 build/release-ohos/deps/WebKit/.ninja_log 2>/dev/null || echo "(no .ninja_log)"
-          ' || true
-
-      # stream.ts writes to FD 3 (sideband) which can lose buffered output on
-      # failure — the WebKit compile error is invisible in build.log. Re-run
-      # the inner WebKit ninja DIRECTLY (bypassing stream.ts) so the compiler
-      # error goes to the step's stdout/stderr, captured by GitHub Actions.
-      # -j1 for sequential, readable output. The cache restores partial build
-      # state; ninja resumes at the failed step and reproduces the error.
-      - name: Re-run WebKit build to capture error
-        if: failure()
-        run: |
-          docker exec "$CONTAINER" bash -lc '
-            set +e
-            . /etc/profile.d/brew.sh
-            cd "'"$WORK_IN_CONTAINER"'"
-            RUST_HOME=/data/storage/el2/base/tmp/rust-'"$RUST_VER"'
-            LLVM=$(brew --prefix llvm@21)
-            SDK=$(brew --prefix ohos-sdk)
-            SYSROOT="$SDK/native/sysroot"
-            BOOT=$(brew --prefix bun-bootstrap)
-            export PATH="$RUST_HOME/bin:$LLVM/bin:$BOOT/bin:$PWD/.bin:$PATH"
-            export CC="$LLVM/bin/clang"
-            export CXX="$LLVM/bin/clang++"
-            export OHOS_SDK_ROOT="$SDK"
-            export OHOS_SYSROOT="$SYSROOT"
-            export LD_LIBRARY_PATH="/tmp/rust-libs:$(brew --prefix openssl@3)/lib:$(brew --prefix libxml2)/lib:$(brew --prefix zlib)/lib"
-            export TMPDIR=/data/storage/el2/base/tmp
-            export SSL_CERT_FILE="$(brew --prefix)/etc/ca-certificates/cert.pem"
-            export CURL_CA_BUNDLE="$SSL_CERT_FILE"
-            echo "=== re-running WebKit inner ninja directly (-j1, bypass stream.ts) ==="
-            ninja -C build/release-ohos/deps/WebKit jsc -j1 2>&1 | tail -120
-          ' || true
-
-      - name: Copy build.log out of container
-        if: failure()
-        run: docker cp "$CONTAINER":/tmp/build.log build.log || echo "::warning::could not copy build.log"
+          echo "=== first errors in build.log ==="
+          grep -inE 'error\[|error:|fatal error|undefined reference|ld: error|FAILED:|Error relocating|Refusing to load|No available formula' /tmp/build.log 2>/dev/null | head -50 || true
+          echo "=== last 100 lines of build.log ==="
+          tail -100 /tmp/build.log 2>/dev/null || echo "(no build.log — failed before configure step; check step output above)"
+          echo "=== brew trust state ==="
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew tap && $BREW_ENV brew trust 2>&1 || true" || true
 
       - name: Upload build log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ohos-build-log
-          path: |
-            install.log
-            build.log
+          path: /tmp/build.log
           if-no-files-found: ignore
           retention-days: 7

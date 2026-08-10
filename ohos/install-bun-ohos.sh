@@ -2,21 +2,57 @@
 # Bun for HarmonyOS (OHOS) — Quick Install Script
 #
 # Usage:
+#   # Default: self-hosted build (Harmonybrew cross-libs, musl Rust host)
 #   curl -fsSL https://ghfast.top/https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
 #
-# Or without proxy:
-#   curl -fsSL https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
+#   # github-hosted build (self-built __n1 libcxx+compiler-rt+ICU, glibc Rust host)
+#   curl -fsSL https://ghfast.top/https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
 #
-# Install directory: ~/usr/bin/bun
+# Or without proxy:
+#   curl -fsSL https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
+#
+# Args:  self (default) | github
+#   self   → downloads bun-ohos-aarch64       → installs ~/usr/bin/bun
+#   github → downloads bun-ohos-aarch64-github → installs ~/usr/bin/bun-github
+# Both can coexist for A/B comparison.
 #
 set -eu
 
+# --- Parse args ---
+BUILD="self"   # default: self-hosted build
+for arg in "$@"; do
+  case "$arg" in
+    github|--github) BUILD="github" ;;
+    self|--self)     BUILD="self" ;;
+    --build=*)       BUILD="${arg#--build=}" ;;
+    -h|--help)
+      echo "Usage: sh install-bun-ohos.sh [self|github]"
+      echo "  self   (default) self-hosted build → bun-ohos-aarch64 → ~/usr/bin/bun"
+      echo "  github           github-hosted build → bun-ohos-aarch64-github → ~/usr/bin/bun-github"
+      exit 0 ;;
+    *) echo "Unknown arg: $arg (use self|github)" >&2; exit 1 ;;
+  esac
+done
+
 REPO="ljy9812/bun"
 RELEASE_TAG="ohos-latest"
-BINARY_NAME="bun-ohos-aarch64"
 INSTALL_DIR="$HOME/usr/bin"
-INSTALL_BIN="$INSTALL_DIR/bun"
 PROXY="${BUN_INSTALL_PROXY:-https://ghfast.top/}"
+
+# BUILD selects both the release asset name and the installed binary name so
+# the two builds coexist in ~/usr/bin (bun vs bun-github) for A/B testing.
+case "$BUILD" in
+  self)
+    BINARY_NAME="bun-ohos-aarch64"
+    INSTALL_BIN="$INSTALL_DIR/bun"
+    ;;
+  github)
+    BINARY_NAME="bun-ohos-aarch64-github"
+    INSTALL_BIN="$INSTALL_DIR/bun-github"
+    ;;
+  *)
+    echo "Unknown build: $BUILD (use self|github)" >&2; exit 1 ;;
+esac
 
 # Colors (if terminal supports them)
 if [ -t 1 ]; then
@@ -182,14 +218,14 @@ if [ -x "$INSTALL_BIN" ]; then
   fi
 
   VERSION=$("$INSTALL_BIN" --version 2>/dev/null || echo "unknown (may need signing)")
-  ok "bun $VERSION installed successfully!"
+  ok "bun $VERSION installed successfully! ($BUILD build → $(basename "$INSTALL_BIN"))"
 else
   error "Installation failed: binary not found at $INSTALL_BIN"
 fi
 
 echo ""
-echo "  bun is installed at: $INSTALL_BIN"
+echo "  Installed: $INSTALL_BIN  ($BUILD build)"
 echo "  PATH permanently added to: $BIN_DIR_ABS"
 echo ""
-echo "  Run: bun --version"
+echo "  Run: $(basename "$INSTALL_BIN") --version"
 echo ""
