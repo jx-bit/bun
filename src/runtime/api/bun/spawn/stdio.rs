@@ -36,8 +36,11 @@ pub struct Capture {
     // BACKREF: raw pointer to a capture buffer owned by the shell interpreter.
     // The shell keeps the buffer alive for the lifetime
     // of the spawned process; this struct never frees it.
+    // OHOS: stays `pub` (not upstream's pub(crate)) — the only reader is
+    // `Stdio::byte_slice`, whose sole caller lives in the memfd path that is
+    // cfg'd out on OHOS; pub(crate) would trip -D dead-code.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    pub(crate) buf: *mut Vec<u8>,
+    pub buf: *mut Vec<u8>,
 }
 
 /// Payload of `Stdio::Dup2`.
@@ -102,8 +105,10 @@ impl ToSpawnOptsError {
 }
 
 impl Stdio {
+    // OHOS: stays `pub` — the only caller is the memfd path in `use_memfd`,
+    // cfg'd out on OHOS; pub(crate) trips -D dead-code here.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    pub(crate) fn byte_slice(&self) -> &[u8] {
+    pub fn byte_slice(&self) -> &[u8] {
         match self {
             // SAFETY: `buf` is a live backref owned by the caller (shell); the
             // returned slice borrows `self` and the caller guarantees the
