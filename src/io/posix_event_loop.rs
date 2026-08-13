@@ -574,6 +574,15 @@ impl FilePoll {
         one_shot: OneShotFlag,
         fd: Fd,
     ) -> sys::Result<()> {
+        // OHOS kernel (HongMeng 1.12) does not disarm EPOLLONESHOT interests
+        // after they fire (verified 2026-08-08: an OUT|ONESHOT poll on a pty
+        // master re-fires on every wait without re-arm), and one-shot state
+        // tracking on fds sharing a file description (Terminal dups the pty
+        // master into separate read/write fds) loses the co-registered read
+        // interest's events entirely. Level-triggered registration avoids the
+        // broken path; the FilePoll re-register logic is idempotent for LT.
+        #[cfg(target_env = "ohos")]
+        let one_shot = OneShotFlag::None;
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
