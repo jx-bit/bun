@@ -571,7 +571,7 @@ impl FilePoll {
         &mut self,
         loop_: &mut Loop,
         flag: Flags,
-        one_shot: OneShotFlag,
+        _one_shot: OneShotFlag,
         fd: Fd,
     ) -> sys::Result<()> {
         // OHOS kernel (HongMeng 1.12) does not disarm EPOLLONESHOT interests
@@ -583,6 +583,8 @@ impl FilePoll {
         // broken path; the FilePoll re-register logic is idempotent for LT.
         #[cfg(target_env = "ohos")]
         let one_shot = OneShotFlag::None;
+        #[cfg(not(target_env = "ohos"))]
+        let one_shot = _one_shot;
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
