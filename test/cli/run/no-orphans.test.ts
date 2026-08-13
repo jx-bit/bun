@@ -1,6 +1,6 @@
 import { dlopen, FFIType } from "bun:ffi";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { bunEnv, bunExe, isLinux, isMusl, isWindows, tempDir } from "harness";
+import { bunEnv, bunExe, isLinux, isMusl, isOHOS, isWindows, tempDir } from "harness";
 import { chmodSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -9,6 +9,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 // observation windows with each other and with spawn latency; give the
 // concurrent debug/ASAN spawn load more headroom than the 5s default.
 setDefaultTimeout(30_000);
+
+const isPosix = (process.platform === "linux" || process.platform === "darwin") && !isOHOS;
+const isSupported = isPosix || isWindows;
 
 // --no-orphans / BUN_FEATURE_FLAG_NO_ORPHANS / [run] noOrphans: Bun watches its
 // original ppid and exits when that process dies, even if the parent was
@@ -19,9 +22,6 @@ setDefaultTimeout(30_000);
 //
 // Tree under test: test → sh (the "parent" we SIGKILL) → bun-debug → grandchild.
 // We SIGKILL sh and observe bun-debug and the grandchild.
-
-const isPosix = process.platform === "linux" || process.platform === "darwin";
-const isSupported = isPosix || isWindows;
 
 // Shared fixture dir — child.js spawns grandchild.js, prints
 // "<self> <ppid> <grandchild>", then idles. Kept on disk so we can pass it
