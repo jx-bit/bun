@@ -154,6 +154,34 @@ function needsMuslCrtDecompress(cfg: Config): boolean {
 const MUSL_CRT_OBJECTS = ["Scrt1.o", "crt1.o", "crti.o", "crtn.o"];
 
 /**
+ * HarmonyOS app sandboxes SIGSYS-kill several seccomp-filtered syscalls
+ * (close_range, fchmodat2 — the kill fires before any errno fallback can
+ * run) and return sandbox-specific errno from a few libc calls
+ * (getpwuid_r, tmpfile, getcwd). ohos-compat-shim handles all of these
+ * with a probe-then-fallback interposer, historically LD_PRELOAD'd by the
+ * harmonybrew formula wrapper scripts. Linking a vendored copy
+ * (shims/ohos_compat_shim.c) straight into the executable removes the
+ * wrapper requirement — for bun itself AND for every `bun build --compile`
+ * output, which embeds this runtime. Tracked in workarounds.ts
+ * ("ohos-compat-shim-embed").
+ */
+function needsOhosCompatShim(cfg: Config): boolean {
+  return cfg.ohos;
+}
+
+/**
+ * The shim's interposed symbols are re-exported from the executable via the
+ * global list in src/linker.lds so dlopen'd native modules (.node/.so)
+ * resolve them from the main binary too — the executable is first in the
+ * loader's global lookup order, which matches LD_PRELOAD interposition
+ * semantics. NOTE: the version script's `local: *` overrides
+ * --export-dynamic-symbol/--dynamic-list in lld (verified empirically on
+ * LLD 21), so linker.lds is the only working export mechanism here.
+ * linkat/symlinkat/splice interposers are default-on and can be disabled
+ * per-symbol via OHOS_COMPAT_SHIM_DISABLE, same as the preload .so.
+ */
+
+/**
  * Register shim compile rules. Call once from rules.ts alongside the
  * other registerXxxRules() calls.
  */
@@ -171,9 +199,9 @@ export function registerShimRules(n: Ninja, cfg: Config): void {
     });
   }
 
-  if (needsDarwinCpuModelShim(cfg)) {
-    // Plain object compiled for the cross target; $flags carries
-    // --target/-isysroot/-mmacosx-version-min from emitShims().
+  if (needsDarwinCpuModelShim(cfg) || needsOhosCompatShim(cfg)) {
+    // Plain object compiled for the target; $flags carries the per-shim
+    // --target/sysroot flags from emitShims().
     n.rule("shim_cc", {
       command: `${q(cfg.cc)} $flags -O2 -c $in -o $out`,
       description: "shim $out",
@@ -243,6 +271,26 @@ export function emitShims(n: Ninja, cfg: Config): ShimLinkOpts {
         ].join(" "),
       },
     });
+    ldflags.push(out);
+    implicitInputs.push(out);
+  }
+
+  if (needsOhosCompatShim(cfg)) {
+    const src = resolve(cfg.cwd, "scripts", "build", "shims", "ohos_compat_shim.c");
+    const out = resolve(cfg.buildDir, "ohos_compat_shim.o");
+    n.build({
+      outputs: [out],
+      rule: "shim_cc",
+      inputs: [src],
+      vars: {
+        // Same target/sysroot as the regular OHOS cc flags (flags.ts);
+        // -fPIC because the .o's symbols land in the PIE's dynamic table.
+        flags: [`--target=aarch64-linux-ohos`, `--sysroot=${cfg.ohosSysroot!}`, "-fPIC"].join(" "),
+      },
+    });
+    // A plain .o is always fully linked (no archive member selection), so
+    // its definitions interpose libc's regardless of position in the line.
+    // Dynamic-table export happens via src/linker.lds (see comment above).
     ldflags.push(out);
     implicitInputs.push(out);
   }
