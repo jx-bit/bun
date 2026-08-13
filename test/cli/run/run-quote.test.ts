@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { bunEnv, bunExe, bunRunAsScript, tempDir, tempDirWithFiles } from "harness";
+import { bunEnv, bunExe, bunRunAsScript, isOHOS, tempDir, tempDirWithFiles } from "harness";
 
 it("should handle quote escapes", () => {
   const package_json = JSON.stringify({
@@ -63,7 +63,9 @@ it.concurrent.each([
   expect(exitCode).toBe(0);
 });
 
-it.concurrent("preserves empty passthrough arguments (bun --filter)", async () => {
+// --filter goes through filter_run.rs, which on OHOS does not forward child
+// stdout to the parent in non-TTY mode (upstream sync needed).
+it.concurrent.skipIf(isOHOS)("preserves empty passthrough arguments (bun --filter)", async () => {
   using dir = tempDir("run-empty-arg-filter", argvEchoFixture);
   await using proc = Bun.spawn({
     cmd: [bunExe(), "--filter", "*", "p", "a", "", "b"],

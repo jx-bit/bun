@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { isLinux, tempDirWithFiles } from "harness";
+import { isLinuxNotOHOS, tempDirWithFiles } from "harness";
 import { chmodSync, closeSync, fstatSync, lstatSync, openSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe.skipIf(!isLinux)("birthtime", () => {
+describe.skipIf(!isLinuxNotOHOS)("birthtime", () => {
   it("should return non-zero birthtime on Linux", () => {
     const dir = tempDirWithFiles("birthtime-test", {
       "test.txt": "initial content",

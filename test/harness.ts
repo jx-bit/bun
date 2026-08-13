@@ -22,6 +22,15 @@ export const isLinux = process.platform === "linux";
 export const isFreeBSD = process.platform === "freebsd";
 export const isPosix = isMacOS || isLinux || isFreeBSD;
 export const isWindows = process.platform === "win32";
+// OHOS reports platform === "linux" but lacks some Linux syscalls (statx, memfd_create, etc.)
+export const isOHOS = (() => {
+  try {
+    return Bun.file("/system/etc/param/ohos.para").size > 0;
+  } catch {
+    return false;
+  }
+})();
+export const isLinuxNotOHOS = isLinux && !isOHOS;
 export const isIntelMacOS = isMacOS && process.arch === "x64";
 export const isArm64 = process.arch === "arm64";
 export const isDebug = Bun.version.includes("debug");

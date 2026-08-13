@@ -1334,7 +1334,10 @@ impl<'a> Linker<'a> {
         // hoisted from `defer` block in create_symlink
         if err.is_none() {
             let mode = 0o777 & !(UMASK.load(Ordering::Acquire) as Mode);
-            let _ = sys::lchmod(abs_target, mode);
+            // fchmodat(flags=0) follows the symlink and chmods the target file.
+            // lchmod changes the symlink itself — non-standard on Linux and returns
+            // ENOSYS on OHOS, silently leaving the execute bit unset.
+            let _ = sys::fchmodat(Fd::cwd(), abs_target, mode, 0);
         }
     }
 

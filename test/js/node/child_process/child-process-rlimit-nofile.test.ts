@@ -12,14 +12,18 @@
  */
 import assert from "node:assert";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 
+// OHOS reports platform === "linux" but its getrlimit/RLIMIT_NOFILE behavior differs.
+const isOHOS = existsSync("/system/etc/param/ohos.para");
+
 test(
   "child process inherits a sane RLIMIT_NOFILE (capped at 1<<20)",
-  { skip: process.platform === "win32" },
+  { skip: process.platform === "win32" || isOHOS },
   async () => {
     const inner = `console.log(require("child_process").execFileSync("/bin/sh", ["-c", "ulimit -Sn"]).toString().trim())`;
     const { stdout } = await execFileP(
