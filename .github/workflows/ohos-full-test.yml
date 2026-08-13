@@ -1,0 +1,376 @@
+# Bun OHOS Full Test Suite CI
+#
+# Runs Bun's own test/ suite (the real oven-sh/bun compat suite, vendored
+# in this repo with OHOS patches on top) against a bun binary freshly built
+# from source on this branch — not a bottled binary.
+#
+# Adapted from social4hyq/ohos-bun's github-hosted + container workflow
+# (ohos-full-test.yml) to the self-hosted bare-metal runner. Key differences:
+#
+#   1. runs-on: [self-hosted, Linux, ARM64] — no docker container, no
+#      container lifecycle management. The runner already has OHOS SDK,
+#      cross libs, ICU, and LLVM 22 installed.
+#
+#   2. bun is built from source (reuses ohos-build-rust.yml's incremental
+#      checkout + ninja build steps) rather than poured from a harmonybrew
+#      bottle. This tests the actual code on this branch.
+#
+#   3. System node runs the harness (scripts/runner.node.mjs), same as
+#      social4hyq. A broken candidate bun can't take down the harness that
+#      reports on it.
+#
+#   4. No sharding — single serial job, matching Buildkite's own invocation
+#      style (see social4hyq's header comment). The self-hosted runner is
+#      a single machine; no --parallel.
+#
+# Test invocation borrows from oven-sh/bun's own Buildkite pipeline
+# (.buildkite/ci.mjs, getTestBunStep()): same script
+# (scripts/runner.node.mjs), same flags (--exec-path/--results-json/--exclude).
+# Buildkite runs this under a stable system node; we do the same.
+#
+# --retries=1 rather than the CI default of 3: the slowest remaining
+# failures are minutes long, so 4 attempts each would cost more wall clock
+# than the entire rest of the suite. One retry still separates a hard
+# failure from a flake.
+#
+# Required runner environment (same as ohos-build-rust.yml):
+#   - OHOS SDK at /home/user/setup-ohos-sdk/
+#   - LLVM 22 toolchain (musl-compatible)
+#   - Cross-compiled ICU at bun/build/ohos-icu/
+#   - Cross-compiled libc++ at bun/build/ohos-cross-libs/
+#   - System node (for running scripts/runner.node.mjs)
+
+name: ohos-full-test
+
+run-name: "ohos-full-test (filter=${{ inputs.test-filter || 'none' }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional --include substring filter (e.g. "js/node/test/parallel"), for a quick partial run instead of the full suite'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    # Weekly, Sunday 21:00 UTC.
+    - cron: '0 21 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ohos-full-test-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  OHOS_SDK_ROOT: /home/user/setup-ohos-sdk
+  OHOS_SYSROOT: /home/user/setup-ohos-sdk/ohos/native/sysroot
+  OHOS_CROSS_LIBS: /home/user/sources/bun/build/ohos-cross-libs
+  OHOS_ICU_DIR: /home/user/sources/bun/build/ohos-icu/target
+  CARGO_INCREMENTAL: 1
+  CARGO_TARGET_DIR: /home/user/sources/bun/build/release-ohos/rust-target
+  RUSTC_WRAPPER: ""
+  NINJA_JOBS: 2
+  WEBKIT_FORK: springmin/WebKit
+  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Bun source (incremental)
+        run: |
+          LOCAL=/home/user/sources/bun
+          rm -rf bun
+          if [ -d "$LOCAL/.git" ]; then
+            git clone --reference "$LOCAL/.git" \
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun 2>/dev/null || \
+              git clone --depth 1 --branch "${{ github.ref_name }}" \
+                https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
+            cd bun
+            git fetch origin "${{ github.ref }}" --depth=1
+            git checkout -f FETCH_HEAD
+            echo "Cloned from local reference @ ${{ github.sha }}"
+          else
+            git clone --depth 1 --branch "${{ github.ref_name }}" \
+              https://ghfast.top/${{ github.server_url }}/${{ github.repository }}.git bun
+            echo "Full clone (no local reference) @ ${{ github.sha }}"
+          fi
+
+      - name: Restore Rust cargo cache
+        run: |
+          mkdir -p bun/.cargo
+          SRC_CACHE=/home/user/sources/bun/.cargo
+          if [ -d "$SRC_CACHE/registry" ]; then
+            cp -a "$SRC_CACHE/registry" bun/.cargo/registry 2>/dev/null || true
+            echo "Copied cargo registry cache"
+          else
+            echo "No cargo registry cache found"
+          fi
+
+      - name: Restore Rust incremental build artifacts
+        run: |
+          SRC_TARGET=/home/user/sources/bun/build/release-ohos/rust-target
+          if [ -d "$SRC_TARGET" ]; then
+            mkdir -p bun/build/release-ohos
+            cp -a --link "$SRC_TARGET" bun/build/release-ohos/rust-target 2>/dev/null || \
+              cp -a "$SRC_TARGET" bun/build/release-ohos/rust-target 2>/dev/null || true
+            echo "Copied Rust incremental artifacts"
+          else
+            echo "No previous Rust artifacts (full rebuild)"
+          fi
+
+      - name: Checkout WebKit fork (incremental)
+        run: |
+          LOCAL_WK=/home/user/sources/bun/vendor/WebKit
+          WK_REPO=${{ env.WEBKIT_FORK }}
+          WK_REF=${{ env.WEBKIT_REF }}
+          rm -rf bun/vendor/WebKit
+          if [ -d "$LOCAL_WK/.git" ]; then
+            git clone --reference "$LOCAL_WK/.git" --dissociate \
+              --depth 1 --branch "$WK_REF" \
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit 2>/dev/null || \
+            cp -a --link "$LOCAL_WK" bun/vendor/WebKit
+            cd bun/vendor/WebKit
+            git remote set-url origin "https://ghfast.top/https://github.com/$WK_REPO.git"
+            git fetch origin "$WK_REF" --depth=1 2>/dev/null || true
+            git checkout -f FETCH_HEAD 2>/dev/null || git checkout -f "$WK_REF"
+            echo "WebKit cloned from local reference"
+          else
+            git clone --depth 1 --branch "$WK_REF" \
+              "https://ghfast.top/https://github.com/$WK_REPO.git" bun/vendor/WebKit
+            echo "Full WebKit clone (no local reference)"
+          fi
+
+      - name: Install system dependencies
+        run: |
+          if ! rpm -q libatomic &>/dev/null; then
+            echo "libatomic not found — installing..."
+            dnf install -y libatomic 2>&1 | tail -3
+            echo "libatomic installed"
+          else
+            echo "libatomic already installed"
+          fi
+
+      - name: Setup environment
+        run: |
+          echo "OHOS_SDK_ROOT=${{ env.OHOS_SDK_ROOT }}" >> $GITHUB_ENV
+          echo "OHOS_SYSROOT=${{ env.OHOS_SYSROOT }}" >> $GITHUB_ENV
+          echo "OHOS_CROSS_LIBS=${{ env.OHOS_CROSS_LIBS }}" >> $GITHUB_ENV
+          echo "OHOS_ICU_DIR=${{ env.OHOS_ICU_DIR }}" >> $GITHUB_ENV
+          test -d "$OHOS_SDK_ROOT" || { echo "OHOS SDK not found"; exit 1; }
+          mkdir -p bun/build
+          [ -L bun/build/ohos-cross-libs ] && [ "$(readlink bun/build/ohos-cross-libs)" = "$OHOS_CROSS_LIBS" ] || ln -sfn "$OHOS_CROSS_LIBS" bun/build/ohos-cross-libs
+          [ -L bun/build/ohos-icu ] && [ "$(readlink bun/build/ohos-icu)" = "$(dirname $OHOS_ICU_DIR)" ] || ln -sfn "$(dirname $OHOS_ICU_DIR)" bun/build/ohos-icu
+          test -d bun/build/ohos-cross-libs/libcxx/lib || { echo "Cross libs not found"; exit 1; }
+          test -d bun/build/ohos-icu/target/lib || { echo "ICU not found"; exit 1; }
+          echo "PATH=$OHOS_SDK_ROOT/llvm-22/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=$OHOS_SDK_ROOT/llvm-22/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$OHOS_SDK_ROOT/llvm-22/bin/clang++" >> $GITHUB_ENV
+          echo "Environment ready (clang: $($OHOS_SDK_ROOT/llvm-22/bin/clang --version | head -1))"
+
+      - name: Restore incremental build artifacts
+        run: |
+          CACHE_DIR=/home/user/actions-runner/_work/_cache/ohos-build
+          if [ -d "$CACHE_DIR" ]; then
+            mkdir -p bun/build/release-ohos/deps
+            for dep_dir in deps/WebKit obj vendor; do
+              src="$CACHE_DIR/$dep_dir"
+              dst="bun/build/release-ohos/$dep_dir"
+              [ -d "$src" ] && cp -a --link "$src" "$dst" 2>/dev/null || true
+            done
+            echo "Restored cached build artifacts"
+          else
+            echo "No cached build artifacts (full build)"
+          fi
+
+      - name: Extract WebKit version for cache key
+        id: webkit-version
+        run: |
+          WK_VER=$(grep "^export const WEBKIT_VERSION" bun/scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
+          echo "version=${WK_VER}" >> $GITHUB_OUTPUT
+          echo "Cache key: webkit-ohos-test-${{ env.WEBKIT_REF }}-${WK_VER}"
+
+      - name: Cache WebKit build
+        uses: actions/cache@v4
+        id: webkit-cache
+        with:
+          path: bun/build/release-ohos/deps/WebKit
+          key: webkit-ohos-test-${{ env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}
+
+      - name: Configure Bun build
+        working-directory: bun
+        run: |
+          bun run build:release \
+            --os=ohos \
+            --arch=aarch64 \
+            --webkit=local \
+            --build-dir=build/release-ohos \
+            --ohos-sysroot=$OHOS_SYSROOT \
+            --configure-only
+        env:
+          CI: true
+
+      - name: Patch build.ninja for OHOS host compilation
+        working-directory: bun
+        run: |
+          if grep -q "llvm-22/bin/clang \$flags -o \$out \$in" build/release-ohos/build.ninja 2>/dev/null; then
+            sed -i 's|command = .*/llvm-22/bin/clang $flags -o $out $in|command = /usr/bin/clang $flags -o $out $in|' \
+              build/release-ohos/build.ninja
+            echo "Patched dep_host_cc to use system clang"
+          else
+            echo "dep_host_cc rule not found or already patched"
+          fi
+          if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
+            sed -i 's/-lpthreads/-lpthread/g' build/release-ohos/deps/WebKit/build.ninja
+            echo "Patched -lpthreads -> -lpthread"
+          fi
+          if [ -f .cargo/config.toml ] && grep -q 'aarch64-unknown-linux-gnu' .cargo/config.toml; then
+            python3 -c "
+          import re
+          with open('.cargo/config.toml', 'r') as f:
+              content = f.read()
+          content = re.sub(
+              r'\[target\.aarch64-unknown-linux-gnu\]\nlinker = \"[^\"]*\"',
+              '[target.aarch64-unknown-linux-gnu]\nlinker = \"/usr/bin/clang++\"',
+              content
+          )
+          with open('.cargo/config.toml', 'w') as f:
+              f.write(content)
+          print('Patched Rust host linker to system clang++')
+          " || echo "Could not patch .cargo/config.toml"
+          fi
+          if ! grep -q "RUSTUP_DIST_SERVER" build/release-ohos/build.ninja 2>/dev/null; then
+            RUST_DATE=$(grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' rust-toolchain.toml | head -1 | cut -d- -f2-)
+            RUSTUP_DIST_SERVER=""
+            RUSTUP_UPDATE_ROOT=""
+            for mirror in \
+              "https://rsproxy.cn|https://rsproxy.cn/rustup" \
+              "https://mirrors.tuna.tsinghua.edu.cn/rustup|https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup" \
+              "https://static.rust-lang.org|https://static.rust-lang.org/rustup"; do
+              dist_server=$(echo "$mirror" | cut -d'|' -f1)
+              if curl -sfI --max-time 6 "$dist_server/dist/$RUST_DATE/channel-rust-nightly.toml.sha256" -o /dev/null 2>&1; then
+                RUSTUP_DIST_SERVER="$dist_server"
+                RUSTUP_UPDATE_ROOT=$(echo "$mirror" | cut -d'|' -f2)
+                break
+              fi
+            done
+            if [ -z "$RUSTUP_DIST_SERVER" ]; then
+              echo "No rustup mirror reachable, defaulting to rsproxy.cn"
+              RUSTUP_DIST_SERVER="https://rsproxy.cn"
+              RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+            fi
+            echo "Selected RUSTUP mirror: $RUSTUP_DIST_SERVER"
+            sed -i "s|--env=CARGO_HOME=/home/user/.cargo|--env=CARGO_HOME=/home/user/.cargo --env=RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER --env=RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT|g" \
+              build/release-ohos/build.ninja 2>/dev/null || true
+            echo "Added RUSTUP mirror config ($RUSTUP_DIST_SERVER)"
+          fi
+
+      - name: Build WebKit
+        if: steps.webkit-cache.outputs.cache-hit != 'true'
+        working-directory: bun
+        run: |
+          ninja -C build/release-ohos configure-WebKit -j1
+          ninja -C build/release-ohos/deps/WebKit jsc -j$NINJA_JOBS
+
+      - name: Build Bun
+        working-directory: bun
+        run: |
+          ninja -C build/release-ohos bun -j$NINJA_JOBS || {
+            echo "First ninja run failed (likely optional npm dep), retrying..."
+            ninja -C build/release-ohos bun -j$NINJA_JOBS
+          }
+
+      - name: Verify binary
+        working-directory: bun
+        run: |
+          file build/release-ohos/bun
+          ls -lh build/release-ohos/bun
+          file build/release-ohos/bun | grep -q "ELF.*ARM aarch64" || {
+            echo "ERROR: Not an ARM64 ELF binary"
+            file build/release-ohos/bun
+            exit 1
+          }
+          echo "Binary validation passed"
+
+      - name: Verify node is available
+        run: |
+          node --version || { echo "ERROR: node not found in PATH"; exit 1; }
+          echo "node: $(node --version)"
+
+      # scripts/bootstrap.sh (this repo's own canonical CI bootstrap) runs
+      # `bun install --ignore-scripts` in BOTH the repo root and test/ before
+      # any test runs. Skipping either breaks real test files:
+      #   - test/ alone: stringWidth/stripANSI import packages declared only
+      #     in test/package.json.
+      #   - root before test/: test/'s lockfile pins react as
+      #     `file:../node_modules/react`, so `cd test && bun install` 404s
+      #     unless root has already been installed first.
+      #   - --ignore-scripts on both: without it, test/'s puppeteer postinstall
+      #     tries to download Chromium and throws for unsupported platform.
+      - name: Install npm dependencies (root, then test/)
+        working-directory: bun
+        run: |
+          ./build/release-ohos/bun install --ignore-scripts
+          cd test
+          ../build/release-ohos/bun install --ignore-scripts
+
+      # No --parallel (single serial job, matches Buildkite's invocation style).
+      # --retries=1 instead of the CI default of 3 (see header note).
+      # --quiet keeps the log from ballooning over a run this long.
+      # --results-json is the artifact for follow-up triage; the exit code
+      # IS the gate.
+      #
+      # --exclude=bake/dev: bake.DevServer is gated by IS_CANARY || IS_DEBUG
+      # in a stable release build, so bake() is compiled off.
+      #
+      # CI is passed explicitly because test/harness.ts gates test bodies on
+      # process.env.CI (e.g. css-fuzz.test.ts runs 2600-iteration fuzz loops
+      # in non-CI mode that take hours). BUN_TEST_NO_SECRETS: this lane has
+      # no secret store, so getSecret() returns undefined instead of throwing.
+      - name: Run test suite
+        working-directory: bun
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+          CI: 'true'
+          BUN_TEST_NO_SECRETS: '1'
+        run: |
+          INCLUDE_ARGS=()
+          if [ -n "$TEST_FILTER" ]; then
+            INCLUDE_ARGS=(--include="$TEST_FILTER")
+          fi
+
+          set +e
+          node scripts/runner.node.mjs \
+            --exec-path="$PWD/build/release-ohos/bun" \
+            --quiet \
+            --retries=1 \
+            --results-json=results.json \
+            --exclude=integration/bun-types \
+            --exclude=internal/source-lints \
+            --exclude=bake/dev \
+            --exclude=js/bun/ffi/cc.test.ts \
+            --exclude=regression/issue/20144 \
+            --exclude=regression/issue/26249 \
+            "${INCLUDE_ARGS[@]}"
+          RUNNER_EXIT=$?
+          set -e
+
+          echo "runner exit code: $RUNNER_EXIT"
+          exit $RUNNER_EXIT
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-full-test-results-${{ github.run_number }}
+          path: bun/results.json
+          retention-days: 30
+          if-no-files-found: ignore
