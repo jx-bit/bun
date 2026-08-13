@@ -21,7 +21,7 @@ export type OS = "linux" | "darwin" | "windows" | "freebsd" | "ohos";
 export type Arch = "x64" | "aarch64";
 export type Abi = "gnu" | "musl" | "android";
 export type BuildType = "Debug" | "Release" | "RelWithDebInfo" | "MinSizeRel";
-export type BuildMode = "full" | "cpp-only" | "rust-only" | "link-only";
+export type BuildMode = "full" | "cpp-only" | "rust-only" | "link-only" | "rust-and-link" | "archive-link";
 export type WebKitMode = "prebuilt" | "local";
 
 /**
@@ -1279,9 +1279,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     cacheDir,
     vendorDir,
     cc: toolchain.cc,
-    hostCc: ohos ? findHostCc() : toolchain.cc,
+    hostCc: ohos ? findHostCc() : (toolchain.hostCc ?? toolchain.cc),
     cxx: toolchain.cxx,
-    hostCc: toolchain.hostCc ?? toolchain.cc,
     hostCxx: toolchain.hostCxx ?? toolchain.cxx,
     clangVersion: toolchain.clangVersion,
     clangResourceDir: toolchain.clangResourceDir,

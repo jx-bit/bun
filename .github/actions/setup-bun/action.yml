@@ -23,6 +23,10 @@ runs:
   steps:
     - name: Setup Bun
       shell: bash
+      env:
+        BUN_VERSION: ${{ inputs.bun-version }}
+        BUN_BASELINE: ${{ inputs.baseline }}
+        BUN_DOWNLOAD_URL: ${{ inputs.download-url }}
       run: |
         case "$(uname -s)" in
           Linux*)  os=linux;;
@@ -33,29 +37,23 @@ runs:
           arm64 | aarch64)  arch=aarch64;;
           *)                arch=x64;;
         esac
-        case "${{ inputs.baseline }}" in
+        case "$BUN_BASELINE" in
           true | 1) target="bun-${os}-${arch}-baseline";;
           *)        target="bun-${os}-${arch}";;
         esac
-        case "${{ inputs.bun-version }}" in
+        case "$BUN_VERSION" in
           latest) release="latest";;
           canary) release="canary";;
-          *)      release="bun-v${{ inputs.bun-version }}";;
+          *)      release="bun-v${BUN_VERSION}";;
         esac
-        curl -LO "${{ inputs.download-url }}/${release}/${target}.zip" --retry 5
-        unzip ${target}.zip
-        # runner.temp on Windows is "D:\a\_temp" — bare backslashes get eaten
-        # by bash (\a -> a, \_ -> _), mangling the path to "D:a_temp". Capture
-        # into a var and slash-convert so mkdir/mv/ln resolve the real dir on
-        # both Git Bash (Windows) and POSIX hosts (no-op there).
-        BUN_TMP="${{ runner.temp }}"
-        BUN_TMP="${BUN_TMP//\\//}"
-        mkdir -p "$BUN_TMP/.bun/bin"
-        mv ${target}/bun* "$BUN_TMP/.bun/bin/"
-        chmod +x "$BUN_TMP/.bun/bin/"*
+        curl -LO "${BUN_DOWNLOAD_URL}/${release}/${target}.zip" --retry 5
+        unzip "${target}.zip"
+        mkdir -p "$RUNNER_TEMP/.bun/bin"
+        mv "${target}"/bun* "$RUNNER_TEMP/.bun/bin/"
+        chmod +x "$RUNNER_TEMP"/.bun/bin/*
         # bunx = bun alias. On Windows Git Bash, ln -s may fall back to a
         # copy or fail entirely if symlink support is off; cp is a safe
         # fallback (bunx just needs to exec bun). On POSIX ln -s works.
-        ln -fs "$BUN_TMP/.bun/bin/bun" "$BUN_TMP/.bun/bin/bunx" 2>/dev/null \
-          || cp -f "$BUN_TMP/.bun/bin/bun"* "$BUN_TMP/.bun/bin/bunx"
-        echo "$BUN_TMP/.bun/bin" >> ${GITHUB_PATH}
+        ln -fs "$RUNNER_TEMP/.bun/bin/bun" "$RUNNER_TEMP/.bun/bin/bunx" 2>/dev/null \
+          || cp -f "$RUNNER_TEMP"/.bun/bin/bun* "$RUNNER_TEMP/.bun/bin/bunx"
+        echo "$RUNNER_TEMP/.bun/bin" >> "$GITHUB_PATH"
