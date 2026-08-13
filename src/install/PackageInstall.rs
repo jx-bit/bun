@@ -1613,19 +1613,6 @@ impl<'a> PackageInstall<'a> {
                             );
                         }
                         EntryKind::File => {
-                            // EACCES/EPERM: FUSE (e.g. Android SDCARD) does not support hardlinks
-                            fn map_linkat_err(err: sys::Error) -> crate::Error {
-                                match err.get_errno() {
-                                    sys::E::EXDEV | sys::E::EACCES | sys::E::EPERM => {
-                                        crate::Error::NotSameFileSystem
-                                    }
-                                    sys::E::ENXIO => {
-                                        crate::Error::Sys(bun_errno::SystemErrno::ENXIO)
-                                    }
-                                    _ => err.into(),
-                                }
-                            }
-
                             if let Err(err) = sys::linkat(
                                 entry.dir,
                                 entry.basename,
