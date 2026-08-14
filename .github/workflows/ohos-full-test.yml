@@ -45,6 +45,11 @@ name: ohos-full-test
 run-name: "ohos-full-test (filter=${{ inputs.test-filter || 'none' }})"
 
 on:
+  push:
+    branches:
+      - ohos-aarch64
+    paths:
+      - '.github/workflows/ohos-full-test.yml'
   workflow_dispatch:
     inputs:
       test-filter:
