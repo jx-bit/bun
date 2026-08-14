@@ -21,6 +21,31 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 using D8 = hn::CappedTag<uint8_t, 64>;
 
+#if HWY_TARGET == HWY_SVE || HWY_TARGET == HWY_SVE2
+// SVE/SVE2 backends lack hn::BitsFromMask. Polyfill: compress iota indices
+// through the mask, then build the bitmask from the stored lane indices.
+template<class D, class M>
+HWY_INLINE uint64_t BitsFromMask(D d, M mask) {
+    const hn::RebindToUnsigned<decltype(d)> du;
+    using T = hn::TFromD<D>;
+    const size_t N = hn::Lanes(d);
+    const auto iota = hn::Iota(du, T{0});
+    alignas(64) T idx[64];
+    const size_t count = hn::CompressStore(iota, mask, d, idx);
+    uint64_t result = 0;
+    for (size_t i = 0; i < count; ++i) {
+        result |= uint64_t{1} << static_cast<unsigned>(idx[i]);
+    }
+    return result;
+}
+#endif
+
+#if HWY_TARGET == HWY_SVE || HWY_TARGET == HWY_SVE2
+#define BUN_BFM(d, mask) BitsFromMask(d, mask)
+#else
+#define BUN_BFM(d, mask) hn::BitsFromMask(d, mask)
+#endif
+
 // The classes of one 64-position block, as bit masks.
 struct BlockMasks {
     uint64_t lt = 0, gt = 0, always = 0, tag = 0, nonchar = 0;
@@ -36,10 +61,10 @@ static HWY_INLINE void Classify(D8 d, V lo, unsigned sh, BlockMasks& m)
     const auto v_zero = hn::Zero(d);
     const auto cls = hn::And(hn::TableLookupBytes(lut_lo, hn::And(lo, v_0f)),
         hn::TableLookupBytes(lut_hi, hn::ShiftRight<4>(lo)));
-    m.lt |= hn::BitsFromMask(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_LT)), v_zero)) << sh;
-    m.gt |= hn::BitsFromMask(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_GT)), v_zero)) << sh;
-    m.always |= hn::BitsFromMask(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_ALWAYS)), v_zero)) << sh;
-    m.tag |= hn::BitsFromMask(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_TAG)), v_zero)) << sh;
+    m.lt |= BUN_BFM(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_LT)), v_zero)) << sh;
+    m.gt |= BUN_BFM(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_GT)), v_zero)) << sh;
+    m.always |= BUN_BFM(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_ALWAYS)), v_zero)) << sh;
+    m.tag |= BUN_BFM(d, hn::Ne(hn::And(cls, hn::Set(d, (uint8_t)BUN_XML_CLASS_TAG)), v_zero)) << sh;
 }
 
 // The part both kernels share: `in_tag` = MatchStar(lt, ~gt) — every position reachable from a
@@ -105,9 +130,9 @@ size_t XmlIndexImpl(const uint8_t* HWY_RESTRICT input, size_t len, size_t base_o
             const auto chunk = hn::LoadU(d, p + v * N);
             const unsigned sh = (unsigned)(v * N);
             Classify(d, chunk, sh, m);
-            m_ef |= hn::BitsFromMask(d, hn::Eq(chunk, v_ef)) << sh;
-            m_bf |= hn::BitsFromMask(d, hn::Eq(chunk, v_bf)) << sh;
-            m_bebf |= hn::BitsFromMask(d, hn::Eq(hn::Or(chunk, v_01), v_bf)) << sh;
+            m_ef |= BUN_BFM(d, hn::Eq(chunk, v_ef)) << sh;
+            m_bf |= BUN_BFM(d, hn::Eq(chunk, v_bf)) << sh;
+            m_bebf |= BUN_BFM(d, hn::Eq(hn::Or(chunk, v_01), v_bf)) << sh;
         }
         m.nonchar = m_bebf & ((m_bf << 1) | (prev_bf >> 63)) & ((m_ef << 2) | (prev_ef >> 62));
         prev_ef = m_ef;
@@ -168,16 +193,16 @@ size_t XmlIndex16Impl(const uint16_t* HWY_RESTRICT input, size_t len, size_t bas
             const unsigned sh = (unsigned)(v * N);
             BlockMasks unit;
             Classify(d, lo, 0, unit);
-            const uint64_t ascii = hn::BitsFromMask(d, hn::Eq(hi, v_zero));
+            const uint64_t ascii = BUN_BFM(d, hn::Eq(hi, v_zero));
             m.lt |= (unit.lt & ascii) << sh;
             m.gt |= (unit.gt & ascii) << sh;
             m.always |= (unit.always & ascii) << sh;
             m.tag |= (unit.tag & ascii) << sh;
-            const uint64_t nonchar = hn::BitsFromMask(d, hn::And(hn::Eq(hi, v_ff), hn::Eq(hn::Or(lo, v_01), v_ff)));
+            const uint64_t nonchar = BUN_BFM(d, hn::And(hn::Eq(hi, v_ff), hn::Eq(hn::Or(lo, v_01), v_ff)));
             m.nonchar |= nonchar << sh;
             const auto plane = hn::And(hi, v_fc);
-            lead |= hn::BitsFromMask(d, hn::Eq(plane, v_d8)) << sh;
-            trail |= hn::BitsFromMask(d, hn::Eq(plane, v_dc)) << sh;
+            lead |= BUN_BFM(d, hn::Eq(plane, v_d8)) << sh;
+            trail |= BUN_BFM(d, hn::Eq(plane, v_dc)) << sh;
         }
         lead &= valid;
         trail &= valid;
