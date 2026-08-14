@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { isLinuxNotOHOS, tempDir } from "harness";
+import { isLinux, tempDir } from "harness";
 import { chmodSync, closeSync, fstatSync, lstatSync, openSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe.skipIf(!isLinuxNotOHOS)("birthtime", () => {
+// hmdfs (OHOS's overlay fs on /data/storage) doesn't populate statx birth
+// time even though the syscall itself succeeds; birthtimeMs reads back 0.
+describe.skipIf(!isLinux || process.platform === "openharmony")("birthtime", () => {
   it("should return non-zero birthtime on Linux", () => {
     using dir = tempDir("birthtime-test", {
       "test.txt": "initial content",

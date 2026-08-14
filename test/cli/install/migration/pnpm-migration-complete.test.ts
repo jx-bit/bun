@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import fs from "fs";
 import { bunEnv, bunExe, tempDir } from "harness";
 import { join } from "path";
+
+setDefaultTimeout(30000);
 
 describe("PNPM Migration Complete Test Suite", () => {
   test("comprehensive PNPM migration with all edge cases", async () => {

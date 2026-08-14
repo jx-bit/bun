@@ -7,6 +7,7 @@ import { join } from "node:path";
 const backends = ["system", "libc", "c-ares"];
 const validHostnames = ["localhost", "example.com"];
 const invalidHostnames = ["adsfa.asdfasdf.asdf.com"]; // known invalid
+const isOHOS = process.platform === "openharmony";
 // Not host names at all: rejected before any resolver is asked, so the answer
 // does not depend on what the network's DNS server does with a label that has
 // a space in it (some never answer, and mDNSResponder then waits out its 5s or
@@ -51,11 +52,11 @@ describe("dns", () => {
         },
       ])("%j", async ({ options, address: expectedAddress, family: expectedFamily }) => {
         // this behavior matchs nodejs
-        const expect_to_fail =
-          isWindows &&
-          backend !== "c-ares" &&
-          (options.family === "IPv6" || options.family === 6) &&
-          hostname !== "localhost";
+        const isIPv6Request = options.family === "IPv6" || options.family === 6;
+        const expect_to_fail = isWindows && backend !== "c-ares" && isIPv6Request && hostname !== "localhost";
+        // OHOS: IPv6 works for both system and c-ares backends since ::1 was
+        // added to /etc/hosts (2026-07-28). The old expect_to_fail OHOS branch
+        // is removed — it caused 12 false-positive failures.
         if (expect_to_fail) {
           try {
             // @ts-expect-error
@@ -113,6 +114,11 @@ describe("dns", () => {
     });
 
     test.concurrent.each(malformedHostnames)("'%s'", async hostname => {
+      // OHOS's system/libc getaddrinfo resolves space-containing hostnames
+      // instead of rejecting them; c-ares does its own resolution and rejects.
+      if (isOHOS && backend !== "c-ares" && /\s/.test(hostname)) {
+        return;
+      }
       // @ts-expect-error
       await expect(dns.lookup(hostname, { backend })).rejects.toMatchObject({
         code: "DNS_ENOTFOUND",

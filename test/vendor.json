@@ -3,6 +3,14 @@
     "package": "elysia",
     "repository": "https://github.com/elysiajs/elysia",
     "tag": "1.4.28",
+    "overrides": {
+      "esbuild": "^0.25.6",
+      "rollup": "^4.62.0"
+    },
+    "overridesReason": {
+      "esbuild": "TEMPORARY: elysia 1.4.28's committed bun.lock pins esbuild@0.25.4, and @esbuild/openharmony-arm64 first ships in 0.25.6. On OpenHarmony the postinstall dies with 'Unsupported platform: openharmony-arm64' and takes the whole `bun install` with it, so the vendor package never gets as far as building. A genuine version gap; remove once elysia's lockfile carries esbuild >= 0.25.6.",
+      "rollup": "TEMPORARY, and NOT a version gap: the lockfile pins rollup@4.53.3, which already has the OpenHarmony target (@rollup/rollup-openharmony-arm64 ships from 4.50.0) and the lockfile even records that exact entry. Installing from that lockfile on OpenHarmony nonetheless leaves node_modules/@rollup empty, and rollup's native.js then throws 'Cannot find module @rollup/rollup-openharmony-arm64' during `bun run build`; only a fresh resolution installs the binding. So the range has to be one the lockfile cannot satisfy — ^4.50.0 would be satisfied by the pinned 4.53.3 and change nothing. Revisit if a lockfile-driven install stops skipping platform optional dependencies."
+    },
     "skipTests": {
       "ws*connection.test.ts": "TEMPORARY: elysia 1.4.28 asserts wasClean=false for a server-initiated ws.close(), but that's a clean Close handshake — Bun now reports wasClean=true to match Node/WHATWG (oven-sh/bun#31518). Fixed upstream in elysiajs/elysia#1908; remove this skip on the next elysia bump. (glob * = path separator, so it also matches Windows backslash paths)",
       "core*stop.test.ts": "TEMPORARY: elysia 1.4.28's 'does not shut down the server when stop(false) is called' awaits server.stop(false) and then expects a second fetch on the same keep-alive connection to still be served. As of oven-sh/bun#35130 a graceful stop(false) resolves only once every open connection has closed, so the await blocks until the pooled keep-alive times out and the follow-up fetch then hits a closed listener. Remove this skip once the upstream test is updated (the companion 'stop(true)' assertion in the same file is unaffected).",

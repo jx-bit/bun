@@ -4,8 +4,11 @@ import { cp, rm, writeFile } from "fs/promises";
 import { bunExe, bunEnv as env, isArm64, isWindows, tempDir } from "harness";
 import { join } from "path";
 
-// esbuild@0.19.8 does not support win32-arm64 at runtime
 const isWindowsArm64 = isWindows && isArm64;
+const isOHOSArm64 = process.platform === "openharmony";
+// esbuild@0.19.8 has no OHOS binary; esbuild@0.28.1 added @esbuild/openharmony-arm64.
+// Only bump the version under test on OHOS — other platforms keep the pinned baseline.
+const esbuildVersion = isOHOSArm64 ? "0.28.1" : "0.19.8";
 
 beforeAll(() => {
   setDefaultTimeout(1000 * 60 * 5);
@@ -22,7 +25,7 @@ describe.concurrent("esbuild integration test", () => {
     const packageDir = dir + "";
 
     var { stdout, stderr, exited } = spawn({
-      cmd: [bunExe(), "install", "esbuild@0.19.8"],
+      cmd: [bunExe(), "install", `esbuild@${esbuildVersion}`],
       cwd: packageDir,
       stdout: "pipe",
       stdin: "pipe",
@@ -33,7 +36,7 @@ describe.concurrent("esbuild integration test", () => {
     var err = await stderr.text();
     var out = await stdout.text();
     expect(err).toContain("Saved lockfile");
-    expect(out).toContain("esbuild@0.19.8");
+    expect(out).toContain(`esbuild@${esbuildVersion}`);
     expect(await exited).toBe(0);
 
     ({ stdout, stderr, exited } = spawn({
@@ -48,11 +51,11 @@ describe.concurrent("esbuild integration test", () => {
     err = await stderr.text();
     out = await stdout.text();
     expect(err).toBe("");
-    expect(out).toContain("0.19.8");
+    expect(out).toContain(esbuildVersion);
     expect(await exited).toBe(0);
   });
 
-  test.skipIf(isWindowsArm64)("install and use estrella", async () => {
+  test.skipIf(isWindowsArm64 || isOHOSArm64)("install and use estrella", async () => {
     using dir = tempDir("esbuild-estrella-test", {
       "package.json": JSON.stringify({
         name: "bun-esbuild-estrella-test",

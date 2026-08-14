@@ -58,6 +58,7 @@
   "type": "module",
   "dependencies": {
     "vite": "npm:rolldown-vite@^7.3.1",
+    "lightningcss": "npm:@ohos-ports/lightningcss@1.32.0",
     "@ethercorps/sveltekit-og": "^3.0.0",
     "@internationalized/date": "^3.6.0",
     "@lucia-auth/adapter-postgresql": "^3.1.2",

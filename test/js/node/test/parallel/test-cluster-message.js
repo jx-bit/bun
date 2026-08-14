@@ -103,13 +103,13 @@ if (cluster.isWorker) {
   worker.on('message', function(message) {
     check('primary', message === 'message from worker');
   });
-  cluster.on('message', common.mustCall((worker_, message) => {
+  cluster.on('message', function(worker_, message) {
     assert.strictEqual(worker_, worker);
     check('global', message === 'message from worker');
-  }));
+  });
 
   // When a TCP server is listening in the worker connect to it
-  worker.on('listening', common.mustCall((address) => {
+  worker.on('listening', function(address) {
 
     client = net.connect(address.port, function() {
       // Send message to worker.
@@ -135,12 +135,12 @@ if (cluster.isWorker) {
     worker.on('exit', common.mustCall(function() {
       process.exit(0);
     }));
-  }));
+  });
 
   process.once('exit', function() {
-    for (const [type, check] of Object.entries(checks)) {
+    forEach(checks, function(check, type) {
       assert.ok(check.receive, `The ${type} did not receive any message`);
       assert.ok(check.correct, `The ${type} did not get the correct message`);
-    }
+    });
   });
 }

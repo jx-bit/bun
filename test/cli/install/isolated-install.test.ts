@@ -811,7 +811,13 @@ describe("optional peers", () => {
 });
 
 // https://github.com/oven-sh/bun/issues/28147
-test("patched package shared by multiple peer variants is materialized into the cache once", async () => {
+// OHOS's app sandbox blocks hardlink creation outright, so `--backend
+// hardlink` silently degrades to copying instead — install correctness is
+// unaffected (content matches), but the single-shared-inode assertion this
+// test forces the hardlink backend specifically to check cannot hold here.
+test.skipIf(process.platform === "openharmony")(
+  "patched package shared by multiple peer variants is materialized into the cache once",
+  async () => {
   const { packageJson, packageDir } = await registry.createTestDir({ bunfigOpts: { linker: "isolated" } });
 
   // `peer-deps@1.0.0` has `peerDependencies: { "no-deps": "*" }`. Giving each
@@ -909,7 +915,8 @@ index 0000000000000000000000000000000000000000..3b18e512dba79e4c8300dd08aeb37f8e
   await rm(join(packageDir, "node_modules"), { recursive: true, force: true });
   await install();
   await checkInstall();
-});
+  },
+);
 
 test("adding, removing and re-adding a patch for an npm dependency", async () => {
   const { packageJson, packageDir } = await registry.createTestDir({ bunfigOpts: { linker: "isolated" } });

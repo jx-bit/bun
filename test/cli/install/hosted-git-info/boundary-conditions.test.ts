@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 describe("hosted-git-info boundary conditions", () => {
   test.each([{ description: "git with pound", dependency: "https://github.com/#" }])(

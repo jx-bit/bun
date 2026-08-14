@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { isASAN, isDebug } from "harness";
 
 const asanIsSlowMultiplier = isASAN ? 0.2 : 1;
-const count = Math.floor(10000 * asanIsSlowMultiplier);
+// OHOS hmdfs I/O is ~3-5x slower than Linux ext4 for many-small-files workloads.
+const ohosIsSlowMultiplier = process.platform === "openharmony" ? 0.2 : 1;
+const count = Math.floor(10000 * asanIsSlowMultiplier * ohosIsSlowMultiplier);
 
 test(
   `load the same file ${count} times`,

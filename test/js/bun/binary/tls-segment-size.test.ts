@@ -15,8 +15,10 @@
 // every platform rather than only showing up as a Windows size bump.
 
 import { describe, expect, test } from "bun:test";
-import { isFreeBSD, isLinux, isOHOS, isWindows, preadExact, readElf64ProgramHeaders } from "harness";
+import { isFreeBSD, isLinux, isWindows, preadExact, readElf64ProgramHeaders } from "harness";
 import { closeSync, openSync } from "node:fs";
+
+const isOhos = process.platform === "openharmony";
 
 /**
  * ELF: size of the PT_TLS segment's in-memory template (p_memsz). This is
@@ -70,7 +72,7 @@ describe("static TLS footprint", () => {
   // static threadlocal will.
   const CEILING = 192 * 1024;
 
-  test.skipIf(!(isLinux || isFreeBSD) || isOHOS)("ELF PT_TLS MemSiz stays under the ceiling", () => {
+  test.skipIf(!(isLinux || isFreeBSD) || isOhos)("ELF PT_TLS MemSiz stays under the ceiling", () => {
     const size = elfTlsMemSize(process.execPath);
     console.log(`PT_TLS p_memsz = ${size} bytes (${(size / 1024).toFixed(1)} KB)`);
     expect(size).toBeGreaterThan(0);

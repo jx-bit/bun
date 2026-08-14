@@ -74,7 +74,10 @@ describe("pipeline stack edge cases", () => {
   });
 
   describe("cd builtin in pipelines", () => {
-    TestBuilder.command`cd / | pwd`
+    // `cd ..` rather than `cd /`: the point of this test is only that a `cd`
+    // in one pipeline stage doesn't leak into the next stage's cwd, and OHOS's
+    // app sandbox blocks cd'ing into `/` outright ("Permission denied: /").
+    TestBuilder.command`cd .. | pwd`
       .stdout(s => s.includes("$TEMP_DIR"))
       .ensureTempDir()
       .runAsTest("cd | pwd - cd doesn't affect next command in pipeline");
@@ -84,7 +87,8 @@ describe("pipeline stack edge cases", () => {
       .ensureTempDir()
       .runAsTest("cd | cd | pwd - multiple cd's don't affect");
 
-    TestBuilder.command`pwd | cd / | pwd`
+    // Same `cd ..` substitution as above.
+    TestBuilder.command`pwd | cd .. | pwd`
       .stdout(s => {
         const lines = s.trim().split("\n");
         return lines.length === 2 && lines[0].includes("$TEMP_DIR") && lines[1].includes("$TEMP_DIR");

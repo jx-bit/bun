@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "bun";
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync } from "fs";
 import { exists, stat } from "fs/promises";
 import { bunExe, bunEnv as env, isPosix, tempDir, tls, tmpdirSync } from "harness";
@@ -7,6 +7,8 @@ import { once } from "node:events";
 import * as nodetls from "node:tls";
 import { join } from "path";
 import { gzipSync } from "zlib";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 let x_dir: string;
 

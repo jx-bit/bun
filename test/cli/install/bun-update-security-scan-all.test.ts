@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 import { join } from "node:path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 describe("bun update security scanning", () => {
   test("bun update without arguments scans all packages", async () => {

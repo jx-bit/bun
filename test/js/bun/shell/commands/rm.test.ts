@@ -400,10 +400,14 @@ test.skipIf(process.platform === "win32")(
       const { exitCode, stderr } = await $\`rm -rf .\`.cwd(shellCwd).quiet().nothrow();
       console.log(JSON.stringify({ exitCode, stderr: stderr.toString() }));
     `;
+    // cwd "/" makes a wrong (process-cwd) resolution obvious, but the OHOS
+    // sandbox denies open("/") (EACCES) so the Bun shell cannot start there;
+    // `base` discriminates the same way via the keep.txt assertion below.
+    const procCwd = process.platform === "openharmony" ? base : "/";
     await using proc = Bun.spawn({
       cmd: [bunExe(), "-e", fixture],
       env: { ...bunEnv, SHELL_CWD: shellCwd },
-      cwd: "/",
+      cwd: procCwd,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -411,7 +415,7 @@ test.skipIf(process.platform === "win32")(
     const result = JSON.parse(stdout.trim());
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/^rm: \.: /);
-    if (process.platform === "linux") {
+    if (process.platform === "linux" || process.platform === "openharmony") {
       // Only Linux permits unlinking "." out from under itself; macOS returns
       // before iterating, so its children survive there.
       expect(existsSync(path.join(base, "work", "file.txt"))).toBeFalse();

@@ -13,7 +13,25 @@ const all_symbols_to_test = symbols.filter(s => !test_skipped.includes(s));
 // same CrashHandler__unsupportedUVFunction formatter, so a strided sample
 // exercises the mechanism on asan while every non-asan lane still runs the
 // full set.
-const symbols_to_test = isASAN ? all_symbols_to_test.filter((_, i) => i % 6 === 0) : all_symbols_to_test;
+//
+// OpenHarmony is sampled for the same reason, though it fails a different
+// way: not the file timeout, but the per-test one. These are test.concurrent,
+// so all ~295 timers start together while the spawns retire at whatever rate
+// the container manages. Two runs, one inside the full suite (30179934099)
+// and one with this file essentially alone (30184734535), landed on the same
+// numbers — 279 pass, 16 fail, 152.52s and 153.92s — so the losses are not
+// contention with the rest of the suite; this file alone cannot retire 295
+// subprocesses inside one 150s window.
+//
+// The 16 that lose are a prefix of declaration order, and the two runs shared
+// 15 of them with the boundary moving by exactly one symbol
+// (uv_cond_broadcast vs uv_clock_gettime). A contiguous prefix with a wobbling
+// edge is a scheduling artifact, not a property of those symbols, so nothing
+// OHOS-specific is broken in the stubs themselves. The stride keeps 3 of the
+// 16 (uv_accept, uv_barrier_destroy, uv_check_init), so if that ever stops
+// being true the sample still catches it.
+const isSlowSpawnLane = isASAN || process.platform === "openharmony";
+const symbols_to_test = isSlowSpawnLane ? all_symbols_to_test.filter((_, i) => i % 6 === 0) : all_symbols_to_test;
 
 // We use libuv on Windows
 describe.if(!isWindows)("uv stubs", () => {
@@ -75,6 +93,17 @@ describe.if(!isWindows)("uv stubs", () => {
     const libuvDir = path.join(__dirname, "../../src/jsc/bindings/libuv");
     await Bun.$`cp -R ${libuvDir} ${path.join(tempdir, "libuv")}`;
     await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
+
+    if (process.platform === "openharmony") {
+      // build:napi runs node-gyp as a generic package.json script, which never
+      // goes through bun's own install/build pipeline — nothing signs the
+      // resulting .node files, so dlopen later fails with EACCES.
+      for (const addon of ["xXx123_foo_counter_321xXx", "good_plugin"]) {
+        const built = path.join(tempdir, `build/Release/${addon}.node`);
+        await Bun.$`binary-sign-tool sign -selfSign 1 -inFile ${built} -outFile ${built}.signed && cp ${built}.signed ${built} && chmod +x ${built}`;
+      }
+    }
+
     console.log("tempdir:", tempdir);
   });
 

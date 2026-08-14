@@ -1652,8 +1652,11 @@ test("fs.watch reports an error for relative paths that no longer fit in the pat
 
     // Longest relative path that still passes the per-platform raw-path length
     // validation (MAX_PATH_BYTES); once joined with the cwd the normalized result
-    // no longer fits in the destination path buffer.
-    const maxPathBytes = { linux: 4096, darwin: 1024, win32: 32767 * 3 + 1 }[process.platform] ?? 1024;
+    // no longer fits in the destination path buffer. OpenHarmony builds take the
+    // linux branch of MAX_PATH_BYTES (4096); without an entry here the fallback
+    // 1024 builds a path that fits after the cwd join and the watch fails with
+    // ENOENT instead of exercising the overflow.
+    const maxPathBytes = { linux: 4096, openharmony: 4096, darwin: 1024, win32: 32767 * 3 + 1 }[process.platform] ?? 1024;
     const segment = "a/";
     const longRelativePath = segment.repeat(Math.floor((maxPathBytes - 2) / segment.length));
 

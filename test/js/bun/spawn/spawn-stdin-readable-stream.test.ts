@@ -8,6 +8,7 @@ import {
   expectMaxObjectTypeCount,
   isASAN,
   isDebug,
+  isOHOS,
   isWindows,
   runFixtureMaxRSS,
   tempDir,
@@ -1061,7 +1062,9 @@ describe("spawn stdin ReadableStream", () => {
   // value, so FileReader's highwater mark never propagates to uv_read_stop and
   // the pipe drains at socket speed regardless of JS demand. Same limitation as
   // the process-stdin.test.ts "pipe backpressure" suite; skipped there too.
-  test.skipIf(isWindows)("spawn stderr for-await applies backpressure to the writer", async () => {
+  // OHOS: 平台管道缓冲/合并行为差异（实测 stalled 期间 writer 128/128 写满），
+  // 与 process-stdin.test.ts 的 skipIf(isOHOS) 同族平台管道行为。
+  test.skipIf(isWindows || isOHOS)("spawn stderr for-await applies backpressure to the writer", async () => {
     const chunkSize = 64 * 1024;
     const chunkCount = 128; // 8 MB — well above the OS pipe + ByteStream buffers
     const totalBytes = chunkSize * chunkCount;

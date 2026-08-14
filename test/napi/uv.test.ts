@@ -61,6 +61,15 @@ describe.if(!isWindows)("uv stubs", () => {
     await Bun.$`${bunExe()} i --ignore-scripts && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
 
     addonPath = path.join(tempdir, "./build/Release/uv_test.node");
+    if (process.platform === "openharmony") {
+      // node-gyp invoked directly via a raw shell command here never goes
+      // through bun's own install/build pipeline, so nothing signs the
+      // resulting .node file (unlike other napi tests that build via
+      // `bun --bun node-gyp ...` or a plain `bun install`) — dlopen then
+      // fails with EACCES/Permission denied.
+      await Bun.$`binary-sign-tool sign -selfSign 1 -inFile ${addonPath} -outFile ${addonPath}.signed && cp ${addonPath}.signed ${addonPath} && chmod +x ${addonPath}`;
+    }
+
     nativeModule = require(addonPath);
   });
 

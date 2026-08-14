@@ -4,7 +4,9 @@ import { bunEnv, bunExe, isASAN, tempDir } from "harness";
 // ASAN's quarantine retains freed allocations (default 256 MB) so RSS deltas
 // run far higher under bun-asan; widen the threshold there.
 const thresholdMB = isASAN ? 400 : 100;
-const timeout = 60_000;
+// OHOS hmdfs directory listing is much slower than Linux ext4 for repeated
+// recursive glob scans (same root cause as glob.test.ts's known timeout).
+const timeout = 60_000 * (process.platform === "openharmony" ? 4 : 1);
 
 async function run(dir: string, code: string) {
   await using proc = Bun.spawn({

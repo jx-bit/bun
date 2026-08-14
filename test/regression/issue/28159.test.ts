@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readdirSync } from "fs";
 import { bunEnv, bunExe, tempDir } from "harness";
+import { tmpdir } from "os";
 import { join } from "path";
 
 test("runtime transpiler cache is disabled when BUN_INSPECT is set", async () => {
@@ -42,7 +43,15 @@ test("runtime transpiler cache is disabled when BUN_INSPECT is set", async () =>
       ...bunEnv,
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: cacheDir,
       BUN_INSPECT:
-        process.platform === "win32" ? "127.0.0.1:0" : "ws+unix:///tmp/bun-inspect-fake-" + Date.now() + ".sock",
+        process.platform === "win32"
+          ? "127.0.0.1:0"
+          : // /tmp is a read-only filesystem on OHOS (EROFS on listen()); use the
+            // platform tmpdir there instead of the hardcoded /tmp path.
+            "ws+unix://" +
+            join(
+              process.platform === "openharmony" ? tmpdir() : "/tmp",
+              "bun-inspect-fake-" + Date.now() + ".sock",
+            ),
     },
     stdout: "pipe",
     stderr: "pipe",

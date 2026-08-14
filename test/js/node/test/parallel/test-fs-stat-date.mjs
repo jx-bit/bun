@@ -33,7 +33,14 @@ function closeEnough(actual, expected, margin) {
 
   // Filesystems without support for timestamps before 1970-01-01, such as NFSv3,
   // should return 0 for negative numbers. Do not treat it as error.
-  if (actual === 0 && expected < 0) {
+  // OHOS: this device's filesystems clamp every timestamp below 1 second
+  // after the epoch to exactly 0 — not just pre-1970 times (the NFSv3 case
+  // the original guard was written for) but also 0.xxxs inputs like 1ms and
+  // 355ms. Verified with a standalone C probe: utimensat(0, 1ms..999ms) all
+  // read back as 0; sec>=1 keeps full nanosecond precision. Widen the
+  // tolerance to the real clamp boundary, and compare numerically because
+  // the BigInt stat paths fail the original strict `0n === 0` check.
+  if (Number(actual) === 0 && expected < 1000) {
     console.log(`ignored 0 while expecting ${expected}`);
     return;
   }

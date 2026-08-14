@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { realpathSync } from "fs";
-import { bunEnv, bunExe, isWindows, tempDir } from "harness";
+import { bunEnv, bunExe, isOHOS, isWindows, tempDir } from "harness";
 import path from "path";
 
 // Helper: spawn bun with multi-run flags, returns { stdout, stderr, exitCode }
@@ -815,7 +815,10 @@ describe.concurrent("output streams", () => {
 // ─── SCRIPTS WITH SHELL FEATURES ──────────────────────────────────────────────
 
 describe.concurrent("shell features", () => {
-  test("scripts with pipes work", async () => {
+  // OHOS: busybox cat copies with splice(), and the OHOS kernel returns EPIPE
+  // instead of 0 for pipe→pipe splice at EOF (T51, C-probe verified), so cat
+  // exits 1 with "Broken pipe" depending on writer-close timing.
+  test.skipIf(isOHOS)("scripts with pipes work", async () => {
     using dir = tempDir("mr-shell-pipe", {
       "package.json": JSON.stringify({
         scripts: {

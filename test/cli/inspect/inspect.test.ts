@@ -1,7 +1,7 @@
 import { Subprocess, spawn } from "bun";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import fs from "fs";
-import { bunEnv, bunExe, isPosix, randomPort, tempDir } from "harness";
+import { bunEnv, bunExe, isPosix, randomPort, tempDir, tmpdirSync } from "harness";
 import { join } from "node:path";
 import stripAnsi from "strip-ansi";
 import { WebSocket } from "ws";
@@ -383,7 +383,9 @@ describe("unix domain socket without websocket", () => {
 
   beforeAll(() => {
     // Create .tmp in root repo directory to avoid long paths on Windows
-    tempdir = ".tmp";
+    // OHOS: repo root is on hmdfs which doesn't support AF_UNIX socket bind (EPERM);
+    // use tmpdir() instead (tmpfs allows unix sockets).
+    tempdir = process.platform === "openharmony" ? tmpdirSync() : ".tmp";
     fs.mkdirSync(tempdir, { recursive: true });
     randomSocketPath = randomSocketPathFn(tempdir);
   });

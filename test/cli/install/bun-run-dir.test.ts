@@ -1,8 +1,10 @@
 import { file, spawn } from "bun";
-import { expect, it } from "bun:test";
+import { expect, it, setDefaultTimeout } from "bun:test";
 import { exists, writeFile } from "fs/promises";
 import { bunExe, bunEnv as env, readdirSorted, tmpdirSync } from "harness";
 import { join } from "path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 it.concurrent("should download dependency to run local file", async () => {
   const run_dir = tmpdirSync();

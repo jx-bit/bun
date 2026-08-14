@@ -3,6 +3,14 @@ import { cwdScope, isWindows, tempDir } from "harness";
 
 describe.if(!isWindows)("unix socket", () => {
   test("valid", () => {
+    // On OHOS, the repo checkout's filesystem can't hold AF_UNIX socket
+    // files (EPERM); chdir into a tmpdir-backed directory that can, matching
+    // the "allows" tests below. tempDir is self-disposing (using), so no
+    // rmScope is needed.
+    const isOHOS = process.platform === "openharmony";
+    using tempdir = isOHOS ? tempDir("bun-listen-valid", { "foo.txt": "bar" }) : undefined;
+    using cwd = isOHOS ? cwdScope(String(tempdir)) : undefined;
+
     using server = Bun.listen({
       unix: Math.random().toString(32).slice(2, 15) + ".sock",
       socket: {

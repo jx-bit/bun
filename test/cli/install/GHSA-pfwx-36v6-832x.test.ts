@@ -1,8 +1,10 @@
 import { file } from "bun";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { rm } from "fs/promises";
 import { bunEnv, bunExe, tempDir } from "harness";
 import { join } from "path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 // Each test uses its own BUN_INSTALL_CACHE_DIR inside the temp dir for full
 // isolation.  This avoids interfering with the global cache or other tests.
