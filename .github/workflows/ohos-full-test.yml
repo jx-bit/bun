@@ -6,8 +6,8 @@
 #    - Build job reuses ohos-build-rust.yml's proven incremental build on
 #      the self-hosted runner (OHOS SDK, LLVM 22, cross-libs, ICU all present).
 #      The binary is uploaded as a GitHub Actions artifact.
-#    - Test job runs on github-hosted ubuntu-24.04-arm, starts the social4hyq
-#      ci-runner container (musl userspace), downloads the binary artifact,
+#    - Test job runs on github-hosted ubuntu-24.04-arm, starts an ubuntu:24.04
+#      container with musl-tools installed, downloads the binary artifact,
 #      and runs the test suite with the freshly built OHOS binary as
 #      --exec-path.
 #
@@ -18,12 +18,13 @@
 #    on TESTING: build on the fast self-hosted runner, test on the
 #    reproducible github-hosted container.
 #
-# 3. Container approach (adapted from social4hyq/ohos-bun):
-#    - ci-runner image provides musl userspace matching the OHOS binary's ABI.
+# 3. Container approach (ubuntu:24.04 + musl-tools):
+#    - ubuntu:24.04 base image (no external registry auth needed).
+#    - musl-tools provides /lib/ld-musl-aarch64.so.1 (the OHOS binary's
+#      PT_INTERP dynamic linker).
 #    - symlink fixup: /system/bin/sh, /system/lib/ld-musl-aarch64.so.1
-#      (bun's PT_INTERP targets real-device paths; musl tmpfile() hardcodes
-#      /data/local/tmp).
-#    - node from harmonybrew runs runner.node.mjs (the test harness).
+#      (bun's PT_INTERP targets real-device paths).
+#    - node from NodeSource runs runner.node.mjs (the test harness).
 #    - --exec-path points to the freshly built OHOS binary (the code under
 #      test). The binary executes inside the container because the musl
 #      dynamic linker is available at the expected path after fixup.
@@ -335,8 +336,8 @@ jobs:
           if-no-files-found: error
 
   # ──────────────────────────────────────────────────────────────────────
-  # Test job: run the test suite in the social4hyq ci-runner container on
-  # a github-hosted ARM runner. Downloads the binary from the build job,
+  # Test job: run the test suite in an ubuntu:24.04 container with musl-tools
+  # on a github-hosted ARM runner. Downloads the binary from the build job,
   # starts the container, installs test deps, and runs runner.node.mjs with
   # the OHOS binary as --exec-path.
   # ──────────────────────────────────────────────────────────────────────
@@ -347,12 +348,14 @@ jobs:
     timeout-minutes: 240
 
     env:
-      # Use the SWR image directly (same as social4hyq/ohos-bun). The GHCR
-      # mirror may not exist or be rate-limited; SWR allows anon-pull.
-      # Digest-pin this once the initial bring-up confirms it works.
-      OHOS_CI_IMAGE: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:57ce4ca832d937dcc86abae6ec0e8fb6b34ac86aa8fdbe43548b6fe78d3438c1
+      # ubuntu:24.04 ARM64 base image + musl-tools for the musl dynamic linker.
+      # The SWR ci-runner image (used by social4hyq) requires registry auth
+      # that github-hosted runners don't have, so we use vanilla ubuntu and
+      # install musl ourselves. The OHOS binary's PT_INTERP targets
+      # /system/lib/ld-musl-aarch64.so.1 — musl-tools provides
+      # /lib/ld-musl-aarch64.so.1, we symlink.
+      CONTAINER_IMAGE: ubuntu:24.04
       CONTAINER: ohos-fulltest
-      BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
 
     steps:
       - name: Checkout Bun source
@@ -395,28 +398,29 @@ jobs:
           echo "After cleanup:"
           df -h / | tail -1
 
-      # ── Start social4hyq OHOS container ──────────────────────────
-      # docker run (not GHA container:) — the ci-runner image is a musl
-      # userspace incompatible with GHA's glibc node runner. We mount the
-      # workspace so the source tree, binary, and node_modules are shared.
-      # seccomp=unconfined for io_uring and other syscalls the musl
-      # userspace may need.
-      - name: Pull and start OHOS container
+      # ── Start ubuntu container with musl support ─────────────────
+      # docker run (not GHA container:) — we need to install musl-tools and
+      # create symlinks before the test can run. We mount the workspace so
+      # the source tree, binary, and node_modules are shared.
+      # seccomp=unconfined for io_uring and other syscalls.
+      - name: Pull and start ubuntu container
         run: |
-          docker pull "$OHOS_CI_IMAGE"
+          docker pull "$CONTAINER_IMAGE"
           docker run -d --name "$CONTAINER" --init \
             --security-opt seccomp=unconfined \
             -v "$GITHUB_WORKSPACE:/workspace/bun" \
-            "$OHOS_CI_IMAGE" sleep infinity
+            "$CONTAINER_IMAGE" sleep infinity
 
-      # OHOS device path simulation: bun's PT_INTERP targets real-device
-      # paths (/system/bin/sh, /system/lib/ld-musl-aarch64.so.1). musl
-      # tmpfile() also hardcodes /data/local/tmp. Without these symlinks
-      # the binary cannot start (loader fails to find the dynamic linker).
-      # Also symlink the OHOS binary as /usr/local/bin/bun so tests that
-      # spawn "bun" via PATH (not bunExe()) use the code under test.
-      - name: Configure container (symlink fixup + bun in PATH)
+      # Install musl-tools (provides /lib/ld-musl-aarch64.so.1) and create
+      # the symlinks that match OHOS device paths. The OHOS binary's
+      # PT_INTERP targets /system/lib/ld-musl-aarch64.so.1 and
+      # /system/bin/sh — without these symlinks the binary can't start.
+      - name: Configure container (musl + symlink fixup + bun in PATH)
         run: |
+          docker exec "$CONTAINER" bash -lc '
+            apt-get update -qq
+            apt-get install -y -qq musl-tools curl ca-certificates
+          '
           docker exec "$CONTAINER" bash -lc \
             'mkdir -p /data/local/tmp /system/bin /system/lib && \
              ln -sf /bin/sh /system/bin/sh && \
@@ -424,23 +428,16 @@ jobs:
              chmod +x /workspace/bun/bun-ohos && \
              ln -sf /workspace/bun/bun-ohos /usr/local/bin/bun'
 
-      # Install node from harmonybrew (container's package manager).
-      # node runs scripts/runner.node.mjs — the test harness. It must be
-      # stable and independent of the bun binary under test.
+      # Install node via apt (runs scripts/runner.node.mjs — the test harness).
+      # Node must be stable and independent of the bun binary under test.
+      # Using NodeSource for a recent Node.js version (ubuntu 24.04 ships
+      # nodejs 18 which is too old for runner.node.mjs).
       - name: Install node in container
         run: |
-          # brew update first: the container image's default-tap index can be
-          # stale (baked image says 26.4.0, live tap is 26.5.0, old bottle 404s).
-          # Without update, brew install node fails to resolve the bottle URL.
-          docker exec "$CONTAINER" bash -lc "brew update"
-          for i in 1 2 3; do
-            if docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install node" 2>&1 | tail -10; then
-              break
-            fi
-            [ "$i" = 3 ] && { echo "ERROR: brew install node failed after 3 retries"; exit 1; }
-            echo "brew install node attempt $i failed, retrying in 30s"
-            sleep 30
-          done
+          docker exec "$CONTAINER" bash -lc '
+            curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+            apt-get install -y -qq nodejs
+          '
           docker exec "$CONTAINER" bash -lc 'node --version'
           docker exec "$CONTAINER" bash -lc 'which node'
 
@@ -502,7 +499,7 @@ jobs:
             fi
           '
 
-      # Run the test suite. node (from harmonybrew) runs runner.node.mjs,
+      # Run the test suite. node (from NodeSource) runs runner.node.mjs,
       # which spawns the OHOS binary at --exec-path for each test file.
       #
       # CI=true: test/harness.ts gates test bodies on process.env.CI
