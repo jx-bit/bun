@@ -1,44 +1,57 @@
-# Bun OHOS Full Test Suite CI
+# OHOS Full Test Suite — two-stage build + container test
 #
-# Runs Bun's own test/ suite (the real oven-sh/bun compat suite, vendored
-# in this repo with OHOS patches on top) against a bun binary freshly built
-# from source on this branch — not a bottled binary.
+# DESIGN DECISIONS:
 #
-# Adapted from social4hyq/ohos-bun's github-hosted + container workflow
-# (ohos-full-test.yml) to the self-hosted bare-metal runner. Key differences:
+# 1. Two jobs: build (self-hosted) -> test (github-hosted + Docker)
+#    - Build job reuses ohos-build-rust.yml's proven incremental build on
+#      the self-hosted runner (OHOS SDK, LLVM 22, cross-libs, ICU all present).
+#      The binary is uploaded as a GitHub Actions artifact.
+#    - Test job runs on github-hosted ubuntu-24.04-arm, starts the social4hyq
+#      ci-runner container (musl userspace), downloads the binary artifact,
+#      and runs the test suite with the freshly built OHOS binary as
+#      --exec-path.
 #
-#   1. runs-on: [self-hosted, Linux, ARM64] — no docker container, no
-#      container lifecycle management. The runner already has OHOS SDK,
-#      cross libs, ICU, and LLVM 22 installed.
+# 2. Why not build on github-hosted? The build needs OHOS SDK + LLVM 22 +
+#    cross-libs + ICU -- all present on the self-hosted runner. Reproducing
+#    that on github-hosted requires the full container build pipeline
+#    (ohos-build-github.yml, ~20 min of brew deps). This workflow focuses
+#    on TESTING: build on the fast self-hosted runner, test on the
+#    reproducible github-hosted container.
 #
-#   2. bun is built from source (reuses ohos-build-rust.yml's incremental
-#      checkout + ninja build steps) rather than poured from a harmonybrew
-#      bottle. This tests the actual code on this branch.
+# 3. Container approach (adapted from social4hyq/ohos-bun):
+#    - ci-runner image provides musl userspace matching the OHOS binary's ABI.
+#    - symlink fixup: /system/bin/sh, /system/lib/ld-musl-aarch64.so.1
+#      (bun's PT_INTERP targets real-device paths; musl tmpfile() hardcodes
+#      /data/local/tmp).
+#    - node from harmonybrew runs runner.node.mjs (the test harness).
+#    - --exec-path points to the freshly built OHOS binary (the code under
+#      test). The binary executes inside the container because the musl
+#      dynamic linker is available at the expected path after fixup.
 #
-#   3. System node runs the harness (scripts/runner.node.mjs), same as
-#      social4hyq. A broken candidate bun can't take down the harness that
-#      reports on it.
+# 4. The OHOS binary IS the test subject. The previous workflow used system
+#    bun as --exec-path (stable, pointless -- it tested the wrong binary).
+#    Now the freshly cross-compiled binary from this branch is tested directly.
 #
-#   4. No sharding — single serial job, matching Buildkite's own invocation
-#      style (see social4hyq's header comment). The self-hosted runner is
-#      a single machine; no --parallel.
+# 5. bun install uses the OHOS binary itself (not system bun or npm). This
+#    exercises OHOS-specific code paths in the package manager. @esbuild/
+#    linux-arm64 is force-installed if missing (OHOS bun reports
+#    process.platform="openharmony" which filters {os:linux} optional deps).
 #
-# Test invocation borrows from oven-sh/bun's own Buildkite pipeline
-# (.buildkite/ci.mjs, getTestBunStep()): same script
-# (scripts/runner.node.mjs), same flags (--exec-path/--results-json/--exclude).
-# Buildkite runs this under a stable system node; we do the same.
+# 6. No GITHUB_ACTIONS in the container: runner.node.mjs has code paths that
+#    depend on GITHUB_REPOSITORY etc. when GITHUB_ACTIONS is set. We only
+#    pass CI=true and BUN_TEST_NO_SECRETS=1 to the test exec.
 #
-# --retries=1 rather than the CI default of 3: the slowest remaining
-# failures are minutes long, so 4 attempts each would cost more wall clock
-# than the entire rest of the suite. One retry still separates a hard
-# failure from a flake.
+# 7. No sharding (single serial job). --retries=1 (not 3) to save wall clock
+#    on slow failures. Same excludes as before (container segfaults on
+#    cc.test.ts + regression issues; bake/dev compiled off in release).
 #
-# Required runner environment (same as ohos-build-rust.yml):
+# Required runner environment (build job, same as ohos-build-rust.yml):
 #   - OHOS SDK at /home/user/setup-ohos-sdk/
 #   - LLVM 22 toolchain (musl-compatible)
 #   - Cross-compiled ICU at bun/build/ohos-icu/
 #   - Cross-compiled libc++ at bun/build/ohos-cross-libs/
-#   - System node (for running scripts/runner.node.mjs)
+#   - System node (for running scripts/runner.node.mjs -- not needed here,
+#     node comes from the container in the test job)
 
 name: ohos-full-test
 
@@ -69,6 +82,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Build job env (self-hosted runner)
   OHOS_SDK_ROOT: /home/user/setup-ohos-sdk
   OHOS_SYSROOT: /home/user/setup-ohos-sdk/ohos/native/sysroot
   OHOS_CROSS_LIBS: /home/user/sources/bun/build/ohos-cross-libs
@@ -85,9 +99,16 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
-  test:
+  # ──────────────────────────────────────────────────────────────────────
+  # Build job: compile the OHOS aarch64 binary on the self-hosted runner.
+  # Reuses ohos-build-rust.yml's incremental build logic (local reference
+  # clone, cargo cache, WebKit cache, ninja). Uploads the bare binary as
+  # an artifact for the test job.
+  # ──────────────────────────────────────────────────────────────────────
+  build:
+    name: Build OHOS binary
     runs-on: [self-hosted, Linux, ARM64]
-    timeout-minutes: 360
+    timeout-minutes: 300
 
     steps:
       - name: Checkout Bun source (incremental)
@@ -305,78 +326,249 @@ jobs:
           }
           echo "Binary validation passed"
 
-      - name: Verify node is available
-        run: |
-          node --version || { echo "ERROR: node not found in PATH"; exit 1; }
-          echo "node: $(node --version)"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-ohos-binary
+          path: bun/build/release-ohos/bun
+          retention-days: 7
+          if-no-files-found: error
 
-      # scripts/bootstrap.sh (this repo's own canonical CI bootstrap) runs
-      # `bun install --ignore-scripts` in BOTH the repo root and test/ before
-      # any test runs. Skipping either breaks real test files:
-      #   - test/ alone: stringWidth/stripANSI import packages declared only
-      #     in test/package.json.
-      #   - root before test/: test/'s lockfile pins react as
-      #     `file:../node_modules/react`, so `cd test && bun install` 404s
-      #     unless root has already been installed first.
-      #   - --ignore-scripts on both: without it, test/'s puppeteer postinstall
-      #     tries to download Chromium and throws for unsupported platform.
-      - name: Install npm dependencies (root, then test/)
-        working-directory: bun
-        run: |
-          # Use system bun for install — the OHOS cross-compiled binary cannot
-          # execute on a Linux host (requires OHOS dynamic linker).
-          bun install --ignore-scripts
-          cd test
-          bun install --ignore-scripts
+  # ──────────────────────────────────────────────────────────────────────
+  # Test job: run the test suite in the social4hyq ci-runner container on
+  # a github-hosted ARM runner. Downloads the binary from the build job,
+  # starts the container, installs test deps, and runs runner.node.mjs with
+  # the OHOS binary as --exec-path.
+  # ──────────────────────────────────────────────────────────────────────
+  test:
+    name: Test OHOS binary (container)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
 
-      # No --parallel (single serial job, matches Buildkite's invocation style).
-      # --retries=1 instead of the CI default of 3 (see header note).
+    env:
+      # Use the SWR image directly (same as social4hyq/ohos-bun). The GHCR
+      # mirror may not exist or be rate-limited; SWR allows anon-pull.
+      # Digest-pin this once the initial bring-up confirms it works.
+      OHOS_CI_IMAGE: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:57ce4ca832d937dcc86abae6ec0e8fb6b34ac86aa8fdbe43548b6fe78d3438c1
+      CONTAINER: ohos-fulltest
+      BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download OHOS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-ohos-binary
+          path: .bin-ohos
+
+      - name: Stage binary and verify
+        run: |
+          cp .bin-ohos/bun bun-ohos
+          chmod +x bun-ohos
+          ls -lh bun-ohos
+          file bun-ohos
+          file bun-ohos | grep -q "ELF.*ARM aarch64" || {
+            echo "ERROR: Downloaded binary is not an ARM64 ELF"
+            exit 1
+          }
+          echo "Binary staged at $(pwd)/bun-ohos"
+
+      # Free disk space on the github-hosted runner. The source tree +
+      # node_modules + container image together can exceed the runner's
+      # available space. social4hyq's workflow does the same.
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/powershell \
+                      /usr/local/.ghcup \
+                      /opt/swift \
+                      /usr/local/swift 2>/dev/null || true
+          echo "After cleanup:"
+          df -h / | tail -1
+
+      # ── Start social4hyq OHOS container ──────────────────────────
+      # docker run (not GHA container:) — the ci-runner image is a musl
+      # userspace incompatible with GHA's glibc node runner. We mount the
+      # workspace so the source tree, binary, and node_modules are shared.
+      # seccomp=unconfined for io_uring and other syscalls the musl
+      # userspace may need.
+      - name: Pull and start OHOS container
+        run: |
+          docker pull "$OHOS_CI_IMAGE"
+          docker run -d --name "$CONTAINER" --init \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/workspace/bun" \
+            "$OHOS_CI_IMAGE" sleep infinity
+
+      # OHOS device path simulation: bun's PT_INTERP targets real-device
+      # paths (/system/bin/sh, /system/lib/ld-musl-aarch64.so.1). musl
+      # tmpfile() also hardcodes /data/local/tmp. Without these symlinks
+      # the binary cannot start (loader fails to find the dynamic linker).
+      # Also symlink the OHOS binary as /usr/local/bin/bun so tests that
+      # spawn "bun" via PATH (not bunExe()) use the code under test.
+      - name: Configure container (symlink fixup + bun in PATH)
+        run: |
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /data/local/tmp /system/bin /system/lib && \
+             ln -sf /bin/sh /system/bin/sh && \
+             ln -sf /lib/ld-musl-aarch64.so.1 /system/lib/ld-musl-aarch64.so.1 && \
+             chmod +x /workspace/bun/bun-ohos && \
+             ln -sf /workspace/bun/bun-ohos /usr/local/bin/bun'
+
+      # Install node from harmonybrew (container's package manager).
+      # node runs scripts/runner.node.mjs — the test harness. It must be
+      # stable and independent of the bun binary under test.
+      - name: Install node in container
+        run: |
+          # brew update first: the container image's default-tap index can be
+          # stale (baked image says 26.4.0, live tap is 26.5.0, old bottle 404s).
+          # Without update, brew install node fails to resolve the bottle URL.
+          docker exec "$CONTAINER" bash -lc "brew update"
+          for i in 1 2 3; do
+            if docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install node" 2>&1 | tail -10; then
+              break
+            fi
+            [ "$i" = 3 ] && { echo "ERROR: brew install node failed after 3 retries"; exit 1; }
+            echo "brew install node attempt $i failed, retrying in 30s"
+            sleep 30
+          done
+          docker exec "$CONTAINER" bash -lc 'node --version'
+          docker exec "$CONTAINER" bash -lc 'which node'
+
+      # Verify the OHOS binary executes inside the container. This is the
+      # critical test: if the binary can't run --version, no test can pass.
+      - name: Verify OHOS binary runs in container
+        run: |
+          docker exec "$CONTAINER" bash -lc '/workspace/bun/bun-ohos --version' \
+            || { echo "ERROR: OHOS binary failed to execute in container"; exit 1; }
+          echo "OHOS binary runs in container"
+
+      # Install test deps using the OHOS binary itself. This exercises
+      # OHOS-specific code paths in the package manager. --ignore-scripts
+      # skips postinstall scripts (puppeteer Chromium download, esbuild
+      # platform detection). Root must be installed before test/ because
+      # test/'s lockfile pins react as file:../node_modules/react.
+      - name: Install test dependencies (root + test/)
+        run: |
+          BUN=/workspace/bun/bun-ohos
+
+          echo "=== bun install (root) ==="
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc \
+            "cd /workspace/bun && $BUN install --ignore-scripts" 2>&1 | tail -20
+
+          echo "=== bun install (test/) ==="
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc \
+            "cd /workspace/bun/test && $BUN install --ignore-scripts" 2>&1 | tail -20
+
+          echo "=== verify node_modules ==="
+          docker exec "$CONTAINER" bash -lc \
+            '[ -d /workspace/bun/node_modules ] || { echo "ERROR: root node_modules missing"; exit 1; }
+             [ -d /workspace/bun/test/node_modules ] || { echo "ERROR: test/node_modules missing"; exit 1; }
+             echo "node_modules OK"'
+
+      # @esbuild/linux-arm64 is an optionalDependency filtered by {os:linux}.
+      # The OHOS bun reports process.platform="openharmony", so it skips this
+      # package. Some tests use esbuild's JS API, which needs the native
+      # binary. Force-install it if missing. The container is aarch64 musl,
+      # and @esbuild/linux-arm64 is a statically-linked Go binary that runs
+      # on musl (CGO_ENABLED=0).
+      - name: Force-install @esbuild/linux-arm64 if missing
+        run: |
+          docker exec "$CONTAINER" bash -lc '
+            ESBUILD_BIN=/workspace/bun/node_modules/@esbuild/linux-arm64/bin/esbuild
+            if [ ! -x "$ESBUILD_BIN" ]; then
+              echo "=== @esbuild/linux-arm64 missing (bun skipped: openharmony != linux), force-installing ==="
+              mkdir -p /workspace/bun/node_modules/@esbuild
+              curl -fsSL "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.18.6.tgz" -o /tmp/esbuild-arm64.tgz
+              mkdir -p /tmp/esbuild-arm64-x
+              tar xzf /tmp/esbuild-arm64.tgz -C /tmp/esbuild-arm64-x
+              rm -rf /workspace/bun/node_modules/@esbuild/linux-arm64
+              mv /tmp/esbuild-arm64-x/package /workspace/bun/node_modules/@esbuild/linux-arm64
+              rm -rf /tmp/esbuild-arm64.tgz /tmp/esbuild-arm64-x
+              "$ESBUILD_BIN" --version || { echo "ERROR: esbuild native binary will not execute"; exit 1; }
+              echo "=== esbuild installed ==="
+            else
+              echo "=== @esbuild/linux-arm64 already present ==="
+              "$ESBUILD_BIN" --version
+            fi
+          '
+
+      # Run the test suite. node (from harmonybrew) runs runner.node.mjs,
+      # which spawns the OHOS binary at --exec-path for each test file.
+      #
+      # CI=true: test/harness.ts gates test bodies on process.env.CI
+      # (e.g. css-fuzz.test.ts runs 2600-iteration fuzz loops in non-CI
+      # mode that take hours).
+      # BUN_TEST_NO_SECRETS=1: this lane has no secret store, so
+      # getSecret() returns undefined instead of throwing.
+      # ESBUILD_BINARY_PATH: bypass esbuild's platform detection (OHOS bun
+      # reports "openharmony" which esbuild doesn't recognize). Points to
+      # the @esbuild/linux-arm64 native binary installed in the previous step.
+      # GITHUB_ACTIONS is NOT passed: runner.node.mjs has code paths that
+      # depend on GITHUB_REPOSITORY etc. when GITHUB_ACTIONS is set. Since
+      # we run via docker exec (no -e GITHUB_ACTIONS), it is absent.
+      #
+      # --retries=1 instead of the CI default of 3: the slowest remaining
+      # failures are minutes long, so 4 attempts each would cost more wall
+      # clock than the entire rest of the suite. One retry still separates
+      # a hard failure from a flake.
       # --quiet keeps the log from ballooning over a run this long.
-      # --results-json is the artifact for follow-up triage; the exit code
-      # IS the gate.
+      # --results-json is the artifact for follow-up triage.
       #
       # --exclude=bake/dev: bake.DevServer is gated by IS_CANARY || IS_DEBUG
       # in a stable release build, so bake() is compiled off.
-      #
-      # CI is passed explicitly because test/harness.ts gates test bodies on
-      # process.env.CI (e.g. css-fuzz.test.ts runs 2600-iteration fuzz loops
-      # in non-CI mode that take hours). BUN_TEST_NO_SECRETS: this lane has
-      # no secret store, so getSecret() returns undefined instead of throwing.
+      # --exclude=js/bun/ffi/cc.test.ts + regression issues: segfault in
+      # the container (no OHOS device kernel features).
       - name: Run test suite
-        working-directory: bun
         env:
           TEST_FILTER: ${{ inputs.test-filter }}
-          CI: 'true'
-          BUN_TEST_NO_SECRETS: '1'
         run: |
+          # Build include args array for the optional test-filter input.
+          # Passed through docker exec as positional args to bash -lc.
           INCLUDE_ARGS=()
           if [ -n "$TEST_FILTER" ]; then
             INCLUDE_ARGS=(--include="$TEST_FILTER")
           fi
 
-          # Use system bun as exec-path — the OHOS cross-compiled binary cannot
-          # execute on the Linux runner. This validates the test suite itself;
-          # OHOS device testing requires hdc + a connected device (future work).
-          SYSTEM_BUN=$(which bun)
-          echo "Using system bun: $SYSTEM_BUN ($(bun --version))"
+          ESBUILD_BIN=/workspace/bun/node_modules/@esbuild/linux-arm64/bin/esbuild
 
           set +e
-          node scripts/runner.node.mjs \
-            --exec-path="$SYSTEM_BUN" \
-            --quiet \
-            --retries=1 \
-            --results-json=results.json \
-            --exclude=integration/bun-types \
-            --exclude=internal/source-lints \
-            --exclude=bake/dev \
-            --exclude=js/bun/ffi/cc.test.ts \
-            --exclude=regression/issue/20144 \
-            --exclude=regression/issue/26249 \
-            "${INCLUDE_ARGS[@]}"
+          docker exec \
+            -e CI=true \
+            -e BUN_TEST_NO_SECRETS=1 \
+            -e "ESBUILD_BINARY_PATH=$ESBUILD_BIN" \
+            "$CONTAINER" bash -lc '
+              cd /workspace/bun
+              node scripts/runner.node.mjs \
+                --exec-path=/workspace/bun/bun-ohos \
+                --quiet \
+                --retries=1 \
+                --results-json=results.json \
+                --exclude=integration/bun-types \
+                --exclude=internal/source-lints \
+                --exclude=bake/dev \
+                --exclude=js/bun/ffi/cc.test.ts \
+                --exclude=regression/issue/20144 \
+                --exclude=regression/issue/26249 \
+                "$@"
+            ' _ "${INCLUDE_ARGS[@]}"
           RUNNER_EXIT=$?
           set -e
 
           echo "runner exit code: $RUNNER_EXIT"
+
+          # Copy results out of container for artifact upload
+          docker cp "$CONTAINER":/workspace/bun/results.json results.json 2>/dev/null || true
+
           exit $RUNNER_EXIT
 
       - name: Upload results
@@ -384,6 +576,23 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ohos-full-test-results-${{ github.run_number }}
-          path: bun/results.json
+          path: results.json
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Dump container diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== container status ==="
+          docker ps -a --filter "name=$CONTAINER" || true
+          echo "=== container logs (last 80 lines) ==="
+          docker logs --tail 80 "$CONTAINER" 2>&1 || true
+          echo "=== binary info ==="
+          docker exec "$CONTAINER" bash -lc 'file /workspace/bun/bun-ohos; ls -lh /workspace/bun/bun-ohos' 2>/dev/null || true
+          echo "=== node_modules check ==="
+          docker exec "$CONTAINER" bash -lc 'ls /workspace/bun/node_modules/ 2>/dev/null | head -20 || echo "no node_modules"' 2>/dev/null || true
+
+      - name: Cleanup container
+        if: always()
+        run: |
+          docker rm -f "$CONTAINER" 2>/dev/null || true
