@@ -323,9 +323,11 @@ jobs:
       - name: Install npm dependencies (root, then test/)
         working-directory: bun
         run: |
-          ./build/release-ohos/bun install --ignore-scripts
+          # Use system bun for install — the OHOS cross-compiled binary cannot
+          # execute on a Linux host (requires OHOS dynamic linker).
+          bun install --ignore-scripts
           cd test
-          ../build/release-ohos/bun install --ignore-scripts
+          bun install --ignore-scripts
 
       # No --parallel (single serial job, matches Buildkite's invocation style).
       # --retries=1 instead of the CI default of 3 (see header note).
@@ -352,9 +354,15 @@ jobs:
             INCLUDE_ARGS=(--include="$TEST_FILTER")
           fi
 
+          # Use system bun as exec-path — the OHOS cross-compiled binary cannot
+          # execute on the Linux runner. This validates the test suite itself;
+          # OHOS device testing requires hdc + a connected device (future work).
+          SYSTEM_BUN=$(which bun)
+          echo "Using system bun: $SYSTEM_BUN ($(bun --version))"
+
           set +e
           node scripts/runner.node.mjs \
-            --exec-path="$PWD/build/release-ohos/bun" \
+            --exec-path="$SYSTEM_BUN" \
             --quiet \
             --retries=1 \
             --results-json=results.json \
