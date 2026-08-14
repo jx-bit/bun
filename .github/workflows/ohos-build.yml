@@ -41,7 +41,7 @@ env:
   # × concurrent C++ edges exceed 11GB RAM). -j2 is safe.
   NINJA_JOBS: 2
   # WebKit fork
-  WEBKIT_FORK: springmin/WebKit
+  WEBKIT_FORK: oven-sh/WebKit
   WEBKIT_REF: ohos-aarch64
 
 jobs:
