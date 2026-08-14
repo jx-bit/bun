@@ -323,7 +323,7 @@ extern "C" ssize_t posix_spawn_bun(
             sigaction(i, &sa, 0);
         }
 
-#if OS(LINUX)
+#if OS(LINUX) && !defined(__OHOS__)
         // cgroup v1 / pre-5.7 fallback. First, so every page the exec'd image
         // touches is charged to the cgroup. Writing "0" moves the writer.
         if (join_cgroup_in_child) {
