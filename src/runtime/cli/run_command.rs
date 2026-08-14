@@ -62,7 +62,7 @@ fn runner_arena() -> &'static bun_alloc::Arena {
 /// OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd(),
 /// which can fail on hmdfs/tmpfs. If cwd is "/" or empty, use $HOME instead.
 #[cfg(target_env = "ohos")]
-pub(crate) fn ohos_set_pwd(env: &mut DotEnv::Loader<'_>, cwd: &[u8]) {
+pub(crate) fn ohos_set_pwd(env: &mut DotEnv::Loader, cwd: &[u8]) {
     let pwd = if cwd == b"/" || cwd.is_empty() {
         bun_core::env_var::HOME::get().unwrap_or(cwd)
     } else {
