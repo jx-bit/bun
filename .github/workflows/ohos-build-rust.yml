@@ -45,7 +45,7 @@ on:
       webkit_ref:
         description: 'WebKit fork branch/tag/commit to build against'
         required: false
-        default: 'c9296e353e365ecf0de82f273bb0a88a3df465be'
+        default: 'caad865eb1a6e5ca4427f5ea1f066140b11953e7'
         type: string
 
 concurrency:
@@ -69,8 +69,8 @@ env:
   # 8172ab945d8e (oven-sh main merge) which removed JSModuleRecord
   # declaredVariables/lexicalVariables and changed create() signature;
   # bun's BunAnalyzeTranspiledModule.cpp still uses the old API.
-  WEBKIT_FORK: springmin/WebKit
-  WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
+  WEBKIT_FORK: oven-sh/WebKit
+  WEBKIT_REF: caad865eb1a6e5ca4427f5ea1f066140b11953e7
 
 jobs:
   build:
@@ -127,7 +127,7 @@ jobs:
       - name: Checkout WebKit fork (incremental)
         run: |
           # Use vendor/WebKit from local source tree as reference (36GB .git,
-          # has ohos-aarch64 branch + springmin remote). The deps/WebKit
+          # has ohos-aarch64 branch + oven-sh remote). The deps/WebKit
           # under build dir is a cmake build output, not a git checkout.
           LOCAL_WK=/home/user/sources/bun/vendor/WebKit
           WK_REPO=${{ env.WEBKIT_FORK }}
@@ -167,7 +167,7 @@ jobs:
             git remote add upstream https://github.com/oven-sh/WebKit.git 2>/dev/null || true
             if git fetch upstream main --depth=200 2>/dev/null && git cat-file -e "${WK_HASH}" 2>/dev/null; then
               echo "⚠️  Commit exists upstream but not in fork — try manual merge via:"
-              echo "    gh api repos/springmin/WebKit/merges -X POST -f base=ohos-aarch64 -f head=${WK_HASH}"
+              echo "    gh api repos/oven-sh/WebKit/merges -X POST -f base=ohos-aarch64 -f head=${WK_HASH}"
               echo "⚠️  Build will continue without auto-sync (merge preserves OHOS patches)"
             else
               echo "⚠️  Cannot verify commit ${WK_HASH} in upstream. Build will continue."

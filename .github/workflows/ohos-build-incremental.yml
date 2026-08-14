@@ -35,7 +35,7 @@ env:
   OHOS_CROSS_LIBS: /home/user/sources/bun/build/ohos-cross-libs
   OHOS_ICU_DIR: /home/user/sources/bun/build/ohos-icu/target
   NINJA_JOBS: 2
-  WEBKIT_FORK: springmin/WebKit
+  WEBKIT_FORK: oven-sh/WebKit
   WEBKIT_REF: ohos-aarch64
 
 jobs:
