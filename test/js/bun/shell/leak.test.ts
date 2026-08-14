@@ -15,6 +15,9 @@ $.nothrow();
 // ASAN's quarantine retains freed allocations (default 256 MB) so per-iteration
 // RSS jumps run far higher under bun-asan; widen the threshold there.
 const DEFAULT_THRESHOLD = (isASAN ? 350 : process.platform === "darwin" ? 100 : 150) * (1 << 20);
+// Each iteration (up to 500) may spawn a real subprocess for non-builtin
+// commands (e.g. ls, pipelines); OHOS fork+exit_group overhead is 2-3x slower.
+const timeout = 100_000 * (process.platform === "openharmony" ? 3 : 1);
 
 const TESTS: [name: string, builder: () => TestBuilder, runs?: number][] = [
   ["redirect_file", () => TestBuilder.command`echo hello > test.txt`.fileEquals("test.txt", "hello\n")],
@@ -104,7 +107,7 @@ describe.concurrent("fd leak", () => {
         console.log("\n\nSTDERR:", stderr);
       }
       expect(exitCode).toBe(0);
-    }, 100_000);
+    }, timeout);
   }
 
   function memLeakTest(
@@ -163,7 +166,7 @@ describe.concurrent("fd leak", () => {
         console.log("\n\nSTDERR:", stderr);
       }
       expect(exitCode).toBe(0);
-    }, 100_000);
+    }, timeout);
   }
 
   TESTS.forEach(args => {
@@ -253,7 +256,7 @@ describe.concurrent("fd leak", () => {
         }
         expect(exitCode).toBe(0);
       },
-      100_000,
+      timeout,
     );
   }
 

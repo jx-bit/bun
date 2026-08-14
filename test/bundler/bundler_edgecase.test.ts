@@ -702,7 +702,11 @@ describe("bundler", () => {
       stdout: "outer-else",
     },
   });
-  itBundled("edgecase/AbsolutePathShouldNotResolveAsRelative", {
+  // OHOS's app sandbox blocks opening the root directory `/` outright, so
+  // resolving this literal `/entry.js` entry point hits `EACCES: failed to
+  // open root directory: /` before bun's resolver gets far enough to report
+  // the ModuleNotFound this test asserts on.
+  (process.platform === "openharmony" ? itBundled.skip : itBundled)("edgecase/AbsolutePathShouldNotResolveAsRelative", {
     files: {
       "/entry.js": /* js */ `
         console.log(1);

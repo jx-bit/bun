@@ -12,10 +12,25 @@ describe.skipIf(!isLinux)("unix domain socket long-path workaround", () => {
   function makeSockPath(prefix: string, total: number) {
     // Pad the directory so tempDir() returns something long enough to leave a
     // short basename that still fits inside /proc/self/fd/N/.
-    const pad = Buffer.alloc(Math.max(0, total - 60), "d").toString();
-    const dir = tempDir(prefix + pad, {});
+    //
+    // How long tempDir() comes back is TMPDIR-dependent — it is
+    // mkdtemp(realpath(os.tmpdir()) + "/" + basename + "_XXXXXX") — and the
+    // runner nests a further buntmp-XXXXXX/ level underneath. A hardcoded
+    // padding calibrated against one machine's TMPDIR therefore goes negative
+    // on a deeper one, and `Buffer.alloc(negative)` throws a RangeError before
+    // the socket is ever created (seen here at total=150). Measure the
+    // un-padded length once and derive the padding from it instead.
+    using probe = tempDir(prefix, {});
+    const probeLen = String(probe).length;
+
+    // tempDir(prefix + pad) is exactly probeLen + pad.length, so budgeting one
+    // byte for "/" and one for the basename pins sock.length to `total`.
+    const padLen = total - probeLen - 2;
+    expect(padLen).toBeGreaterThanOrEqual(0);
+
+    const dir = tempDir(prefix + "d".repeat(padLen), {});
     const basenameLen = total - String(dir).length - 1;
-    const sock = String(dir) + "/" + Buffer.alloc(basenameLen, "l").toString();
+    const sock = String(dir) + "/" + "l".repeat(basenameLen);
     expect(sock.length).toBe(total);
     return { dir, sock };
   }

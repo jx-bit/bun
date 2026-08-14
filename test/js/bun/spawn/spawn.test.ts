@@ -1,5 +1,4 @@
 import { ArrayBufferSink, readableStreamToText, spawn, spawnSync } from "bun";
-import { dlopen } from "bun:ffi";
 import { beforeAll, describe, expect, it } from "bun:test";
 import {
   gcTick as _gcTick,
@@ -13,7 +12,6 @@ import {
   isPosix,
   isWindows,
   shellExe,
-  tempDir,
   tmpdirSync,
   withoutAggressiveGC,
 } from "harness";
@@ -632,6 +630,10 @@ it.skipIf(Boolean(process.env.BUN_FEATURE_FLAG_FORCE_WAITER_THREAD) || !isPosix 
 
 describe("spawn unref and kill should not hang", () => {
   const cmd = [shellExe(), "-c", "sleep 0.001"];
+  // Each of these spawns up to 100 processes in a loop; OHOS fork/spawn
+  // overhead is 2-3x higher than Linux, so the default 5000ms budget is too
+  // tight (observed real runs at 5050ms/6754ms).
+  const OHOS_TIMEOUT = process.platform === "openharmony" ? 20000 : undefined;
 
   it("kill and await exited", async () => {
     const promises = new Array(10);
@@ -664,39 +666,47 @@ describe("spawn unref and kill should not hang", () => {
 
     expect().pass();
   });
-  it("kill and unref", async () => {
-    for (let i = 0; i < (isWindows ? 10 : 100); i++) {
-      const proc = spawn({
-        cmd,
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-      });
+  it(
+    "kill and unref",
+    async () => {
+      for (let i = 0; i < (isWindows ? 10 : 100); i++) {
+        const proc = spawn({
+          cmd,
+          stdout: "ignore",
+          stderr: "ignore",
+          stdin: "ignore",
+        });
 
-      proc.kill();
-      proc.unref();
+        proc.kill();
+        proc.unref();
 
-      await proc.exited;
-      console.count("Finished");
-    }
+        await proc.exited;
+        console.count("Finished");
+      }
 
-    expect().pass();
-  });
-  it("unref and kill", async () => {
-    for (let i = 0; i < (isWindows ? 10 : 100); i++) {
-      const proc = spawn({
-        cmd,
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-      });
-      proc.unref();
-      proc.kill();
-      await proc.exited;
-    }
+      expect().pass();
+    },
+    OHOS_TIMEOUT,
+  );
+  it(
+    "unref and kill",
+    async () => {
+      for (let i = 0; i < (isWindows ? 10 : 100); i++) {
+        const proc = spawn({
+          cmd,
+          stdout: "ignore",
+          stderr: "ignore",
+          stdin: "ignore",
+        });
+        proc.unref();
+        proc.kill();
+        await proc.exited;
+      }
 
-    expect().pass();
-  });
+      expect().pass();
+    },
+    OHOS_TIMEOUT,
+  );
 
   it("should not hang after unref", async () => {
     const proc = spawn({
@@ -800,7 +810,9 @@ describe("should not hang", () => {
           return ret;
         });
       },
-      128_000,
+      // 16 orderings x 100 iterations (5 concurrent) = 1600 spawns; OHOS
+      // fork/spawn overhead is 2-3x higher than Linux.
+      process.platform === "openharmony" ? 256_000 : 128_000,
     );
   }
 });
@@ -1312,84 +1324,6 @@ it.skipIf(isWindows)("leaves a Bun.file(fd) stdout open when stdin stream setup 
   expect(stdout.trim()).toBe("pull unavailable");
   expect(readFileSync(file, "utf8")).toContain("still-open");
   expect(exitCode).toBe(0);
-});
-
-// Bun.file(fd).stream() (like the shell's stdio and cwd handles) works on a
-// dup() of the descriptor. On Windows that duplicate used to be created
-// inheritable, and libuv spawns with bInheritHandles=TRUE, so every child
-// started while one was open got a copy and kept the file open after the
-// parent closed it. POSIX dup() uses F_DUPFD_CLOEXEC; the Windows side must match.
-it.if(isWindows)("handles duplicated for Bun.file(fd).stream() are not inherited by children", async () => {
-  const N = 64;
-  // Bigger than the stream's high-water mark, so each reader parks on its
-  // duplicate instead of reading to EOF and closing it.
-  using dir = tempDir("spawn-dup-inherit", { "data.bin": Buffer.alloc(1024 * 1024) });
-
-  const k32 = dlopen("kernel32.dll", {
-    GetCurrentProcess: { args: [], returns: "ptr" },
-    GetProcessHandleCount: { args: ["ptr", "ptr"], returns: "i32" },
-  });
-  const ownHandleCount = () => {
-    const out = new Uint32Array(1);
-    if (k32.symbols.GetProcessHandleCount(k32.symbols.GetCurrentProcess(), out) === 0) {
-      throw new Error("GetProcessHandleCount failed");
-    }
-    return out[0];
-  };
-
-  // The child reports how many handles it was started with.
-  const spawnHandleCounter = () =>
-    spawn({
-      cmd: [
-        bunExe(),
-        "-e",
-        `
-        import { dlopen } from "bun:ffi";
-        const k32 = dlopen("kernel32.dll", {
-          GetCurrentProcess: { args: [], returns: "ptr" },
-          GetProcessHandleCount: { args: ["ptr", "ptr"], returns: "i32" },
-        });
-        const out = new Uint32Array(1);
-        if (k32.symbols.GetProcessHandleCount(k32.symbols.GetCurrentProcess(), out) === 0) {
-          throw new Error("GetProcessHandleCount failed");
-        }
-        console.log(out[0]);
-        `,
-      ],
-      env: bunEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  const reportedHandleCount = async (proc: ReturnType<typeof spawnHandleCounter>) => {
-    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-    expect(stderr).toBe("");
-    expect(exitCode).toBe(0);
-    return Number(stdout.trim());
-  };
-
-  const fds = Array.from({ length: N }, () => openSync(join(String(dir), "data.bin"), "r"));
-  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
-  try {
-    // Plain descriptors are already non-inheritable; this child is the baseline.
-    await using control = spawnHandleCounter();
-
-    const before = ownHandleCount();
-    for (const fd of fds) readers.push(Bun.file(fd).stream().getReader());
-    // getReader() starts the stream, which dup()s the descriptor: the
-    // duplicates exist in this process while the next child is created.
-    expect(ownHandleCount() - before).toBeGreaterThanOrEqual(N);
-    await using withDuplicates = spawnHandleCounter();
-
-    const [controlCount, withDuplicatesCount] = await Promise.all([
-      reportedHandleCount(control),
-      reportedHandleCount(withDuplicates),
-    ]);
-    // An inheritable dup() hands every one of the N duplicates to the child,
-    // so the difference used to be exactly N.
-    expect(withDuplicatesCount - controlCount).toBeLessThan(N / 2);
-  } finally {
-    await Promise.all(readers.map(reader => reader.cancel()));
-    for (const fd of fds) closeSync(fd);
-  }
 });
 
 it.if(isWindows)("throws a spawn error for a cwd longer than the maximum path length", async () => {

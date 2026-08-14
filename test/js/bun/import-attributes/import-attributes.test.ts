@@ -1,5 +1,8 @@
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { bunExe, tempDir, tempDirWithFiles } from "harness";
 import * as path from "path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 const loaders = ["js", "jsx", "ts", "tsx", "json", "jsonc", "toml", "yaml", "text", "sqlite", "file"];
 const other_loaders_do_not_crash = ["webassembly", "does_not_exist"];

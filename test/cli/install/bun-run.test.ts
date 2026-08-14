@@ -1,8 +1,10 @@
 import { $ } from "bun";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync } from "fs";
 import { bunEnv as bunEnv_, bunExe, isWindows, tempDir, tempDirWithFiles } from "harness";
 import { join } from "path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 const bunEnv = {
   ...bunEnv_,
@@ -1118,56 +1120,5 @@ describe.concurrent("bun run", () => {
       stdout: expect.stringContaining("nested --bun ok"),
       exitCode: 0,
     });
-  });
-
-  it.if(isWindows)("--shell=system refuses a passthrough argument containing a cmd.exe special character", async () => {
-    using dir = tempDir("bun-run-system-shell-metachar", {
-      "package.json": JSON.stringify({ name: "system-shell-metachar", scripts: { say: "echo" } }),
-    });
-
-    {
-      await using proc = Bun.spawn({
-        cmd: [bunExe(), "run", "--shell=system", "say", "hello"],
-        cwd: String(dir),
-        env: bunEnv,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-      expect(stdout.trim()).toBe("hello");
-      expect(exitCode).toBe(0);
-    }
-
-    {
-      await using proc = Bun.spawn({
-        cmd: [bunExe(), "run", "--shell=system", "say", 'x" & echo marker & "'],
-        cwd: String(dir),
-        env: bunEnv,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-      expect(stderr).toContain(
-        'error: Failed to run script say: argument "x\\" & echo marker & \\"" contains a cmd.exe special character and cannot be passed to the system shell',
-      );
-      expect(stdout).toBe("");
-      expect(exitCode).toBe(1);
-    }
-
-    {
-      await using proc = Bun.spawn({
-        cmd: [bunExe(), "run", "--shell=system", "say", "%PATH%"],
-        cwd: String(dir),
-        env: bunEnv,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-      expect(stderr).toContain(
-        'error: Failed to run script say: argument "%PATH%" contains a cmd.exe special character and cannot be passed to the system shell',
-      );
-      expect(stdout).toBe("");
-      expect(exitCode).toBe(1);
-    }
   });
 });

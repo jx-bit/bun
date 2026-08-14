@@ -51,7 +51,7 @@ test(
     // Same calibration for the deadline: the 16K fetches that finish in ~3s on a
     // release build run ~10x slower under ASAN's instrumentation (observed
     // ~12-13s), and the run used to die on this timeout with the RSS assertion
-    // itself passing.
+    // itself passing. OHOS gets a 4x multiplier: HTTP throughput is lower there.
   },
-  isASAN ? 90_000 : 10_000,
+  (isASAN ? 90_000 : 10_000) * (process.platform === "openharmony" ? 4 : 1),
 );

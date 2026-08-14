@@ -69,7 +69,7 @@ values;`,
     process.chdir(tempdir);
 
     await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
-  });
+  }, process.platform === "openharmony" ? 60_000 : 5_000); // node-gyp C++ compile; OHOS toolchain is slower
 
   beforeEach(() => {
     const tempdir2 = tempDirWithFiles("native-plugins", {});
@@ -120,7 +120,7 @@ values;`,
 
     const compilationCtxFreedCount = await napiModule.getCompilationCtxFreedCount(external);
     expect(compilationCtxFreedCount).toBe(2);
-  });
+  }, process.platform === "openharmony" ? 60_000 : 5_000); // rebuilds the node-gyp C++ plugin; OHOS toolchain is slower
 
   it("doesn't explode when there are a lot of concurrent files", async () => {
     // Generate 100 json files

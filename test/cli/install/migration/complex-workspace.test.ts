@@ -57,7 +57,12 @@ test("the install succeeds", async () => {
   // breaks (its process.config leaks thin-LTO flags that MSVC's link.exe
   // rejects). This test exercises lockfile migration, not lifecycle scripts,
   // so skip them there.
-  const installArgs = process.platform === "win32" ? [bunExe(), "install", "--ignore-scripts"] : [bunExe(), "install"];
+  // On OHOS, native addon postinstall scripts (e.g. esbuild) also fail because
+  // older versions predating OHOS support don't have platform-specific binaries.
+  const installArgs =
+    process.platform === "win32" || process.platform === "openharmony"
+      ? [bunExe(), "install", "--ignore-scripts"]
+      : [bunExe(), "install"];
   subprocess = Bun.spawn(installArgs, {
     env: bunEnv,
     cwd,

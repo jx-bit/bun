@@ -23,4 +23,4 @@ test("Printing errors does not leak", () => {
   // ASAN's free quarantine (default 256 MB) plus redzones and glibc page
   // retention inflate RSS even when nothing is leaking.
   expect(diff, `RSS grew by ${diff} MB after ${perBatch * repeat} iterations`).toBeLessThan(isASAN ? 400 : 10);
-}, 10_000);
+}, 10_000 * (process.platform === "openharmony" ? 3 : 1)); // 102000 Bun.inspect() calls take longer under OHOS

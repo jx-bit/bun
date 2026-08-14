@@ -4,8 +4,13 @@ import { bunEnv, bunExe, tmpdirSync } from "../../harness";
 
 const tmpdir = tmpdirSync();
 
+// setDefaultTimeout() only affects tests registered after it runs, and test()
+// registration happens at module-parse time (before beforeAll ever executes)
+// — so calling it inside beforeAll is too late to affect the test below. It
+// must be called at the top level.
+setDefaultTimeout(1000 * 60 * 4);
+
 beforeAll(async () => {
-  setDefaultTimeout(1000 * 60 * 4);
   await fs.rm(tmpdir, { recursive: true, force: true });
   await fs.cp(import.meta.dir, tmpdir, { recursive: true, force: true });
 });

@@ -19,8 +19,13 @@ if (process.argv[2] === 'child') {
   tmpdir.refresh();
   fs.writeFileSync(filename, '.'.repeat(1 << 16));  // Exceeds RLIMIT_FSIZE.
 } else {
+  // OHOS: the sandbox's /bin/sh is mksh whose ulimit builtin is a no-op
+  // (setting returns success but never takes effect, reading prints
+  // nothing), so the child would run without RLIMIT_FSIZE and no EFBIG
+  // ever appears. zsh's ulimit works on this device.
+  const sh = process.platform === 'openharmony' ? '/usr/bin/zsh' : '/bin/sh';
   const [cmd, opts] = common.escapePOSIXShell`ulimit -f 1 && "${process.execPath}" "${__filename}" child`;
-  const result = child_process.spawnSync('/bin/sh', ['-c', cmd], opts);
+  const result = child_process.spawnSync(sh, ['-c', cmd], opts);
   const haystack = result.stderr.toString();
   const needle = 'EFBIG: file too large, write';
   const ok = haystack.includes(needle);

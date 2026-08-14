@@ -260,4 +260,4 @@ test("BUN_WATCHER_TRACE appends across reloads", async () => {
     expect(event).toHaveProperty("timestamp");
     expect(event).toHaveProperty("files");
   }
-}, 10000);
+}, process.platform === "openharmony" ? 30000 : 10000); // two --watch process spawns + reload cycles; OHOS fork overhead is 2-3x slower

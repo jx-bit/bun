@@ -42,7 +42,7 @@ function pathWithout(name: string, PATH: string | undefined): string {
 
 beforeAll(async () => {
   // Clean stale bunx cache dirs from previous runs once up front instead of before every test.
-  const tmp = isWindows ? tmpdir() : "/tmp";
+  const tmp = isWindows || process.platform === "openharmony" ? tmpdir() : "/tmp";
   const waiting: Promise<void>[] = [];
   readdirSync(tmp).forEach(file => {
     if (file.startsWith("bunx-") || file.startsWith("bun-x.test")) {

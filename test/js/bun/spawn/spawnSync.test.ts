@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { bunEnv, bunExe, bunRun, isLinux, isMusl, isOHOS, isPosix, isWindows } from "harness";
+import { bunEnv, bunExe, bunRun, isLinux, isMusl, isPosix, isWindows } from "harness";
 import { join } from "path";
 describe("spawnSync", () => {
   it("should throw a RangeError if timeout is less than 0", () => {
@@ -53,7 +53,7 @@ describe("spawnSync", () => {
     }).toEqual({ stdout: "ok", exitedDueToTimeout: false, exitCode: 0 });
   });
 
-  it.skipIf(process.platform !== "linux" || isOHOS)("should use memfd when possible", async () => {
+  it.skipIf(process.platform !== "linux")("should use memfd when possible", async () => {
     expect(await bunRun(join(import.meta.dir, "spawnSync-memfd-fixture.ts"))).toSpawn();
   });
 
@@ -120,7 +120,7 @@ describe("uid/gid", () => {
 
   // The vfork child shares the parent's mm, and set*id resets the mm-wide
   // "dumpable" flag (prctl(2)); the spawn must restore it in the parent.
-  it.if(isLinux && !isOHOS && isRoot)("does not clear the parent's dumpable flag", async () => {
+  it.if(isLinux && isRoot)("does not clear the parent's dumpable flag", async () => {
     const libc = isMusl ? (process.arch === "arm64" ? "libc.musl-aarch64.so.1" : "libc.musl-x86_64.so.1") : "libc.so.6";
     const fixture = `
       const { dlopen, FFIType } = require("bun:ffi");

@@ -20,7 +20,7 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 'use strict';
-const common = require('../common');
+require('../common');
 const assert = require('assert');
 const cluster = require('cluster');
 
@@ -30,10 +30,10 @@ if (cluster.isPrimary) {
 
   const worker = cluster.fork();
 
-  worker.on('exit', common.mustCall((code) => {
+  worker.on('exit', (code) => {
     assert.strictEqual(code, OK);
     process.exit(0);
-  }));
+  });
 
   const result = worker.send('SOME MESSAGE');
   assert.strictEqual(result, true);
@@ -51,29 +51,29 @@ let sawWorker;
 
 const messages = [];
 
-const check = common.mustCallAtLeast((m) => {
+const check = (m) => {
   messages.push(m);
 
   if (messages.length < 2) return;
 
   assert.deepStrictEqual(messages[0], messages[1]);
 
-  cluster.worker.once('error', common.mustCall((e) => {
+  cluster.worker.once('error', (e) => {
     assert.strictEqual(e, 'HI');
     process.exit(OK);
-  }));
+  });
 
   process.emit('error', 'HI');
-});
+};
 
-process.on('message', common.mustCall((m) => {
+process.on('message', (m) => {
   assert(!sawProcess);
   sawProcess = true;
   check(m);
-}));
+});
 
-cluster.worker.on('message', common.mustCall((m) => {
+cluster.worker.on('message', (m) => {
   assert(!sawWorker);
   sawWorker = true;
   check(m);
-}));
+});

@@ -681,7 +681,10 @@ describe("absolute path pattern", async () => {
     expect(entries.sort()).toEqual(files.slice(0, files.length - 1).sort());
   });
 
-  test("non-special path as first component", async () => {
+  // The OHOS app sandbox denies opening '/' in any mode (verified:
+  // fs.openSync("/", "r") itself throws EACCES), so scanning from the root
+  // fails there instead of returning an empty match list.
+  test.skipIf(process.platform === "openharmony")("non-special path as first component", async () => {
     const glob = new Glob("/**lol");
     const entries = await Array.fromAsync(glob.scan({ onlyFiles: false }));
     expect(entries).toEqual([]);

@@ -1714,7 +1714,7 @@ it("should handle Git URL in dependencies (SCP-style)", async () => {
   expect(await exited2).toBe(0);
   expect(urls.sort()).toBeEmpty();
   expect(requested).toBe(0);
-}, 20000);
+}, process.platform === "openharmony" ? 1000 * 60 * 5 : 20000);
 
 it("should not save git urls twice", async () => {
   const urls: string[] = [];

@@ -18,34 +18,33 @@ import { dirname, isAbsolute, join } from "path";
 export const BREAKING_CHANGES_BUN_1_2 = false;
 
 export const isMacOS = process.platform === "darwin";
-export const isLinux = process.platform === "linux";
+/** OpenHarmony is Linux-like enough that `isLinux` covers it, but its
+ *  `--compile` target string is `-ohos`, not `-musl`. */
+export const isOHOS = process.platform === "openharmony";
+export const isLinux = process.platform === "linux" || process.platform === "openharmony";
 export const isFreeBSD = process.platform === "freebsd";
-export const isPosix = isMacOS || isLinux || isFreeBSD;
+export const isPosix = isMacOS || isLinux || isFreeBSD || process.platform === "openharmony";
 export const isWindows = process.platform === "win32";
-// OHOS reports platform === "linux" but lacks some Linux syscalls (statx, memfd_create, etc.)
-export const isOHOS = (() => {
-  try {
-    return Bun.file("/system/etc/param/ohos.para").size > 0;
-  } catch {
-    return false;
-  }
-})();
-export const isLinuxNotOHOS = isLinux && !isOHOS;
 export const isIntelMacOS = isMacOS && process.arch === "x64";
 export const isArm64 = process.arch === "arm64";
 export const isDebug = Bun.version.includes("debug");
 export const isCI = process.env.CI !== undefined;
 export const libcFamily: "glibc" | "musl" =
-  process.platform !== "linux"
-    ? "glibc"
-    : // process.report.getReport() has incorrect type definitions.
-      (process.report.getReport() as { header: { glibcVersionRuntime: boolean } }).header.glibcVersionRuntime
+  process.platform === "openharmony"
+    ? "musl"
+    : process.platform !== "linux"
       ? "glibc"
-      : "musl";
+      : // process.report.getReport() has incorrect type definitions.
+        (process.report.getReport() as { header: { glibcVersionRuntime: boolean } }).header.glibcVersionRuntime
+        ? "glibc"
+        : "musl";
 
 export const isMusl = isLinux && libcFamily === "musl";
 export const isGlibc = isLinux && libcFamily === "glibc";
 export const isBuildKite = process.env.BUILDKITE === "true";
+// Set by a CI lane that has no secret store to ask at all, as opposed to one
+// where a missing secret means somebody forgot to provision it. See getSecret.
+export const hasNoSecrets = process.env.BUN_TEST_NO_SECRETS !== undefined;
 export const isVerbose = process.env.DEBUG === "1";
 
 // Use these to mark a test as flaky or broken.
@@ -80,6 +79,9 @@ export const bunEnv: NodeJS.Dict<string> = {
   NO_COLOR: "1",
   FORCE_COLOR: undefined,
   TZ: "Etc/UTC",
+  // TERM=dumb 会触发 node:readline 的 _ttyWriteDumb 降级路径（光标控制键失效），
+  // readline/REPL 系测试全挂；显式设 TERM=dumb 的测试自行覆盖此值。
+  TERM: process.env.TERM === "dumb" ? "xterm" : process.env.TERM,
   CI: "1",
   BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
   BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING: "1",
@@ -94,6 +96,12 @@ export const bunEnv: NodeJS.Dict<string> = {
   BUN_DEBUG_linkerctx: "0",
   WANTS_LOUD: "0",
   AGENT: "false",
+  // Route GitHub API through gh-proxy on OHOS (GitHub is blocked).
+  GITHUB_API_URL: process.env.GITHUB_API_URL || (
+    process.platform === "openharmony"
+      ? "https://gh-proxy.com/https://api.github.com"
+      : undefined
+  ),
 };
 
 const ciEnv = { ...bunEnv };
@@ -1104,16 +1112,23 @@ export function dockerExe(): string | null {
 }
 
 export function isDockerEnabled(): boolean {
+  // TODO: investigate why Docker tests are not working on Linux arm64
+  //
+  // Checked before the presence/health probes below, not after: those raise a
+  // hard error under CI, but docker tests are disabled on this architecture
+  // whether or not docker works, so requiring one is never correct here.
+  // Callers run this at module scope, so the error failed whole files that
+  // would otherwise just skip their docker suites — which is what OpenHarmony
+  // (counted as isLinux above, and with no docker in its CI container) hit.
+  if (isLinux && process.arch === "arm64") {
+    return false;
+  }
+
   const dockerCLI = dockerExe();
   if (!dockerCLI) {
     if (isCI && isLinux) {
       throw new Error("A functional `docker` is required in CI for some tests.");
     }
-    return false;
-  }
-
-  // TODO: investigate why Docker tests are not working on Linux arm64
-  if (isLinux && process.arch === "arm64") {
     return false;
   }
 
@@ -1773,8 +1788,11 @@ export function fileDescriptorLeakChecker() {
 export function getSecret(name: string): string | undefined {
   let value = process.env[name]?.trim();
 
-  // When not running in CI, allow the secret to be missing.
-  if (!isCI) {
+  // When not running in CI, allow the secret to be missing. Same for a CI lane
+  // that has no secret store: throwing here happens at module scope, which
+  // takes the whole file down instead of letting its own `skipIf(!secret)`
+  // guard skip the cases that need the credential.
+  if (!isCI || hasNoSecrets) {
     return value;
   }
 
@@ -1850,6 +1868,10 @@ export function libcPathForDlopen() {
         case "musl":
           return "/usr/lib/libc.so";
       }
+    case "openharmony":
+      // OHOS hmusl: /usr/lib/libc.so does not exist on disk; the dynamic
+      // linker resolves bare names via LD_LIBRARY_PATH / soname search.
+      return "libc.so";
     case "darwin":
       return "libc.dylib";
     default:

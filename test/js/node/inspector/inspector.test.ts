@@ -2,6 +2,19 @@ import { expect, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 import inspector from "node:inspector";
 
+// Child processes that send Runtime.evaluate or hit a Debugger pause go through
+// JSC's InjectedScript, which has missing RELEASE_AND_RETURN at
+// JSInjectedScriptHostPrototype.cpp jsInjectedScriptHostPrototypeFunctionEvaluateWithScopeExtension
+// and JSJavaScriptCallFrame::scopeChain (constructArray return). Both live in
+// the prebuilt WebKit, so validateExceptionChecks aborts the child before the
+// test can observe anything. Strip the flag for those spawns so ASAN/LSAN still
+// run against the child; drop this once the WebKit prebuilt has the two
+// RELEASE_AND_RETURN wraps.
+const injectedScriptChildEnv = (() => {
+  const { BUN_JSC_validateExceptionChecks, BUN_JSC_dumpSimulatedThrows, ...env } = bunEnv;
+  return env;
+})();
+
 test("inspector.url()", () => {
   expect(inspector.url()).toBeUndefined();
 });
@@ -191,7 +204,7 @@ test("inspector.open() serves the DevTools protocol and /json discovery endpoint
 
   await using proc = Bun.spawn({
     cmd: [bunExe(), "fixture.mjs"],
-    env: bunEnv,
+    env: injectedScriptChildEnv,
     cwd: String(dir),
     stderr: "pipe",
   });
@@ -409,7 +422,7 @@ test("inspector.waitForDebugger() blocks until a client resumes the process", as
 
   await using proc = Bun.spawn({
     cmd: [bunExe(), "fixture.mjs"],
-    env: bunEnv,
+    env: injectedScriptChildEnv,
     cwd: String(dir),
     stderr: "pipe",
   });
@@ -486,7 +499,7 @@ test("inspector.waitForDebugger() blocks again on the second call after a fronte
 
   await using proc = Bun.spawn({
     cmd: [bunExe(), "fixture.mjs"],
-    env: bunEnv,
+    env: injectedScriptChildEnv,
     cwd: String(dir),
     stderr: "pipe",
   });
@@ -904,7 +917,7 @@ export { after };
 
   await using proc = Bun.spawn({
     cmd: [bunExe(), "entry.mjs"],
-    env: bunEnv,
+    env: injectedScriptChildEnv,
     cwd: String(dir),
     stdout: "pipe",
     stderr: "pipe",

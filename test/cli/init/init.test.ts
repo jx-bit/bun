@@ -315,7 +315,13 @@ const initEnv = { ...bunEnv, BUN_AGENT_RULE_DISABLED: "1" };
   // Every template declares `typescript: "^6"`, so the `bun install` that
   // `bun init` runs installs TypeScript 6. Typecheck and build with that
   // exact install. https://github.com/oven-sh/bun/issues/33050
-  test.each(["-y", "--react", "--react=tailwind", "--react=shadcn"])(
+  //
+  // --react=tailwind and --react=shadcn's `build` script goes through
+  // bun-plugin-tailwind, which needs @tailwindcss/oxide's native binding —
+  // unavailable on OHOS (no prebuilt binary; see test/expectations.txt).
+  test.each(
+    process.platform === "openharmony" ? ["-y", "--react"] : ["-y", "--react", "--react=tailwind", "--react=shadcn"],
+  )(
     "bun init %s installs TypeScript 6, typechecks, and builds",
     async flag => {
       await using temp = tempDir(`bun-init-ts6${flag.replace(/[^a-z]+/g, "-")}`, {});

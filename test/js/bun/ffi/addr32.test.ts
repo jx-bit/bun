@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { isLinux } from "../../../harness";
 
 // Only runs on Linux because that is where we can most reliably allocate a 32-bit pointer.
-test.skipIf(!isLinux)("can use addresses encoded as int32s", async () => {
+// addr32.c's mmap(..., MAP_FIXED_NOREPLACE, ...) loop (1MB-26MB range) fails
+// every one of its 400 attempts on OHOS/HongMeng — verified with a standalone
+// C repro (mmap returns MAP_FAILED for all tries) — so symbols.addr32()
+// returns a NULL pointer there instead of a low address. This is a genuine
+// kernel memory-layout difference, not a bun/FFI bug; harness.ts's isLinux
+// intentionally includes openharmony for most purposes, so skip just here.
+test.skipIf(!isLinux || process.platform === "openharmony")("can use addresses encoded as int32s", async () => {
   const compiler = Bun.spawn(["cc", "-shared", "-o", "libaddr32.so", "addr32.c"], {
     cwd: __dirname,
   });

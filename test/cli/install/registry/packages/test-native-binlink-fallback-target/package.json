@@ -12,15 +12,16 @@
       "os": [
         "darwin",
         "linux",
-        "win32"
+        "win32",
+        "openharmony"
       ],
       "cpu": [
         "arm64",
         "x64"
       ],
       "dist": {
-        "integrity": "sha512-PXq1c0L4eWe+D1G7W815HXv8WKLpiHqcp8zBf58JOlc5qqsDPQghTFnMM9sxaRYwFXJPKqX22RREdBJbYcn2cQ==",
-        "shasum": "522c67345782690a2c537eae6ef58d4e166040f8",
+        "integrity": "sha512-tmbq6/FsNriXKCCfXtxbhDC2XrCWkLiEYTRG0BqK3uXrxICXYoa8W4OUGXwLivlNEDkiTgE4Iwd/gMUfNIEMog==",
+        "shasum": "99d319d0d5958a52074c6c09033eb699d89b4ab8",
         "tarball": "http://localhost:4873/test-native-binlink-fallback-target/-/test-native-binlink-fallback-target-1.0.0.tgz"
       }
     }

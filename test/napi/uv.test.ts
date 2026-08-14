@@ -57,7 +57,17 @@ describe.if(!isWindows)("uv stubs", () => {
     // root binding.gyp package; build:napi below is the single, explicit gyp build.
     await Bun.$`${bunExe()} i --ignore-scripts && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
 
-    nativeModule = require(path.join(tempdir, "./build/Release/uv_test.node"));
+    const builtAddon = path.join(tempdir, "./build/Release/uv_test.node");
+    if (process.platform === "openharmony") {
+      // node-gyp invoked directly via a raw shell command here never goes
+      // through bun's own install/build pipeline, so nothing signs the
+      // resulting .node file (unlike other napi tests that build via
+      // `bun --bun node-gyp ...` or a plain `bun install`) — dlopen then
+      // fails with EACCES/Permission denied.
+      await Bun.$`binary-sign-tool sign -selfSign 1 -inFile ${builtAddon} -outFile ${builtAddon}.signed && cp ${builtAddon}.signed ${builtAddon} && chmod +x ${builtAddon}`;
+    }
+
+    nativeModule = require(builtAddon);
   });
 
   afterEach(() => {

@@ -36,8 +36,8 @@ describe.concurrent("require.cache", () => {
   });
 
   // https://github.com/oven-sh/bun/issues/5188
-  // msgpackr-extract has no prebuilt binary for win32-arm64, so it's unavailable there
-  test.skipIf(isWindows && isArm64)("require.cache does not include unevaluated modules", async () => {
+  // msgpackr-extract has no prebuilt binary for win32-arm64 or OHOS, so it's unavailable there
+  test.skipIf((isWindows && isArm64) || process.platform === "openharmony")("require.cache does not include unevaluated modules", async () => {
     await using proc = Bun.spawn({
       cmd: [bunExe(), "run", join(import.meta.dir, "require-cache-bug-5188.js")],
       env: bunEnv,
@@ -339,7 +339,8 @@ describe.concurrent("require.cache", () => {
         expect(exitCode).toBe(0);
       },
       // TODO: Investigate why this is so slow on Windows
-      isWindows ? 60000 : 30000,
+      // OHOS: observed anywhere from ~64s to >90s across runs; give real margin.
+      isWindows ? 60000 : process.platform === "openharmony" ? 150_000 : 30000,
     );
   });
 });

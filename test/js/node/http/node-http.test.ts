@@ -5,7 +5,7 @@
  *
  * A handful of older tests do not run in Node in this file. These tests should be updated to run in Node, or deleted.
  */
-import { bunEnv, bunExe, exampleSite, randomPort, tls as tlsCert } from "harness";
+import { bunEnv, bunExe, exampleSite, isOHOS, randomPort, tls as tlsCert } from "harness";
 import { createTest } from "node-harness";
 import { EventEmitter, once } from "node:events";
 import nodefs from "node:fs";
@@ -829,7 +829,8 @@ describe("node:http", () => {
       });
     });
 
-    it("request via http proxy, issue#4295", async () => {
+    // OHOS: T49 — getaddrinfo ADDRCONFIG 过滤 IPv4 回环，localhost→::1 后 ECONNREFUSED
+    it.skipIf(isOHOS)("request via http proxy, issue#4295", async () => {
       await runHTTPProxyTest();
     });
 
@@ -987,6 +988,12 @@ describe("node:http", () => {
       const options: https.RequestOptions = {
         method: "GET",
         url: httpsServer.url.href as string,
+        // `https.request(options)` ignores `url` — it reads `hostname`/`host`,
+        // which otherwise default to "localhost". exampleSite() binds
+        // 127.0.0.1, so the request only reached it on hosts where localhost
+        // resolves to the v4 address first; with a standard dual-stack
+        // /etc/hosts it goes to ::1 and fails with ECONNREFUSED.
+        hostname: httpsServer.url.hostname,
         port: httpsServer.url.port,
         ca: httpsServer.ca,
       };

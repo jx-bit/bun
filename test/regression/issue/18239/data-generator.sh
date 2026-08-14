@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Test data generator script
 # Sends data with delays to simulate real-time input

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { bunEnv, bunExe, isLinux, isWindows, libcPathForDlopen, tempDir } from "harness";
+import { bunEnv, bunExe, isLinux, isOHOS, isWindows, libcPathForDlopen, tempDir } from "harness";
 
 // PipeReader.onReaderError() was missing the this.deref() that balances the
 // this.ref() from start(), so when a read on a subprocess stdout/stderr pipe
@@ -137,7 +137,17 @@ process.exit(0);
 
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 
-    const stderrLines = stderr.split("\n").filter(l => l.length > 0 && !l.startsWith("WARNING: ASAN interferes"));
+    const stderrLines = stderr
+      .split("\n")
+      .filter(
+        l =>
+          l.length > 0 &&
+          !l.startsWith("WARNING: ASAN interferes") &&
+          // OHOS: busybox cat copies the fifo with splice(), and the OHOS
+          // kernel returns EPIPE instead of 0 for pipe→pipe splice at EOF
+          // (T51) — "cat: <fifo>: Broken pipe" is kernel noise, not a leak.
+          !(isOHOS && /^cat: .*: Broken pipe$/.test(l)),
+      );
     expect(stderrLines).toEqual([]);
     expect(stdout.trim()).toBe(JSON.stringify({ leaked: 0 }));
     expect(exitCode).toBe(0);

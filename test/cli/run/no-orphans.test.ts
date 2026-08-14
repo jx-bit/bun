@@ -1,6 +1,6 @@
 import { dlopen, FFIType } from "bun:ffi";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { bunEnv, bunExe, isLinux, isMusl, isOHOS, isWindows, tempDir } from "harness";
+import { bunEnv, bunExe, isLinux, isMusl, isWindows, tempDir } from "harness";
 import { chmodSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -9,9 +9,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 // observation windows with each other and with spawn latency; give the
 // concurrent debug/ASAN spawn load more headroom than the 5s default.
 setDefaultTimeout(30_000);
-
-const isPosix = (process.platform === "linux" || process.platform === "darwin") && !isOHOS;
-const isSupported = isPosix || isWindows;
 
 // --no-orphans / BUN_FEATURE_FLAG_NO_ORPHANS / [run] noOrphans: Bun watches its
 // original ppid and exits when that process dies, even if the parent was
@@ -22,6 +19,30 @@ const isSupported = isPosix || isWindows;
 //
 // Tree under test: test → sh (the "parent" we SIGKILL) → bun-debug → grandchild.
 // We SIGKILL sh and observe bun-debug and the grandchild.
+
+const isPosix =
+  process.platform === "linux" || process.platform === "darwin" || process.platform === "openharmony";
+
+// OpenHarmony: two kernel-side gaps make the Ctrl-Z job-control cases
+// unrunnable here, while everything else in this file works. Both were
+// characterised with standalone C probes (no Bun involved) — see
+// OHOS_TEST_TODO.md T25/T27 for the full tables:
+//
+//   T25 — /proc/<pid>/stat reports neither tty_nr nor tpgid (both stay 0 even
+//         after a TIOCSCTTY that demonstrably worked), and its state field
+//         never shows a stopped process. The stop assertions here read exactly
+//         those three fields.
+//   T27 — the PTY line discipline does not generate signals. Writing ^Z / ^C /
+//         ^\ to the master produces nothing, with ISIG=1 and the control chars
+//         correctly configured; it echoes "^Z" but never signals.
+//
+// The underlying job control is fine — TIOCSCTTY, tcsetpgrp/tcgetpgrp,
+// SIGTSTP/SIGCONT and waitpid(WUNTRACED) all behave correctly — so these are
+// missing observability and missing kernel plumbing, not Bun defects. Scoped
+// to the two cases that depend on them rather than quarantining the file,
+// which would drop the other 16 cases' coverage too.
+const ohosNoTtyJobControl = process.platform === "openharmony";
+const isSupported = isPosix || isWindows;
 
 // Shared fixture dir — child.js spawns grandchild.js, prints
 // "<self> <ppid> <grandchild>", then idles. Kept on disk so we can pass it
@@ -629,7 +650,7 @@ test.concurrent.skipIf(!isPosix)("bun run --no-orphans <script>: clean exit reap
 // acquisition via O_NOCTTY-less open. The macOS path (EVFILT_SIGNAL+SIGCHLD →
 // wait4 WUNTRACED → same `JobControl.onChildStopped`) is structurally
 // identical and is type-checked by `zig build check-macos`.
-test.concurrent.skipIf(!isLinux)(
+test.concurrent.skipIf(!isLinux || ohosNoTtyJobControl)(
   "bun run --no-orphans on TTY: Ctrl-Z stop bridges to bun, fg resumes script",
   async () => {
     // openpty + ptsname so a setsid wrapper can reopen the slave as its
@@ -793,7 +814,7 @@ test.concurrent.skipIf(!isLinux)(
 //      itself stopped.
 //   3. After perl `fg`s it (tcsetpgrp + SIGCONT), the script's SIGCONT
 //      handler fires — `onChildStopped` SIGCONT'd the whole script pgroup.
-test.concurrent.skipIf(!isPosix || !hasPerl)(
+test.concurrent.skipIf(!isPosix || !hasPerl || ohosNoTtyJobControl)(
   "bun run --no-orphans on a TTY: Ctrl-Z stop observed by outer shell's waitpid(WUNTRACED), fg resumes script",
   async () => {
     // perl in the dev script so `getpgrp()` is trivially available; `$SIG{CONT}`

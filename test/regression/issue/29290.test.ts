@@ -17,7 +17,7 @@
 
 import { expect, test } from "bun:test";
 import { chmodSync, closeSync, cpSync, existsSync, openSync, readSync } from "fs";
-import { bunEnv, bunExe, isLinux, isMusl, tempDir } from "harness";
+import { bunEnv, bunExe, isLinux, isMusl, isOHOS, tempDir } from "harness";
 import { join } from "path";
 
 const patchelf = Bun.which("patchelf");
@@ -36,7 +36,8 @@ const ldsoBasename = ldso.split("/").pop()!;
 const fakeNixInterp = `/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-glibc-2.40-1/lib/${ldsoBasename}`;
 
 // Read PT_INTERP path from an ELF64 LE binary.
-function readInterp(buf: Buffer): string | null {
+function readInterp(path: string): string | null {
+  const buf = readHead(path);
   if (buf.length < 64 || buf.readUInt32BE(0) !== 0x7f454c46) return null;
   const e_phoff = Number(buf.readBigUInt64LE(32));
   const e_phnum = buf.readUInt16LE(56);
@@ -45,21 +46,38 @@ function readInterp(buf: Buffer): string | null {
     if (buf.readUInt32LE(ph) !== 3 /* PT_INTERP */) continue;
     const p_offset = Number(buf.readBigUInt64LE(ph + 8));
     const p_filesz = Number(buf.readBigUInt64LE(ph + 32));
-    const region = buf.subarray(p_offset, p_offset + p_filesz);
+    // The first-page shortcut isn't universal: when patchelf relocates a
+    // longer interpreter string it can place PT_INTERP past the 4 KiB head
+    // (observed with the OHOS bottle's binary layout, which carries an extra
+    // codesign section). Fall back to a positioned read in that case.
+    const region =
+      p_offset + p_filesz <= buf.length ? buf.subarray(p_offset, p_offset + p_filesz) : readAt(path, p_offset, p_filesz);
     const nul = region.indexOf(0);
     return region.subarray(0, nul === -1 ? region.length : nul).toString("utf8");
   }
   return null;
 }
 
-// Read up to the first 4 KiB of a file (enough for PT_INTERP, which always
-// lives in the first ELF page). The bun binary is ~1.3 GB in debug builds,
-// so `readFileSync` on it would be wasteful; mirror what the Zig helper does.
+// Read up to the first 4 KiB of a file (enough for the ELF program headers).
+// The bun binary is ~1.3 GB in debug builds, so `readFileSync` on it would be
+// wasteful.
 function readHead(path: string, bytes = 4096): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(bytes);
     const n = readSync(fd, buf, 0, bytes, 0);
+    return buf.subarray(0, n);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Positioned read for the rare case where PT_INTERP lives past the head.
+function readAt(path: string, offset: number, length: number): Buffer {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(length);
+    const n = readSync(fd, buf, 0, length, offset);
     return buf.subarray(0, n);
   } finally {
     closeSync(fd);
@@ -74,7 +92,7 @@ function hostLooksNix(): boolean {
   if (existsSync("/etc/NIXOS")) return true;
   if (existsSync("/gnu/store")) return true;
   try {
-    const selfInterp = readInterp(readHead(bunExe()));
+    const selfInterp = readInterp(bunExe());
     if (selfInterp && (selfInterp.startsWith("/nix/store/") || selfInterp.startsWith("/gnu/store/"))) {
       return true;
     }
@@ -82,7 +100,9 @@ function hostLooksNix(): boolean {
   return false;
 }
 
-test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
+// isOHOS: see 24742.test.ts — patchelf-append-at-EOF layout loses the interp
+// in the compile-time tail relocate; NixOS-only scenario.
+test.skipIf(!isLinux || isOHOS || !patchelf || !existsSync(ldso) || hostLooksNix())(
   "bun build --compile preserves /nix/store PT_INTERP on NixOS hosts (#29290)",
   async () => {
     using dir = tempDir("nix-host-interp", {
@@ -104,7 +124,7 @@ test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
       expect(r.stderr.toString()).toBe("");
       expect(r.exitCode).toBe(0);
     }
-    expect(readInterp(readHead(fakeNixBun))).toBe(fakeNixInterp);
+    expect(readInterp(fakeNixBun)).toBe(fakeNixInterp);
 
     // Force the spawned bun's host-detection to say "yes, Nix" without
     // mutating the shared rootfs. `BUN_DEBUG_FORCE_NIX_HOST=1` is a
@@ -134,7 +154,7 @@ test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
     // On a NixOS host the output must keep the /nix/store interpreter from
     // the template — rewriting to FHS would point at a stub-ld that rejects
     // generic binaries and #29290 reappears.
-    const interp = readInterp(readHead(out));
+    const interp = readInterp(out);
     expect(interp).toBe(fakeNixInterp);
   },
   180_000,
@@ -144,7 +164,9 @@ test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
 // apply. If the host has no Nix/Guix markers AND bun's own PT_INTERP is FHS,
 // a template with a /nix/store interpreter should be rewritten to the FHS
 // path so the compiled output runs on generic Linux.
-test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
+// isOHOS: see 24742.test.ts — patchelf-append-at-EOF layout loses the interp
+// in the compile-time tail relocate; NixOS-only scenario.
+test.skipIf(!isLinux || isOHOS || !patchelf || !existsSync(ldso) || hostLooksNix())(
   "bun build --compile still normalizes /nix/store -> FHS on non-Nix hosts",
   async () => {
     using dir = tempDir("fhs-host-interp", {
@@ -186,7 +208,7 @@ test.skipIf(!isLinux || !patchelf || !existsSync(ldso) || hostLooksNix())(
     expect(r.exitCode).toBe(0);
 
     // Non-NixOS host → normalization kicks in → FHS path.
-    expect(readInterp(readHead(out))).toBe(ldso);
+    expect(readInterp(out)).toBe(ldso);
 
     // And the binary runs on this (non-NixOS) system.
     const run = Bun.spawnSync({ cmd: [out], env: bunEnv, stderr: "pipe", stdout: "pipe" });

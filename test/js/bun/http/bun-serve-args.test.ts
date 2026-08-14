@@ -2,6 +2,15 @@ import { serve } from "bun";
 import { describe, expect, test } from "bun:test";
 import { isWindows, tmpdirSync } from "../../../harness";
 
+// On OHOS, the repo checkout's filesystem can't hold AF_UNIX socket files
+// (EPERM). Several tests below pass bare relative "*.sock" names, which
+// resolve against cwd; chdir once for the whole file (each test file is its
+// own process, so there's nothing to restore) into a tmpdir that does
+// support them.
+if (process.platform === "openharmony") {
+  process.chdir(tmpdirSync());
+}
+
 const defaultHostname = "localhost";
 
 describe("Bun.serve basic options", () => {

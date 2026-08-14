@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 import { join } from "path";
 
-// Each test has its own tempDirWithFiles and spawns its own processes; nothing is shared.
-test.concurrent("workspace devDependencies should take priority over peerDependencies for resolution", async () => {
+setDefaultTimeout(1000 * 60 * 5);
+
+test("workspace devDependencies should take priority over peerDependencies for resolution", async () => {
   await using dir = tempDir("dev-peer-priority", {
     "package.json": JSON.stringify({
       name: "test-monorepo",

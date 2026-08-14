@@ -65,7 +65,7 @@ await writeFile(
     {
       name: "test-native-binlink-target",
       version: "1.0.0",
-      os: ["darwin", "linux", "win32"],
+      os: ["darwin", "linux", "win32", "openharmony"],
       cpu: ["arm64", "x64"],
     },
     null,
@@ -132,7 +132,7 @@ for (const pkgName of ["test-native-binlink", "test-native-binlink-target"]) {
                     "test-native-binlink-target": "1.0.0",
                   }
                 : undefined,
-            os: pkgName === "test-native-binlink-target" ? ["darwin", "linux", "win32"] : undefined,
+            os: pkgName === "test-native-binlink-target" ? ["darwin", "linux", "win32", "openharmony"] : undefined,
             cpu: pkgName === "test-native-binlink-target" ? ["arm64", "x64"] : undefined,
             dist: {
               integrity,

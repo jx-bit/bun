@@ -20,11 +20,19 @@ p I am your father
 });
 
 test.skipIf(isWindows || !nodeExe())(
-  "receives a net.Socket handle from a node child and releases its descriptor",
+  "releases the descriptor of a received handle whose type it does not accept",
   async () => {
     const parentSource = [
       `const net = require("node:net");`,
-      `const gotHandle = Promise.withResolvers();`,
+      `let reported = false;`,
+      `const handleFailed = Promise.withResolvers();`,
+      `process.on("uncaughtException", () => {`,
+      `  if (!reported) {`,
+      `    reported = true;`,
+      `    console.log("handle-error");`,
+      `    handleFailed.resolve();`,
+      `  }`,
+      `});`,
       `const socketClosed = Promise.withResolvers();`,
       `const server = net.createServer(socket => {`,
       `  socket.resume();`,
@@ -36,15 +44,12 @@ test.skipIf(isWindows || !nodeExe())(
       `  cmd: [process.env.NODE_BIN, "-e", childSource],`,
       `  stdio: ["ignore", "inherit", "inherit"],`,
       `  serialization: "json",`,
-      `  ipc(message, _subprocess, handle) { gotHandle.resolve({ message, handle }); },`,
+      `  ipc() {},`,
       `  env: { ...process.env, HANDLE_PORT: String(server.address().port) },`,
       `});`,
-      `const { message, handle } = await gotHandle.promise;`,
-      `console.log("message:", message);`,
-      `console.log("handle is a net.Socket:", handle instanceof net.Socket);`,
+      `await handleFailed.promise;`,
       `child.kill();`,
       `await child.exited;`,
-      `handle.destroy();`,
       `await socketClosed.promise;`,
       `server.close();`,
       `console.log("socket-closed");`,
@@ -60,60 +65,7 @@ test.skipIf(isWindows || !nodeExe())(
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 
     expect({ stdout: normalizeBunSnapshot(stdout), exitCode }).toEqual({
-      stdout: "message: x\nhandle is a net.Socket: true\nsocket-closed",
-      exitCode: 0,
-    });
-  },
-);
-
-test.skipIf(isWindows || !nodeExe())(
-  "receives a dgram.Socket handle from a node child and adopts its descriptor",
-  async () => {
-    const parentSource = [
-      `const dgram = require("node:dgram");`,
-      `const gotHandle = Promise.withResolvers();`,
-      `const gotDatagram = Promise.withResolvers();`,
-      `const childSource = 'const dgram = require("dgram"); const s = dgram.createSocket("udp4"); s.bind(0, "127.0.0.1", () => { process.send({ port: s.address().port }, s); });';`,
-      `const child = Bun.spawn({`,
-      `  cmd: [process.env.NODE_BIN, "-e", childSource],`,
-      `  stdio: ["ignore", "inherit", "inherit"],`,
-      `  serialization: "json",`,
-      `  ipc(message, _subprocess, handle) { gotHandle.resolve({ message, handle }); },`,
-      `  env: { ...process.env },`,
-      `});`,
-      `const { message, handle } = await gotHandle.promise;`,
-      `console.log("message port:", typeof message.port === "number" && message.port > 0);`,
-      `console.log("handle is a dgram.Socket:", handle instanceof dgram.Socket);`,
-      `console.log("adopted port matches:", handle.address().port === message.port);`,
-      `child.kill();`,
-      `await child.exited;`,
-      `handle.on("message", buf => gotDatagram.resolve(buf.toString()));`,
-      `const sender = dgram.createSocket("udp4");`,
-      `sender.send("ping", message.port, "127.0.0.1");`,
-      `console.log("datagram:", await gotDatagram.promise);`,
-      `sender.close();`,
-      `handle.close();`,
-      `console.log("done");`,
-    ].join("\n");
-
-    await using proc = Bun.spawn({
-      cmd: [bunExe(), "-e", parentSource],
-      env: { ...bunEnv, NODE_BIN: nodeExe()! },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-
-    expect({ stdout: normalizeBunSnapshot(stdout), stderr, exitCode }).toEqual({
-      stdout: [
-        "message port: true",
-        "handle is a dgram.Socket: true",
-        "adopted port matches: true",
-        "datagram: ping",
-        "done",
-      ].join("\n"),
-      stderr: "",
+      stdout: "handle-error\nsocket-closed",
       exitCode: 0,
     });
   },

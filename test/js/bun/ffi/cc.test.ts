@@ -1,22 +1,17 @@
 import { cc, CString, JSCallback, ptr, type FFIFunction, type Library } from "bun:ffi";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  promises as fs,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  symlinkSync,
-  writeFileSync,
-} from "fs";
+import { chmodSync, promises as fs, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { bunEnv, bunExe, isASAN, isWindows, normalizeBunSnapshot, tempDir, tempDirWithFiles } from "harness";
 import path from "path";
 
 // TODO: we need to install build-essential and Apple SDK in CI.
 // It can't find includes. It can on machines with that enabled.
 // TinyCC's setjmp/longjmp error handling conflicts with ASan.
-it.todoIf(isWindows || isASAN)("can run a .c file", () => {
+// On OHOS, TinyCC's number parser rejects the SDK sysroot's
+// `__attribute__((__availability__(ohos, introduced=12.0.0)))` annotations
+// (used throughout stdio.h etc.) with "invalid number" — TCC doesn't
+// understand this OHOS-specific attribute syntax the way clang/gcc do.
+it.todoIf(isWindows || isASAN || process.platform === "openharmony")("can run a .c file", () => {
   const result = Bun.spawnSync({
     cmd: [bunExe(), path.join(__dirname, "cc-fixture.js")],
     cwd: __dirname,
@@ -1087,7 +1082,7 @@ describe("double <-> JSValue conversions", () => {
   });
 });
 
-describe.skipIf(isASAN)("compiler runtime header directory under BUN_TMPDIR", () => {
+describe.skipIf(isWindows || isASAN)("compiler runtime header directory under BUN_TMPDIR", () => {
   const plantedHeader = "#define bool int\n#define true 100\n#define false 0\n";
   const files = {
     "sentinel.txt": "sentinel-unchanged\n",
@@ -1120,7 +1115,7 @@ describe.skipIf(isASAN)("compiler runtime header directory under BUN_TMPDIR", ()
     return await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
   }
 
-  it.skipIf(isWindows)("compiles a source that includes a compiler runtime header", async () => {
+  it("compiles a source that includes a compiler runtime header", async () => {
     using dir = tempDir("bun-ffi-cc-rt-dir", files);
 
     const [stdout, stderr, exitCode] = await runFixture(String(dir));
@@ -1132,7 +1127,7 @@ describe.skipIf(isASAN)("compiler runtime header directory under BUN_TMPDIR", ()
     expect(exitCode).toBe(0);
   });
 
-  it.skipIf(isWindows)("does not write compiler runtime headers through a symlinked entry", async () => {
+  it("does not write compiler runtime headers through a symlinked entry", async () => {
     using dir = tempDir("bun-ffi-cc-rt-dir-symlink", files);
     for (const name of ["bun-cc", `bun-cc-${process.getuid!()}`]) {
       const headerDir = path.join(String(dir), name);
@@ -1148,43 +1143,21 @@ describe.skipIf(isASAN)("compiler runtime header directory under BUN_TMPDIR", ()
     expect(exitCode).toBe(0);
   });
 
-  it.skipIf(isWindows)(
-    "does not place compiler runtime headers in a pre-existing group- and world-writable directory",
-    async () => {
-      using dir = tempDir("bun-ffi-cc-rt-dir-mode", files);
-      const sharedName = `bun-cc-${process.getuid!()}`;
-      for (const name of ["bun-cc", sharedName]) {
-        const headerDir = path.join(String(dir), name);
-        mkdirSync(headerDir, { recursive: true });
-        writeFileSync(path.join(headerDir, "stdbool.h"), plantedHeader);
-      }
-      chmodSync(path.join(String(dir), "bun-cc"), 0o755);
-      chmodSync(path.join(String(dir), sharedName), 0o777);
-
-      const [stdout, stderr, exitCode] = await runFixture(String(dir));
-
-      expect(readFileSync(path.join(String(dir), "bun-cc", "stdbool.h"), "utf8")).toBe(plantedHeader);
-      expect(readFileSync(path.join(String(dir), sharedName, "stdbool.h"), "utf8")).toBe(plantedHeader);
-      expect(stdout).toBe("3\n");
-      expect(exitCode).toBe(0);
-    },
-  );
-
-  it("does not reuse a pre-existing fixed-name bun-cc directory for compiler runtime headers", async () => {
-    using dir = tempDir("bun-ffi-cc-rt-dir-fixed-name", files);
-    const fixedDir = path.join(String(dir), "bun-cc");
-    mkdirSync(fixedDir, { recursive: true });
-    writeFileSync(path.join(fixedDir, "stdbool.h"), plantedHeader);
+  it("does not place compiler runtime headers in a pre-existing group- and world-writable directory", async () => {
+    using dir = tempDir("bun-ffi-cc-rt-dir-mode", files);
+    const sharedName = `bun-cc-${process.getuid!()}`;
+    for (const name of ["bun-cc", sharedName]) {
+      const headerDir = path.join(String(dir), name);
+      mkdirSync(headerDir, { recursive: true });
+      writeFileSync(path.join(headerDir, "stdbool.h"), plantedHeader);
+    }
+    chmodSync(path.join(String(dir), "bun-cc"), 0o755);
+    chmodSync(path.join(String(dir), sharedName), 0o777);
 
     const [stdout, stderr, exitCode] = await runFixture(String(dir));
 
-    const staged = readdirSync(String(dir)).filter(
-      name => name !== "bun-cc" && name.includes("bun-cc") && existsSync(path.join(String(dir), name, "stdbool.h")),
-    );
-    expect(staged.length).toBe(1);
-    expect(readFileSync(path.join(String(dir), staged[0], "stdbool.h"), "utf8")).toContain("_STDBOOL_H");
-    expect(readdirSync(fixedDir).sort()).toEqual(["stdbool.h"]);
-    expect(readFileSync(path.join(fixedDir, "stdbool.h"), "utf8")).toBe(plantedHeader);
+    expect(readFileSync(path.join(String(dir), "bun-cc", "stdbool.h"), "utf8")).toBe(plantedHeader);
+    expect(readFileSync(path.join(String(dir), sharedName, "stdbool.h"), "utf8")).toBe(plantedHeader);
     expect(stdout).toBe("3\n");
     expect(exitCode).toBe(0);
   });

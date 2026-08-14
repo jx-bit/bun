@@ -357,14 +357,49 @@ it.skipIf(!isPosix)(
 // buffer through in one shot and returns Done/Wrote, and writer.end() only
 // fires on_close (which never touches pending). Linux-only because the
 // drain-flush-drain shape needs the AF_UNIX send buffer to hold the remainder
-// (Linux default ~200KB; macOS is ~8KB, so flush() returns Pending there and
-// the promise was already settled via on_write).
+// (macOS is ~8KB, so flush() returns Pending there and the promise was already
+// settled via on_write).
+//
+// The write has to be big enough to backpressure yet leave a remainder the
+// send buffer can still swallow whole, i.e. somewhere between one and two
+// buffers' worth. Capacity is not a constant: 224KB in the OpenHarmony
+// container, 512KB on a HarmonyOS device, and the old hardcoded 300KB silently
+// stopped backpressuring on the latter — write() returned a byte count instead
+// of a Promise and the test failed on its first assertion, never reaching the
+// orphan it exists to cover. Measure it and scale from there.
+//
+// The fds are non-blocking (the drain loops below rely on readSync throwing
+// rather than blocking), so filling one until writeSync reports EAGAIN gives
+// the capacity directly.
+function measureSocketPairCapacity(): number {
+  const [readFd, writeFd] = createSocketPair();
+  try {
+    const chunk = Buffer.alloc(64 * 1024, 0x61);
+    let total = 0;
+    while (total < 16 * 1024 * 1024) {
+      let n: number;
+      try {
+        n = fs.writeSync(writeFd, chunk);
+      } catch {
+        break; // EAGAIN: buffer is full, `total` is its capacity
+      }
+      if (!n) break;
+      total += n;
+    }
+    return total;
+  } finally {
+    fs.closeSync(readFd);
+    fs.closeSync(writeFd);
+  }
+}
 it.skipIf(!isLinux)(
   "end() after a backpressured write() with the reader drained returns the write's promise and resolves it",
   async () => {
     const [readFd, writeFd] = createSocketPair();
     const sink = Bun.file(writeFd).writer();
-    const size = 300 * 1024;
+    // 1.5 buffers: over capacity so write() backpressures, and the ~0.5 buffer
+    // left over still fits in one flush once the reader has drained.
+    const size = Math.floor(measureSocketPairCapacity() * 1.5);
     try {
       const writePromise = sink.write(Buffer.alloc(size, 0x61));
       expect(writePromise).toBeInstanceOf(Promise);

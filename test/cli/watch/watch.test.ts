@@ -7,6 +7,10 @@ import { join } from "node:path";
 
 let watchee: Subprocess;
 
+// OHOS fork+exit_group overhead is 2-3x slower than vfork, and this test does
+// 10 sequential --watch reload cycles.
+const timeout = 10000 * (process.platform === "openharmony" ? 3 : 1);
+
 function stdoutWaiter(proc: Subprocess<"ignore", "pipe", any>) {
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
@@ -55,7 +59,7 @@ for (const dir of ["dir", "©️"]) {
       }
       rmSync(path);
     },
-    10000,
+    timeout,
   );
 }
 

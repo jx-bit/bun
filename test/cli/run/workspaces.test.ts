@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, isOHOS, tempDir } from "harness";
+import { bunEnv, bunExe, tempDir } from "harness";
 
-describe.concurrent.skipIf(isOHOS)("bun run --workspaces", () => {
+describe.concurrent("bun run --workspaces", () => {
   test("runs script in all workspace packages", async () => {
     using dir = tempDir("workspaces-test", {
       "package.json": JSON.stringify({

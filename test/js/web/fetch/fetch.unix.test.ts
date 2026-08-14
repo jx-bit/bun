@@ -22,6 +22,9 @@ it("throws ENAMETOOLONG when socket path exceeds platform-specific limit", () =>
       android: 104,
       haiku: 104,
       cygwin: 260,
+      // Same AF_UNIX sun_path limit as the Linux ABI (108); without an entry
+      // the path was `repeat(undefined)` — an empty string that never threw.
+      openharmony: 108,
     }[process.platform],
   );
 
@@ -135,7 +138,9 @@ function startServerUnix({ fetch, ...options }: ServeOptions): string {
     server_unix.reload({ ...options, fetch });
     return socketPath;
   }
-  const unix = `.${Math.random().toString(36).slice(2)}-socket`.slice(0, 103);
+  // Absolute path: the OHOS sandbox rejects relative AF_UNIX paths with
+  // EPERM at listen() (absolute paths under the app tmpdir are fine).
+  const unix = join(tmp_dir, `${Math.random().toString(36).slice(2)}-socket`.slice(0, 60));
   server_unix = serve({
     ...options,
     fetch,

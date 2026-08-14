@@ -82,7 +82,8 @@ for (const { version, parentBinValue, targetFile } of shapes) {
   const targetJson = {
     name: "test-native-binlink-altpath-target",
     version,
-    os: ["darwin", "linux", "win32"],
+    // include the host platform so the fixture also matches on OHOS
+    os: [...new Set(["darwin", "linux", "win32", process.platform])],
     cpu: ["arm64", "x64"],
   };
   targetVersions[version] = {
