@@ -11,6 +11,7 @@
 | `launch-fulltest.sh` | 启动器(推荐入口):固化全部测试 env(PARALLEL/RETRIES/超时/语义 flag),前置校验后 `exec` runner。**必须经它启动**,直接跑 runner 会漏设语义 flag 导致结果失真 |
 | `launch-fulltest-sh.sh` | 同上的 sh 兼容版,设备没有 bash 时用 |
 | `run-all-official-progress-optimized.sh` | runner(执行引擎):per-file 执行 + setsid/PGID 看门狗 + 超时/崩溃区分 + OPENHARMONY expectations 排除 + 孤儿清理 + 汇总报告 |
+| `deploy-test-tree.sh` | 测试树部署(宿主机 Git Bash 执行):发 tar → 备份旧树(含 node_modules)→ 解新树 → 挪回 node_modules |
 
 ## 快速使用
 
@@ -26,10 +27,11 @@ hdc file send ohos/fulltest/launch-fulltest-sh.sh        "$DEVROOT/"
 hdc file send ohos/fulltest/run-all-official-progress-optimized.sh "$DEVROOT/"
 hdc shell "chmod 755 $DEVROOT/*.sh $DEVROOT/run-all-official-progress-optimized.sh"
 
-# 2) 启动(宿主机后台跑 hdc;全量约 3~6 小时)
-hdc shell "cd $DEVROOT && setsid bash launch-fulltest.sh > result_fulltest_\$(date +%Y%m%d_%H%M).txt 2>&1 &"
+# 2) 启动(在宿主机 Git Bash 执行;注意末尾的 & 在宿主机侧——hdc 会阻塞等 stdout
+#    关闭,宿主机不放后台这条命令会一直挂着。全量约 3~6 小时)
+hdc shell "cd $DEVROOT && setsid bash launch-fulltest.sh > result_fulltest_\$(date +%Y%m%d_%H%M%S).txt 2>&1 &" &
 # 设备无 bash 时:
-# hdc shell "cd $DEVROOT && setsid sh launch-fulltest-sh.sh > result_fulltest_\$(date +%Y%m%d_%H%M).txt 2>&1 &"
+# hdc shell "cd $DEVROOT && setsid sh launch-fulltest-sh.sh > result_fulltest_\$(date +%Y%m%d_%H%M%S).txt 2>&1 &" &
 
 # 3) 产出两份文件
 #    $DEVROOT/result_fulltest_<ts>.txt          进度 + per-file 结果(看汇总)
