@@ -1,8 +1,8 @@
 # OHOS Bun 全量测试工具(launcher + runner)
 
 对 ljy9812/bun 构建的 OHOS aarch64 版 Bun 在鸿蒙设备上跑完整 test suite 的工具集。
-新人从 clone 到出报告的完整流程见 `D:\xuqiu\bun\OHOS-Bun-全量测试指导.md`(维护者内网文档),
-本 README 只覆盖脚本的部署与启动。
+新人从 clone 到出报告的完整流程见本目录 `OHOS-Bun-全量测试指导.md`,
+最新一轮测试结果分析见 `bun-test-report-latest.md`,本 README 只覆盖脚本的部署与启动。
 
 ## 文件说明
 
