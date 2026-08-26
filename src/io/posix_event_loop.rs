@@ -571,20 +571,15 @@ impl FilePoll {
         &mut self,
         loop_: &mut Loop,
         flag: Flags,
-        _one_shot: OneShotFlag,
+        one_shot: OneShotFlag,
         fd: Fd,
     ) -> sys::Result<()> {
         // OHOS kernel (HongMeng 1.12) does not disarm EPOLLONESHOT interests
         // after they fire (verified 2026-08-08: an OUT|ONESHOT poll on a pty
-        // master re-fires on every wait without re-arm), and one-shot state
-        // tracking on fds sharing a file description (Terminal dups the pty
-        // master into separate read/write fds) loses the co-registered read
-        // interest's events entirely. Level-triggered registration avoids the
-        // broken path; the FilePoll re-register logic is idempotent for LT.
-        #[cfg(target_env = "ohos")]
-        let one_shot = OneShotFlag::None;
-        #[cfg(not(target_env = "ohos"))]
-        let one_shot = _one_shot;
+        // master re-fires on every wait without re-arm). Instead of forcing
+        // level-triggered (which allows spurious wakeups), we emulate the
+        // disarm with EPOLL_CTL_DEL on event delivery + EPOLL_CTL_ADD on
+        // re-arm — see register_with_fd_impl and Bun__internal_dispatch_ready_poll.
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
@@ -636,7 +631,25 @@ impl FilePoll {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             use bun_sys::linux::{self, EPOLL};
-            let one_shot_flag: u32 = if !self.flags.contains(Flags::OneShot) {
+
+            // OHOS: emulate EPOLLONESHOT with DEL+ADD. Omit the kernel flag
+            // (accepted but not disarmed) and use EmulatedOneShot to drive
+            // DEL on event delivery and ADD on re-arm.
+            #[cfg(target_env = "ohos")]
+            {
+                if self.flags.contains(Flags::OneShot) {
+                    self.flags.insert(Flags::EmulatedOneShot);
+                } else {
+                    self.flags.remove(Flags::EmulatedOneShot);
+                }
+            }
+
+            #[cfg(target_env = "ohos")]
+            let emulated_oneshot = self.flags.contains(Flags::EmulatedOneShot);
+            #[cfg(not(target_env = "ohos"))]
+            let emulated_oneshot = false;
+
+            let one_shot_flag: u32 = if !self.flags.contains(Flags::OneShot) || emulated_oneshot {
                 0
             } else {
                 EPOLL::ONESHOT
@@ -668,7 +681,12 @@ impl FilePoll {
                 u64: Pollable::init(self).ptr() as u64,
             };
 
-            let op: c_int = if self.is_registered() || self.flags.contains(Flags::NeedsRearm) {
+            let needs_rearm = self.flags.contains(Flags::NeedsRearm);
+            let op: c_int = if needs_rearm && emulated_oneshot {
+                // The ready-event path removed this fd from epoll to emulate
+                // the kernel's one-shot disarm. Re-arming therefore adds it.
+                EPOLL::CTL_ADD
+            } else if self.is_registered() || needs_rearm {
                 EPOLL::CTL_MOD
             } else {
                 EPOLL::CTL_ADD
@@ -1165,6 +1183,8 @@ impl FilePoll {
 
         self.flags.remove(Flags::NeedsRearm);
         self.flags.remove(Flags::OneShot);
+        #[cfg(target_env = "ohos")]
+        self.flags.remove(Flags::EmulatedOneShot);
         self.flags.remove(Flags::PollReadable);
         self.flags.remove(Flags::PollWritable);
         self.flags.remove(Flags::PollProcess);
@@ -1234,6 +1254,11 @@ pub enum Flags {
     IgnoreUpdates,
 
     Socket,
+
+    // OHOS-only: emulate EPOLLONESHOT disarm with DEL+ADD. Placed last so
+    // existing flag bit values stay stable on every platform.
+    #[cfg(target_env = "ohos")]
+    EmulatedOneShot,
 }
 
 pub type FlagsSet = enumset::EnumSet<Flags>;
@@ -1506,6 +1531,23 @@ unsafe extern "C" fn Bun__internal_dispatch_ready_poll(
 
     // SAFETY: tag matched FilePoll; pointer was set via Pollable::init in register_with_fd.
     let file_poll: &mut FilePoll = unsafe { &mut *tag.as_file_poll() };
+
+    // OHOS: emulate EPOLLONESHOT disarm by DEL-ing the fd before dispatching
+    // the ready event. The fd is physically absent from epoll until the
+    // callback re-arms with EPOLL_CTL_ADD.
+    #[cfg(target_env = "ohos")]
+    if file_poll.flags.contains(Flags::EmulatedOneShot) {
+        // Copy the epoll fd without holding a Loop borrow across the callback,
+        // which may re-enter the event loop and re-arm this FilePoll.
+        let watcher_fd = Fd::from_native(unsafe { &*loop_ }.fd);
+        if let Err(err) = crate::disarm_emulated_epoll_oneshot(watcher_fd, file_poll.fd) {
+            bun_core::Output::panic(format_args!(
+                "failed to emulate EPOLLONESHOT for fd {}: {:?}",
+                file_poll.fd, err
+            ));
+        }
+    }
+
     if file_poll.flags.contains(Flags::IgnoreUpdates) {
         return;
     }
