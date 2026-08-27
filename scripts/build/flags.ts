@@ -1299,7 +1299,7 @@ export const linkerFlags: Flag[] = [
     flag: c => [
       "-Wl,--gc-sections",
       "-Wl,--export-dynamic",
-      `-Wl,--version-script=${c.cwd}/src/symbols.dyn`,
+      `-Wl,--version-script=${c.cwd}/src/linker-ohos.lds`,
       "-Wl,--undefined=us_ssl_pop_pending_session",
       "-Wl,--undefined=us_ssl_pop_pending_keylog",
       "-Wl,--undefined=us_ssl_enable_pending_events",
@@ -1645,6 +1645,7 @@ export function orderFilePath(cfg: Pick<Config, "buildDir">): string {
  */
 export function linkDepends(cfg: Config): string[] {
   if (cfg.freebsd) return [join(cfg.cwd, "src/symbols.dyn"), join(cfg.cwd, "src/linker-freebsd.lds")];
+  if (cfg.ohos) return [join(cfg.cwd, "src/linker-ohos.lds")];
   if (cfg.windows) return [join(cfg.cwd, "src/symbols.def")];
   // The release symbol ordering file: listing it here is what makes
   // regenerating it relink, and only relink.
