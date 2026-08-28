@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, isASAN, isDebug, isOHOS, isWindows } from "harness";
+import { bunEnv, bunExe, isASAN, isDebug, isWindows, tempDir } from "harness";
+import { exec } from "node:child_process";
 
 test.concurrent("pipe does the right thing", async () => {
   // Note: Bun.spawnSync uses memfd_create on Linux for pipe, which means we see
@@ -458,8 +459,7 @@ describe.skipIf(isWindows)("pipe backpressure", () => {
     return result;
   }
 
-  // OHOS: 平台管道缓冲/合并行为差异（实测单次 read 合入 40 次写入，阈值 <16）；T50 同族平台管道行为
-  test.concurrent.skipIf(isOHOS)("Bun.stdin.stream(): a single read does not ingest the whole pipe", async () => {
+  test.concurrent("Bun.stdin.stream(): a single read does not ingest the whole pipe", async () => {
     const { first, deltaMB } = await run(`
       const rss = process.platform === "darwin" && typeof Bun.unsafe.memoryFootprint === "function" ? Bun.unsafe.memoryFootprint : process.memoryUsage.rss;
       const rd = Bun.stdin.stream().getReader();
@@ -531,4 +531,21 @@ describe.skipIf(isWindows)("pipe backpressure", () => {
     expect(stdout).toBe(String(n * chunk.length));
     expect(exitCode).toBe(0);
   });
+});
+
+test("process.stdin over an anonymous pipe delivers each byte exactly once", async () => {
+  const total = 10 * 1024 * 1024;
+  using dir = tempDir("stdin-pipe-exactly-once", {
+    "writer.js": `const chunk = Buffer.alloc(65536); let left = ${total}; (function pump() { while (left > 0) { left -= chunk.length; if (!process.stdout.write(chunk)) return process.stdout.once("drain", pump); } })();`,
+    "reader.js": `const h = new Bun.CryptoHasher("sha1"); let n = 0; process.stdin.on("data", d => { n += d.length; h.update(d); }); process.stdin.on("close", () => process.stdout.write(n + " " + h.digest("hex")));`,
+  });
+  const { promise, resolve } = Promise.withResolvers<{ err: Error | null; stdout: string; stderr: string }>();
+  exec(`"${bunExe()}" writer.js | "${bunExe()}" reader.js`, { cwd: String(dir), env: bunEnv }, (err, stdout, stderr) =>
+    resolve({ err, stdout, stderr }),
+  );
+  const { err, stdout, stderr } = await promise;
+  expect(stderr).toBe("");
+  const expected = new Bun.CryptoHasher("sha1").update(Buffer.alloc(total)).digest("hex");
+  expect(stdout).toBe(`${total} ${expected}`);
+  expect(err).toBeNull();
 });

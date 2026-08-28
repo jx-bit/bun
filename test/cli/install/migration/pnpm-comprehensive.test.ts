@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import fs from "fs";
-import { bunEnv, bunExe, tempDir } from "harness";
+import { bunEnv, bunExe, normalizeBunSnapshot, tempDir } from "harness";
 import { join } from "path";
 
 setDefaultTimeout(1000 * 60 * 5);
@@ -929,10 +929,12 @@ packages:
 
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 
-    // Should fail with error message
+    expect(normalizeBunSnapshot(stderr, tmpDir)).toMatchInlineSnapshot(`
+      "error: pnpm-lock.yaml is lockfileVersion 6.0, which bun cannot migrate
+      note: pnpm install --lockfile-only"
+    `);
+    expect(stdout).toBe("");
     expect(exitCode).toBe(1);
-    expect(stderr).toContain("pnpm-lock.yaml version is too old");
-    expect(stderr).toContain("Please upgrade using 'pnpm install");
   });
 
   test("pnpm with peer dependencies and auto-install-peers", async () => {

@@ -7,7 +7,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, arch as hostArch, platform as hostPlatform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { NODEJS_ABI_VERSION, NODEJS_V8_VERSION, NODEJS_VERSION } from "./deps/nodejs-headers.ts";
@@ -17,7 +17,7 @@ import { resolveMacosSdkPath } from "./macos-sdk.ts";
 import { clangTargetArch } from "./tools.ts";
 import { cyan, dim, green } from "./tty.ts";
 
-export type OS = "linux" | "darwin" | "windows" | "freebsd" | "ohos";
+export type OS = "linux" | "darwin" | "windows" | "freebsd";
 export type Arch = "x64" | "aarch64";
 export type Abi = "gnu" | "musl" | "android";
 export type BuildType = "Debug" | "Release" | "RelWithDebInfo" | "MinSizeRel";
@@ -82,11 +82,8 @@ export interface Config {
   darwin: boolean;
   windows: boolean;
   freebsd: boolean;
-  ohos: boolean;
   /** linux || darwin || freebsd */
   unix: boolean;
-  /** darwin || freebsd — kqueue-based event loop */
-  kqueue: boolean;
   x64: boolean;
   arm64: boolean;
 
@@ -142,7 +139,7 @@ export interface Config {
   asan: boolean;
   assertions: boolean;
   logs: boolean;
-  /** x64-only: target nehalem (no AVX) instead of haswell. */
+  /** x64-only: target nehalem (no AVX). Default true on x64 — the only x64 build we ship. */
   baseline: boolean;
   canary: boolean;
   /** MinSizeRel → optimize for size. */
@@ -176,6 +173,14 @@ export interface Config {
 
   // ─── Dependency modes ───
   webkit: WebKitMode;
+  /**
+   * Deps built from a local checkout instead of the pinned tarball, keyed by
+   * dep name → absolute source dir. Set via `--local-deps=name=path[,...]`.
+   * The checkout is used as-is: no fetch, no `.ref` stamp, and the dep's
+   * `patches` are NOT applied (they target the pinned tarball; a fork
+   * checkout is expected to carry whatever you're iterating on).
+   */
+  localDeps: Record<string, string>;
 
   // ─── Paths (all absolute) ───
   /** Repository root. */
@@ -191,9 +196,6 @@ export interface Config {
 
   // ─── Toolchain (resolved absolute paths) ───
   cc: string;
-  /** Host-native C compiler for build-time codegen (no --target/--sysroot).
-   *  Same as cc for native builds; bare clang/cc for cross-compiles like OHOS. */
-  hostCc: string;
   cxx: string;
   /**
    * Compiler for build-time host tools (dep_host_cc codegen helpers).
@@ -242,6 +244,8 @@ export interface Config {
    */
   rustSysroot: string | undefined;
   strip: string;
+  /** llvm-nm, for `DirectBuild.forbidUndefined`; undefined skips those checks. */
+  nm: string | undefined;
   /** Set when the target is darwin. Undefined on non-darwin targets. */
   dsymutil: string | undefined;
   /** Self-host bun for codegen (bun install, bun build). */
@@ -278,7 +282,7 @@ export interface Config {
   rc: string | undefined;
   /** Windows: llvm-mt for nested cmake (CMAKE_MT). May be absent in some LLVM distros. */
   mt: string | undefined;
-  /** Windows-x64: nasm for BoringSSL's NASM-syntax assembly. */
+  /** x64: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
   nasm: string | undefined;
 
   // ─── macOS SDK (darwin only, undefined elsewhere) ───
@@ -307,24 +311,8 @@ export interface Config {
    * undefined on native Windows builds (VS dev shell supplies the SDK).
    */
   winsysroot: string | undefined;
-  /** Android NDK root. undefined when abi != "android". */
-  androidNdk: string | undefined;
-  /** Android API level (the N in `__ANDROID_API__=N`). undefined when abi != "android". */
-  androidApiLevel: number | undefined;
   /** NDK compiler-rt/libunwind dir: `<ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux`. */
   androidNdkRuntimeDir: string | undefined;
-  /** FreeBSD release version targeted (e.g. "14.3"). undefined when os != "freebsd". */
-  freebsdVersion: string | undefined;
-
-  // ─── OHOS cross-compilation (ohos only, undefined elsewhere) ───
-  /** Sysroot path for OHOS NDK. */
-  ohosSysroot: string | undefined;
-  /** OHOS SDK root path. */
-  ohosSdkRoot: string | undefined;
-  /** Cross-compiled libc++/libunwind path. */
-  ohosCrossLibs: string | undefined;
-  /** Cross-compiled ICU path. */
-  ohosIcuDir: string | undefined;
 
   // ─── Versioning ───
   /** Bun's own version (from package.json). */
@@ -370,6 +358,12 @@ export interface PartialConfig {
   ci?: boolean;
   buildkite?: boolean;
   webkit?: WebKitMode;
+  /**
+   * `name=path[,name=path...]` — build these deps from a local checkout
+   * (e.g. `mimalloc=~/code/mimalloc`). `~` expands to $HOME; relative paths
+   * resolve against the repo root. See `Config.localDeps`.
+   */
+  localDeps?: string;
   buildDir?: string;
   cacheDir?: string;
   /** Override NDK location (default: $ANDROID_NDK_ROOT etc). Only used when abi=android. */
@@ -382,16 +376,6 @@ export interface PartialConfig {
   freebsdVersion?: string;
   /** Linux glibc sysroot (pinned old glibc/libstdc++). Only used when linux && abi=gnu. */
   linuxSysroot?: string;
-  /** OHOS sysroot path. Only used when os=ohos. */
-  ohosSysroot?: string;
-  /** OHOS SDK root. Auto-detected if not provided. */
-  ohosSdkRoot?: string;
-  /** OHOS cross-compiled LLVM runtime libs (libc++/libc++abi/libunwind). Auto-detected if not provided. */
-  ohosCrossLibs?: string;
-  /** OHOS cross-compiled ICU directory. Auto-detected if not provided. */
-  ohosIcuDir?: string;
-  /** Override cross-compilation target triple (e.g. "aarch64-linux-ohos"). */
-  crossTarget?: string;
   /**
    * macOS SDK path (a MacOSX*.sdk directory). Only used when cross-compiling
    * for darwin from a non-darwin host; native darwin builds use xcrun.
@@ -467,6 +451,8 @@ export interface Toolchain {
    * can't read Mach-O, so darwin cross-compiles swap this in as `cfg.strip`.
    */
   llvmStrip: string | undefined;
+  /** llvm-nm; undefined skips the per-dep undefined-symbol checks (source.ts). */
+  nm: string | undefined;
   dsymutil: string | undefined;
   bun: string;
   jsRuntime: string;
@@ -498,11 +484,7 @@ export interface Toolchain {
    * source.ts) sidesteps the need.
    */
   mt: string | undefined;
-  /**
-   * Windows only: nasm. BoringSSL's win-x64 assembly is NASM syntax;
-   * clang's integrated assembler can't read it. win-aarch64 uses gas
-   * .S files instead, so this is x64-only in practice.
-   */
+  /** x64 targets: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
   nasm: string | undefined;
 }
 
@@ -512,7 +494,7 @@ export interface Toolchain {
 export function detectHost(): Host {
   const plat = hostPlatform();
   const os: OS =
-    plat === "linux" || plat === "openharmony"
+    plat === "linux"
       ? "linux"
       : plat === "darwin"
         ? "darwin"
@@ -749,15 +731,13 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   // skip this (the host clang-cl's default arch is just the host's).
   const compilerArch = os === "windows" && host.os === "windows" ? clangTargetArch(toolchain.cc) : undefined;
   const arch = partial.arch ?? compilerArch ?? host.arch;
-  const abi: Abi | undefined = os === "linux" ? (partial.abi ?? detectLinuxAbi()) : os === "ohos" ? "musl" : undefined;
+  const abi: Abi | undefined = os === "linux" ? (partial.abi ?? detectLinuxAbi()) : undefined;
 
   const linux = os === "linux";
   const darwin = os === "darwin";
   const windows = os === "windows";
   const freebsd = os === "freebsd";
-  const ohos = os === "ohos";
-  const unix = linux || darwin || freebsd || ohos;
-  const kqueue = darwin || freebsd;
+  const unix = linux || darwin || freebsd;
   const x64 = arch === "x64";
   const arm64 = arch === "aarch64";
   // Darwin target on a non-darwin host (Linux CI box building macOS
@@ -813,32 +793,18 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   // build:asan always set ENABLE_ASSERTIONS=ON for this reason.
   const assertions = partial.assertions ?? (debug || asan);
 
-  // Resolved early because the LTO defaults below need it (the windows
-  // -baseline WebKit prebuilt has no -lto variant). Defaults to `x64` so
-  // x64 builds pick the Nehalem baseline (pre-2013 CPUs) unless overridden;
-  // other arches (aarch64/ohos) default to false.
-  const baseline = partial.baseline ?? x64;
-
-  // LTO: default on for CI release non-asan non-assertions builds on Linux
-  // and on darwin cross-compiles. Windows is NOT in the default even though
-  // the windows x64 cross toolchain fully supports ThinLTO + cross-language
-  // LTO (and `--lto=on` still builds that way): LLVM's ThinLTO backend
-  // pipeline miscompiles JSC on x86-64 at -O1 and above — JS-visible
-  // corruption in the bundler tests, the same family as the linux x86-64
-  // ThinLTO miscompile that keeps linux on full LTO — and the regular-LTO
-  // route for COFF (full-LTO WebKit windows artifacts + a COFF rust summary
-  // fix-up) hasn't been built yet. Re-enable the default once one of those
-  // lands. The -lto WebKit prebuilts only exist for the cross toolchain, so
-  // native windows/darwin lanes are non-LTO regardless.
-  const ltoDefault = release && (linux || darwinCross) && ci && !assertions && !asan;
+  // LTO: default on for CI release non-asan non-assertions builds across
+  // linux, darwin-cross, and windows-cross. All three use ThinLTO (the JSC
+  // ThinLTO miscompile was fixed upstream). The -lto WebKit prebuilts only
+  // exist for the cross toolchain, so native windows/darwin stay non-LTO.
+  const windowsCross = windows && host.os !== "windows";
+  const ltoDefault = release && (linux || darwinCross || windowsCross) && ci && !assertions && !asan;
   let lto = partial.lto ?? ltoDefault;
   // ASAN and LTO don't mix — ASAN wins (silently, no warn — config is explicit).
   // Android: no LTO prebuilt WebKit exists; force off so the right tarball is fetched.
-  // Windows arm64 / baseline: same — oven-sh/WebKit ships no
-  // bun-webkit-windows-arm64-lto (LLVM's CodeView emitter aborts on ARM64
-  // NEON tuple registers during LTO codegen), and the pinned WEBKIT_VERSION
-  // predates the -baseline-lto variant.
-  if ((asan && lto) || abi === "android" || (windows && (arm64 || baseline))) {
+  // Windows arm64: oven-sh/WebKit ships no bun-webkit-windows-arm64-lto
+  // (LLVM's CodeView emitter aborts on ARM64 NEON tuple registers).
+  if ((asan && lto) || abi === "android" || (windows && arm64)) {
     lto = false;
   }
 
@@ -913,7 +879,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   // Logs: on by default in debug non-test
   const logs = partial.logs ?? debug;
 
-  // (`baseline` is resolved earlier, next to the LTO defaults.)
+  const baseline = partial.baseline ?? x64;
   const canary = partial.canary ?? true;
   const canaryRevision = canary ? "1" : "0";
 
@@ -1087,29 +1053,6 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     }
   }
 
-  // ─── OHOS ───
-  let ohosSysroot: string | undefined;
-  let ohosSdkRoot: string | undefined;
-  let ohosCrossLibs: string | undefined;
-  let ohosIcuDir: string | undefined;
-  if (ohos) {
-    ohosSdkRoot = partial.ohosSdkRoot ? resolve(cwd, partial.ohosSdkRoot) : findOhosSdkRoot();
-    if (!ohosSdkRoot) {
-      throw new BuildError("OHOS build requires --ohos-sdk-root=<path> or setup-ohos-sdk in home", {
-        hint: "Install OHOS SDK from https://gitee.com/openharmony and point --ohos-sdk-root to the SDK root.",
-      });
-    }
-    ohosSysroot = partial.ohosSysroot ? resolve(cwd, partial.ohosSysroot) : resolve(ohosSdkRoot, "ohos/native/sysroot");
-    if (!existsSync(ohosSysroot)) {
-      throw new BuildError(`OHOS sysroot not found at ${ohosSysroot}`);
-    }
-    ohosCrossLibs = partial.ohosCrossLibs ? resolve(cwd, partial.ohosCrossLibs) : resolve(cwd, "build", "ohos-cross-libs");
-    ohosIcuDir = partial.ohosIcuDir ? resolve(cwd, partial.ohosIcuDir) : resolve(cwd, "build", "ohos-icu", "target");
-    // Populate generic cross-compile fields so downstream plumbing sees OHOS settings
-    sysroot = ohosSysroot;
-    crossTarget = partial.crossTarget ?? "aarch64-linux-ohos";
-  }
-
   // ─── Cross-compilation (Windows) ───
   // Same pattern as Android/FreeBSD, with the MSVC spin: the host LLVM's
   // clang-cl/lld-link/llvm-lib/llvm-rc are used (tools.ts picks them by
@@ -1155,7 +1098,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const pkgJsonPath = resolve(cwd, "package.json");
   const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string };
   const version = pkgJson.version;
-  const revision = getGitRevision(cwd);
+  const revision = getGitRevision(cwd, debug && !ci ? buildDir : undefined);
 
   // Defaults from versions.ts. Override via --webkit-version=<hash> etc.
   // to test a branch before bumping the pinned default.
@@ -1187,7 +1130,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     crossTarget = `${arm64 ? "arm64" : "x86_64"}-apple-macosx`;
     osxDeploymentTarget = partial.osxDeploymentTarget ?? MIN_OSX_DEPLOYMENT_TARGET;
     // rust-only mode never compiles C/C++ or links, so it doesn't need the
-    // SDK — skip resolution to keep the shared CI rust box from downloading
+    // SDK — skip resolution so a rust-only build doesn't download
     // a ~730 MB sysroot it never reads.
     if ((partial.mode ?? "full") !== "rust-only") {
       osxSysroot = resolveMacosSdkPath(partial.macosSdk, cacheDir, cwd);
@@ -1236,9 +1179,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     darwin,
     windows,
     freebsd,
-    ohos,
     unix,
-    kqueue,
     x64,
     arm64,
     host,
@@ -1273,14 +1214,15 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     ci,
     buildkite,
     webkit: partial.webkit ?? "prebuilt",
+    localDeps: parseLocalDeps(partial.localDeps, cwd),
     cwd,
     buildDir,
     codegenDir,
     cacheDir,
     vendorDir,
     cc: toolchain.cc,
-    hostCc: ohos ? findHostCc() : (toolchain.hostCc ?? toolchain.cc),
     cxx: toolchain.cxx,
+    hostCc: toolchain.hostCc ?? toolchain.cc,
     hostCxx: toolchain.hostCxx ?? toolchain.cxx,
     clangVersion: toolchain.clangVersion,
     clangResourceDir: toolchain.clangResourceDir,
@@ -1300,6 +1242,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
           ? `/usr/bin/${crossTarget}-strip`
           : (toolchain.llvmStrip ?? toolchain.strip)
         : toolchain.strip),
+    nm: toolchain.nm,
     dsymutil: toolchain.dsymutil,
     bun: toolchain.bun,
     jsRuntime: toolchain.jsRuntime,
@@ -1328,14 +1271,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     crossTarget,
     sysroot,
     winsysroot,
-    androidNdk,
-    androidApiLevel,
     androidNdkRuntimeDir,
-    freebsdVersion,
-    ohosSysroot,
-    ohosSdkRoot,
-    ohosCrossLibs,
-    ohosIcuDir,
     version,
     revision,
     nodejsVersion,
@@ -1485,6 +1421,31 @@ export function findRepoRoot(): string {
 }
 
 /**
+ * Parse `--local-deps=name=path[,name=path...]` into name → absolute path.
+ * Names are checked against `allDeps` later (bun.ts) where the dep list is
+ * in scope; here we only validate shape and resolve paths.
+ */
+function parseLocalDeps(spec: string | undefined, cwd: string): Record<string, string> {
+  // Null prototype: any name (even `__proto__`) is stored as a plain entry and
+  // reaches the unknown-dep check in validateBunConfig.
+  const out = Object.create(null) as Record<string, string>;
+  if (spec === undefined || spec === "") return out;
+  for (const entry of spec.split(",")) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0 || eq === entry.length - 1) {
+      throw new BuildError(`--local-deps: expected name=path, got '${entry}'`, {
+        hint: "Example: --local-deps=mimalloc=~/code/mimalloc",
+      });
+    }
+    const name = entry.slice(0, eq);
+    let path = entry.slice(eq + 1);
+    if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
+    out[name] = resolve(cwd, path);
+  }
+  return out;
+}
+
+/**
  * Get the current git revision (HEAD sha).
  *
  * Uses `git rev-parse` rather than reading .git/HEAD directly — the sha
@@ -1520,17 +1481,29 @@ function readRustToolchainChannel(cwd: string): string | undefined {
   return m?.[1];
 }
 
-function getGitRevision(cwd: string): string {
+function getGitRevision(cwd: string, pinDir: string | undefined): string {
   // CI env first — authoritative and zero-cost.
   const envSha = process.env.BUILDKITE_COMMIT ?? process.env.GITHUB_SHA ?? process.env.GIT_SHA;
   if (envSha !== undefined && envSha.length > 0) {
     return envSha;
   }
+  // Local debug builds pin the sha at first configure: it is a const in `bun_core`, so tracking HEAD would recompile every Rust crate on each commit/checkout/pull.
+  const pinFile = pinDir === undefined ? undefined : resolve(pinDir, "git-revision");
+  if (pinFile !== undefined && existsSync(pinFile)) {
+    const pinned = readFileSync(pinFile, "utf8").trim();
+    if (/^[0-9a-f]{40}$/.test(pinned)) return pinned;
+  }
+  let sha: string;
   try {
-    return execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
+    sha = execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
   } catch {
     return "unknown";
   }
+  if (pinFile !== undefined) {
+    mkdirSync(pinDir!, { recursive: true });
+    writeFileSync(pinFile, sha + "\n");
+  }
+  return sha;
 }
 
 /**
@@ -1565,34 +1538,6 @@ export function bunExeName(cfg: Config): string {
   return "bun-profile";
 }
 
-function findHostCc(): string {
-  // OHOS cross-compilation requires the system GCC (not LLVM clang) because
-  // GCC supplies crtbegin.o/crtend.o and compatible crt startup files/link
-  // behavior that the OHOS toolchain expects. This may fail on systems where
-  // /usr/bin/gcc is symlinked to clang (e.g., some container images).
-  for (const name of ["/usr/bin/gcc", "/usr/bin/cc", "/bin/gcc", "/bin/cc"]) {
-    if (existsSync(name)) return name;
-  }
-  return "cc"; // fallback
-}
-
-function findOhosSdkRoot(): string | undefined {
-  // Environment variable takes priority (standard for cross-compilation toolchains).
-  const envRoot = process.env.OHOS_SDK_ROOT;
-  if (envRoot && existsSync(resolve(envRoot, "ohos/native/sysroot"))) {
-    return envRoot;
-  }
-  const candidates = [
-    resolve(homedir(), "setup-ohos-sdk"),
-    resolve(homedir(), "ohos-sdk"),
-    "/opt/ohos-sdk",
-  ];
-  for (const dir of candidates) {
-    if (existsSync(resolve(dir, "ohos/native/sysroot"))) return dir;
-  }
-  return undefined;
-}
-
 /**
  * Whether this config produces a stripped `bun` alongside `bun-profile`.
  *
@@ -1618,9 +1563,7 @@ export function formatConfig(cfg: Config, exe: string): string {
     `  ${label("target")} ${cfg.os}-${cfg.arch}${cfg.abi !== undefined ? "-" + cfg.abi : ""}`,
     `  ${label("build type")} ${cfg.buildType}`,
     `  ${label("build dir")} ${relBuildDir}`,
-    // Revision makes it obvious why configure re-ran after a commit
-    // (the sha changes → the build's -Dsha equivalent changes → build.ninja differs).
-    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}`,
+    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}${cfg.debug && !cfg.ci ? " (pinned; rm <build dir>/git-revision to refresh)" : ""}`,
   ];
   const features: string[] = [];
   if (cfg.lto) features.push("lto");
@@ -1638,11 +1581,17 @@ export function formatConfig(cfg: Config, exe: string): string {
   if (!cfg.canary) features.push("canary:off");
   // Non-default modes — show so you notice when a build is unusual.
   if (cfg.webkit !== "prebuilt") features.push(`webkit:${cfg.webkit}`);
+  for (const name of Object.keys(cfg.localDeps)) features.push(`local:${name}`);
   if (cfg.mode !== "full") features.push(`mode:${cfg.mode}`);
-  // Version pin overrides — show a short hash so you catch "forgot to
-  // revert my WebKit test branch" before the build goes weird.
-  if (cfg.webkitVersion !== versionDefaults.webkitVersion)
-    features.push(`webkit-version:${cfg.webkitVersion.slice(0, 10)}`);
+  // Version pin overrides — show an identifying value so you catch "forgot
+  // to revert my WebKit test branch" before the build goes weird. Strip the
+  // autobuild- prefix so preview tags show their sha instead of the prefix.
+  if (cfg.webkitVersion !== versionDefaults.webkitVersion) {
+    const v = cfg.webkitVersion.startsWith("autobuild-")
+      ? cfg.webkitVersion.slice("autobuild-".length)
+      : cfg.webkitVersion;
+    features.push(`webkit-version:${/^[0-9a-f]{40}$/.test(v) ? v.slice(0, 10) : v}`);
+  }
   if (cfg.nodejsVersion !== versionDefaults.nodejsVersion) features.push(`nodejs:${cfg.nodejsVersion}`);
   lines.push(`  ${label("features")} ${features.length > 0 ? c.cyan(features.join(", ")) : c.dim("(none)")}`);
   return lines.join("\n");
