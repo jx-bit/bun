@@ -59,18 +59,6 @@ fn runner_arena() -> &'static bun_alloc::Arena {
     crate::cli::cli_arena()
 }
 
-/// OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd(),
-/// which can fail on hmdfs/tmpfs. If cwd is "/" or empty, use $HOME instead.
-#[cfg(target_env = "ohos")]
-pub(crate) fn ohos_set_pwd(env: &mut DotEnv::Loader, cwd: &[u8]) {
-    let pwd = if cwd == b"/" || cwd.is_empty() {
-        bun_core::env_var::HOME::get().unwrap_or(cwd)
-    } else {
-        cwd
-    };
-    env.map.put(b"PWD", pwd).expect("unreachable");
-}
-
 // Passthrough-arg shell escaping. The escape tables + helpers are the lower-tier
 // `bun_shell_parser` crate's canonical copy — import them so future fixes to
 // the shell escaper cannot silently diverge.
@@ -100,6 +88,20 @@ impl Default for ExecCfg {
             allow_fast_run_for_extensions: true,
         }
     }
+}
+
+/// Per-caller knobs for [`RunCommand::configure_env_for_run`] and
+/// [`RunCommand::configure_env_for_run_without_linker`].
+#[derive(Clone, Copy)]
+pub(crate) struct ConfigureEnvOptions {
+    /// Report a current directory that cannot be read on stderr. When `false`
+    /// it is only returned, as [`crate::Error::CouldntReadCurrentDirectory`].
+    pub(crate) log_errors: bool,
+    /// Keep the current directory's fd open on the returned `DirInfo` (only
+    /// that one: the resolver's `store_fd` is turned back off right after),
+    /// for callers that go on to read files through it, like `bunx` resolving
+    /// a package's `bin`.
+    pub(crate) store_root_fd: bool,
 }
 
 pub(crate) struct RunCommand;
@@ -280,10 +282,6 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         use_system_shell: bool,
         shell_path: Option<&[u8]>,
     ) -> crate::Result<()> {
-        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
-        #[cfg(target_env = "ohos")]
-        ohos_set_pwd(env, cwd);
-
         let shell_search_path = shell_path.unwrap_or_else(|| env.get(b"PATH").unwrap_or(b""));
         let shell_bin =
             Self::find_shell(shell_search_path, cwd).ok_or(crate::Error::MissingShell)?;
@@ -557,10 +555,9 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         ctx: &mut ContextData,
         this_transpiler: &mut ::core::mem::MaybeUninit<Transpiler<'static>>,
         env: Option<*mut DotEnv::Loader>,
-        log_errors: bool,
-        store_root_fd: bool,
+        opts: ConfigureEnvOptions,
     ) -> crate::Result<bun_resolver::DirInfoRef> {
-        Self::configure_env_for_run_impl(ctx, this_transpiler, env, log_errors, store_root_fd, true)
+        Self::configure_env_for_run_impl(ctx, this_transpiler, env, opts, true)
     }
 
     /// Like [`Self::configure_env_for_run`] but does **not** construct the
@@ -571,17 +568,9 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         ctx: &mut ContextData,
         this_transpiler: &mut ::core::mem::MaybeUninit<Transpiler<'static>>,
         env: Option<*mut DotEnv::Loader>,
-        log_errors: bool,
-        store_root_fd: bool,
+        opts: ConfigureEnvOptions,
     ) -> crate::Result<bun_resolver::DirInfoRef> {
-        Self::configure_env_for_run_impl(
-            ctx,
-            this_transpiler,
-            env,
-            log_errors,
-            store_root_fd,
-            false,
-        )
+        Self::configure_env_for_run_impl(ctx, this_transpiler, env, opts, false)
     }
 
     /// `configure_linker()` + `load_tsconfig_json` setup, factored into a
@@ -603,8 +592,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         ctx: &mut ContextData,
         this_transpiler: &mut ::core::mem::MaybeUninit<Transpiler<'static>>,
         env: Option<*mut DotEnv::Loader>,
-        log_errors: bool,
-        store_root_fd: bool,
+        opts: ConfigureEnvOptions,
         with_linker: bool,
     ) -> crate::Result<bun_resolver::DirInfoRef> {
         let args = ctx.args.clone();
@@ -625,7 +613,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
 
         this_transpiler.resolver.care_about_bin_folder = true;
         this_transpiler.resolver.care_about_scripts = true;
-        this_transpiler.resolver.store_fd = store_root_fd;
+        this_transpiler.resolver.store_fd = opts.store_root_fd;
 
         // Bundler-linker + JSX-runtime config: only callers that actually
         // transpile through this `Transpiler` need it. `configure_linker`'s
@@ -641,54 +629,32 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         let root_dir_info: bun_resolver::DirInfoRef =
             match this_transpiler.resolver.read_dir_info(top_level_dir) {
                 Err(err) => {
-                    // OHOS: EPERM/EACCES on getcwd/openat is not fatal (SELinux).
-                    // Fall back to $HOME which is always readable.
-                    if cfg!(target_env = "ohos")
-                        && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
-                            || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES))
-                    {
-                        let home = std::env::var("HOME").unwrap_or_default();
-                        this_transpiler
-                            .resolver
-                            .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
-                            .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
-                            .ok_or(crate::Error::CouldntReadCurrentDirectory)?
-                    } else if !log_errors {
+                    if !opts.log_errors {
                         return Err(crate::Error::CouldntReadCurrentDirectory);
-                    } else {
-                        // SAFETY: `ctx.log` set in `create_context_data` (single-
-                        // threaded CLI startup), process-lifetime.
-                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                            Output::error_writer(),
-                        ));
-                        pretty_errorln!(
-                            "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
-                            bstr::BStr::new(err.name()),
-                            bun_core::fmt::QuotedFormatter {
-                                text: top_level_dir
-                            },
-                        );
-                        Output::flush();
-                        return Err(err.into());
                     }
+                    // SAFETY: `ctx.log` set in `create_context_data` (single-
+                    // threaded CLI startup), process-lifetime.
+                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                        Output::error_writer(),
+                    ));
+                    pretty_errorln!(
+                        "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
+                        bstr::BStr::new(err.name()),
+                        bun_core::fmt::QuotedFormatter {
+                            text: top_level_dir
+                        },
+                    );
+                    Output::flush();
+                    return Err(err.into());
                 }
                 Ok(None) => {
-                    if cfg!(target_env = "ohos") {
-                        let home = std::env::var("HOME").unwrap_or_default();
-                        this_transpiler
-                            .resolver
-                            .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
-                            .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
-                            .ok_or(crate::Error::CouldntReadCurrentDirectory)?
-                    } else {
-                        // SAFETY: see `Err` arm above.
-                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                            Output::error_writer(),
-                        ));
-                        pretty_errorln!("error loading current directory");
-                        Output::flush();
-                        return Err(crate::Error::CouldntReadCurrentDirectory);
-                    }
+                    // SAFETY: see `Err` arm above.
+                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                        Output::error_writer(),
+                    ));
+                    pretty_errorln!("error loading current directory");
+                    Output::flush();
+                    return Err(crate::Error::CouldntReadCurrentDirectory);
                 }
                 Ok(Some(info)) => info,
             };
@@ -1129,7 +1095,7 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         // `ctx.debug.hot_reload` → `vm.hot_reload` (a `u8` until the
         // b2-cycle widens it to `cli::HotReload`); `Run::start` re-reads it
         // from `self.ctx` to drive the hot-reloader enable.
-        vm.hot_reload = ctx.debug.hot_reload as u8;
+        vm.hot_reload = ctx.debug.hot_reload;
 
         Run {
             ctx,
@@ -1318,7 +1284,7 @@ impl Run<'_> {
         } = self;
         let _api_lock = vm.global().vm().get_api_lock();
 
-        vm.hot_reload = ctx.debug.hot_reload as u8;
+        vm.hot_reload = ctx.debug.hot_reload;
         vm.on_unhandled_rejection = Run::on_unhandled_rejection_before_close;
 
         // ── CPU profiler ────────────────────────────────────────────────────
@@ -1367,30 +1333,25 @@ impl Run<'_> {
             // Go through the global object's getter because `Bun.redis` is a
             // PropertyCallback (no direct WriteBarrier handle to read).
             let global = vm.global();
-            let bun_object = match global.to_js_value().get(global, "Bun") {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'do_redis_preconnect,
-                Err(e) => {
-                    global.report_active_exception_as_unhandled(e);
-                    break 'do_redis_preconnect;
-                }
+            let preconnect = || -> bun_jsc::JsResult<()> {
+                let Some(bun_object) = global.to_js_value().get(global, "Bun")? else {
+                    return Ok(());
+                };
+                let Some(redis) = bun_object.get(global, "redis")? else {
+                    return Ok(());
+                };
+                let Some(client) = redis.as_::<crate::valkey_jsc::js_valkey::JSValkeyClient>()
+                else {
+                    return Ok(());
+                };
+                // SAFETY: `as_` returns a live `m_ctx` pointer owned by the JS
+                // wrapper; accessed here under the API lock.
+                unsafe { &*client }.do_connect(global, redis)?;
+                Ok(())
             };
-            let redis = match bun_object.get(global, "redis") {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'do_redis_preconnect,
-                Err(e) => {
-                    global.report_active_exception_as_unhandled(e);
-                    break 'do_redis_preconnect;
-                }
-            };
-            let Some(client) = redis.as_::<crate::valkey_jsc::js_valkey::JSValkeyClient>() else {
-                break 'do_redis_preconnect;
-            };
-            // SAFETY: `as_` returns a live `m_ctx` pointer owned by the JS
-            // wrapper; accessed here under the API lock.
-            if let Err(e) = unsafe { &*client }.do_connect(global, redis) {
-                global.report_active_exception_as_unhandled(e);
-            }
+            // The process entry is the outermost frame: a preconnect that threw
+            // is reported here, before the entry point loads.
+            crate::dispatch::fold(preconnect());
         }
 
         // ── postgres/sql preconnect ───────────────────────────────────────
@@ -1399,33 +1360,20 @@ impl Run<'_> {
                 break 'do_postgres_preconnect;
             }
             let global = vm.global();
-            let bun_object = match global.to_js_value().get(global, "Bun") {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'do_postgres_preconnect,
-                Err(e) => {
-                    global.report_active_exception_as_unhandled(e);
-                    break 'do_postgres_preconnect;
-                }
+            let preconnect = || -> bun_jsc::JsResult<()> {
+                let Some(bun_object) = global.to_js_value().get(global, "Bun")? else {
+                    return Ok(());
+                };
+                let Some(sql_object) = bun_object.get(global, "sql")? else {
+                    return Ok(());
+                };
+                let Some(connect_fn) = sql_object.get(global, "connect")? else {
+                    return Ok(());
+                };
+                connect_fn.call(global, sql_object, &[])?;
+                Ok(())
             };
-            let sql_object = match bun_object.get(global, "sql") {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'do_postgres_preconnect,
-                Err(e) => {
-                    global.report_active_exception_as_unhandled(e);
-                    break 'do_postgres_preconnect;
-                }
-            };
-            let connect_fn = match sql_object.get(global, "connect") {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'do_postgres_preconnect,
-                Err(e) => {
-                    global.report_active_exception_as_unhandled(e);
-                    break 'do_postgres_preconnect;
-                }
-            };
-            if let Err(e) = connect_fn.call(global, sql_object, &[]) {
-                global.report_active_exception_as_unhandled(e);
-            }
+            crate::dispatch::fold(preconnect());
         }
 
         // ── hot-reloader enable ─────────────────────────────────────────────
@@ -1486,7 +1434,7 @@ impl Run<'_> {
                     // `uncaughtException` handler swallowed the error), keep the
                     // process alive instead of hard-exiting on a rejected entry.
                     // The core run-loop below does the actual waiting.
-                    if vm.hot_reload != 0 || handled {
+                    if vm.hot_reload != cli::command::HotReload::None || handled {
                         vm.add_main_to_watcher_if_needed();
                         // SAFETY: `event_loop` is a self-pointer into this VM;
                         // uniquely accessed here.
@@ -1510,9 +1458,8 @@ impl Run<'_> {
         // don't run the GC if we don't actually need to
         if vm.is_event_loop_alive() || vm.event_loop_ref().tick_concurrent_with_count() > 0 {
             vm.global().vm().release_weak_refs();
-            // `bun_alloc::Arena = bumpalo::Bump` has no
-            // per-heap collect, so this is a no-op unless the arena type
-            // changes. Semantically a memory-usage hint, not correctness.
+            // `bun_alloc::Arena` has no per-heap collect to run alongside this
+            // GC; it would only be a memory-usage hint, not correctness.
             let _ = vm.global().vm().run_gc(false);
             vm.tick();
         }
@@ -1603,7 +1550,7 @@ impl Run<'_> {
         }
 
         vm.on_unhandled_rejection = Run::on_unhandled_rejection_before_close;
-        vm.global().handle_rejected_promises();
+        let _ = vm.global().handle_rejected_promises();
         vm.on_exit();
 
         if ANY_UNHANDLED.load(Ordering::Relaxed) {
@@ -2109,10 +2056,6 @@ impl RunCommand {
     ) -> crate::Result<::core::convert::Infallible> {
         use crate::api::bun_process::{Status as SpawnStatus, sync};
 
-        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
-        #[cfg(target_env = "ohos")]
-        ohos_set_pwd(env, cwd);
-
         let mut argv: Vec<Box<[u8]>> = Vec::with_capacity(1 + passthrough.len());
         argv.push(executable.to_vec().into_boxed_slice());
         for p in passthrough {
@@ -2380,8 +2323,10 @@ impl RunCommand {
             ctx,
             this_transpiler,
             None,
-            log_errors,
-            false,
+            ConfigureEnvOptions {
+                log_errors,
+                store_root_fd: false,
+            },
         )?;
         // SAFETY: `configure_env_for_run_without_linker` returned `Ok`, so the
         // slot is fully initialized via `MaybeUninit::write`.
@@ -2685,18 +2630,6 @@ impl RunCommand {
         // ── failure ─────────────────────────────────────────────────────────
         if ctx.runtime_options.if_present {
             return Ok(true);
-        }
-
-        // `bun feedback`.
-        // SAFETY: `cli::CMD` is written once during single-threaded CLI
-        // startup before any worker thread is spawned; read-only here.
-        let current_cmd = unsafe { cli::CMD.read() };
-        if ctx.filters.is_empty()
-            && !ctx.workspaces
-            && current_cmd == Some(CommandTag::AutoCommand)
-            && target_name == b"feedback"
-        {
-            Self::bun_feedback(ctx)?;
         }
 
         if log_errors {
@@ -3159,33 +3092,6 @@ impl RemoteImageDownload {
 }
 
 impl RunCommand {
-    /// `bun feedback` — boots the embedded `eval/feedback.ts` script.
-    fn bun_feedback(ctx: &mut ContextData) -> crate::Result<::core::convert::Infallible> {
-        let mut entry_point_buf = [0u8; MAX_PATH_BYTES + EVAL_TRIGGER.len()];
-        // SAFETY: bun_paths::PathBuffer and bun_core::PathBuffer are
-        // layout-identical newtypes over [u8; MAX_PATH_BYTES].
-        let cwd = bun_core::getcwd_or_exe_dir(unsafe {
-            &mut *entry_point_buf.as_mut_ptr().cast::<bun_core::PathBuffer>()
-        });
-        let cwd_len = cwd.as_bytes().len();
-        entry_point_buf[cwd_len..cwd_len + EVAL_TRIGGER.len()].copy_from_slice(EVAL_TRIGGER);
-
-        ctx.runtime_options.eval.script =
-            bun_core::runtime_embed_file!(Codegen, "eval/feedback.ts")
-                .as_bytes()
-                .to_vec()
-                .into_boxed_slice();
-
-        Self::boot(
-            ctx,
-            entry_point_buf[..cwd_len + EVAL_TRIGGER.len()]
-                .to_vec()
-                .into_boxed_slice(),
-            None,
-        )?;
-        Global::exit(0);
-    }
-
     fn unlink_staged_path(path: &[u8]) {
         let mut zbuf = [0u8; MAX_PATH_BYTES + 1];
         if path.len() >= zbuf.len() {
@@ -3870,7 +3776,7 @@ impl RunCommand {
             .map(|k| -> &'static [u8] {
                 // SAFETY: every key is a freshly-boxed `Box<[u8]>` owned by
                 // `results`. The owning `ArrayHashMap` is parked in the
-                // process-lifetime `runner_arena()` below and `bumpalo::Bump`
+                // process-lifetime `runner_arena()` below and `bun_alloc::Arena`
                 // never runs `Drop`, so the boxed bytes live until process
                 // exit and erasing to `'static` is sound.
                 unsafe { ::core::slice::from_raw_parts(k.as_ptr(), k.len()) }

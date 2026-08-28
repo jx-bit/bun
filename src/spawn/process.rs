@@ -56,12 +56,12 @@ bun_core::declare_scope!(PROCESS, visible);
 // The raw OS spawn layer (option/result structs, `Rusage`, `spawn_process_posix`)
 // moved into the leaf `bun_spawn_sys` crate so it has no event-loop dependency.
 // Re-export here so existing `bun_spawn::process::*` paths keep resolving.
-pub use bun_spawn_sys::spawn_process::{IoCounters, WinRusage, WinTimeval, rusage_zeroed};
+pub use bun_spawn_sys::spawn_process::rusage_zeroed;
 #[cfg(windows)]
 pub use bun_spawn_sys::uv_getrusage;
 pub use bun_spawn_sys::{
-    Argv, CStrPtr, Dup2, Envp, ExtraPipe, FdT, PidFdType, PidT, PosixSpawnOptions,
-    PosixSpawnResult, PosixStdio, Rusage, StdioKind,
+    Argv, CStrPtr, Dup2, Envp, ExtraPipe, PidFdType, PidT, PosixSpawnOptions, PosixSpawnResult,
+    PosixStdio, Rusage, StdioKind,
 };
 
 /// Whether the process-exit poll should be registered one-shot.
@@ -965,12 +965,6 @@ pub mod waiter_thread_posix {
                 queue: ConcurrentQueue::new(),
                 active: core::cell::UnsafeCell::new(Vec::new()),
             }
-        }
-    }
-
-    impl<T: 'static> Default for NewQueue<T> {
-        fn default() -> Self {
-            Self::new()
         }
     }
 
@@ -1985,7 +1979,7 @@ mod spawn_process_body {
             match ipc {
                 WindowsStdio::Dup2(_) => panic!("TODO dup2 extra fd"),
                 WindowsStdio::Inherit => {
-                    stdio.flags = uv::StdioFlags::INHERIT_FD;
+                    stdio.flags = uv::UV_INHERIT_FD;
                     stdio.data.fd = uv::uv_file::try_from(3 + i).expect("int cast");
                 }
                 WindowsStdio::Ignore => {
@@ -2018,7 +2012,7 @@ mod spawn_process_body {
                         cleanup_uv_files(&uv_files_to_close, loop_);
                         return Ok(Err(err));
                     }
-                    stdio.flags = uv::StdioFlags::INHERIT_FD;
+                    stdio.flags = uv::UV_INHERIT_FD;
                     let fd = rc.int();
                     uv_files_to_close.push(fd);
                     stdio.data.fd = fd;
@@ -2052,7 +2046,7 @@ mod spawn_process_body {
                     stdio.data.stream = (*my_pipe).cast::<uv::uv_stream_t>();
                 }
                 WindowsStdio::Pipe(fd) => {
-                    stdio.flags = uv::StdioFlags::INHERIT_FD;
+                    stdio.flags = uv::UV_INHERIT_FD;
                     stdio.data.fd = fd.uv();
                 }
             }

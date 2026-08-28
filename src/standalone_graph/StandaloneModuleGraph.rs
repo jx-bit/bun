@@ -432,16 +432,6 @@ mod elf {
     /// `&[u8]` here would freeze it to read-only and make the later
     /// `from_bytes` writable subslices UB under Stacked Borrows.
     pub(super) fn get_data() -> Option<(*mut u8, usize)> {
-        #[cfg(target_env = "ohos")]
-        {
-            // Primary: open /proc/self/exe + locate .bun section by FILE OFFSET
-            // + mmap. Bypasses PIE vaddr relocations entirely — more robust than
-            // vaddr+load_base (which miscomputes when PT_LOAD[0].vaddr != 0).
-            if let Some(data) = ohos_primary_get_data() {
-                return Some(data);
-            }
-            // Fallback below: vaddr + PIE load base (when /proc/self/exe unreadable).
-        }
         // SAFETY: FFI call.
         let vaddr_ptr = unsafe { Bun__getStandaloneModuleGraphELFVaddr() };
         if vaddr_ptr.is_null() {
@@ -452,24 +442,17 @@ mod elf {
         if vaddr == 0 {
             return None;
         }
-        // BUN_COMPILED.size holds the virtual address of the appended data.
-        // The kernel mapped it via PT_LOAD, so we can dereference directly.
+        // BUN_COMPILED.size holds the link-time virtual address of the
+        // appended data. For a PIE executable (mandatory on Android) the
+        // kernel maps every PT_LOAD at that vaddr plus a load bias, which is
+        // `dlpi_addr` of the object containing BUN_COMPILED itself; for
+        // non-PIE it is 0.
         // Format at target: [u64 payload_len][payload bytes]
         // Synthesize a `*mut u8` directly so the provenance carries write
         // permission for the in-place bytecode mutation done by JSC.
-        #[cfg(target_env = "ohos")]
-        let target = {
-            // OHOS binaries are PIE: the link-time vaddr must shift by the
-            // ASLR load base. /proc/self/maps is readable even when
-            // /proc/self/exe is execute-only; its first file-backed mapping
-            // at offset 0 is the ELF PT_LOAD header — its start is the PIE
-            // base (hmdfs maps the header r--p, not r-xp, so matching on
-            // execute permission misses it).
-            let load_base = ohos_pie_load_base()?;
-            (load_base.wrapping_add(vaddr as usize)) as *mut u8
-        };
-        #[cfg(not(target_env = "ohos"))]
-        let target = vaddr as *mut u8;
+        let load_bias =
+            bun_sys::elf::find_loaded_module(vaddr_ptr as usize).map_or(0, |m| m.base_address);
+        let target = (vaddr as usize).wrapping_add(load_bias) as *mut u8;
         // SAFETY: target points to 8-byte little-endian length prefix.
         let payload_len =
             u64::from_le_bytes(unsafe { core::ptr::read_unaligned(target.cast::<[u8; 8]>()) });
@@ -478,154 +461,6 @@ mod elf {
         }
         // SAFETY: payload_len bytes follow the 8-byte header at `target`.
         Some((unsafe { target.add(8) }, payload_len as usize))
-    }
-
-    /// OHOS PIE load base: scan /proc/self/maps for the first file-backed
-    /// mapping at offset 0 (the ELF PT_LOAD header). Its start address is the
-    /// ASLR base the kernel loaded the PIE image at.
-    #[cfg(target_env = "ohos")]
-    fn ohos_pie_load_base() -> Option<usize> {
-        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-        for line in maps.lines() {
-            let mut c = line.split_whitespace();
-            let addr_range = c.next()?;
-            c.next(); // perms
-            let file_off = c.next()?;
-            c.next(); // dev
-            let inode = c.next().unwrap_or("0");
-            let path = c.next().unwrap_or("");
-            if file_off == "00000000"
-                && inode != "0"
-                && !path.is_empty()
-                && !path.starts_with('[')
-            {
-                if let Some(start) = addr_range.split('-').next() {
-                    if let Ok(base) = usize::from_str_radix(start, 16) {
-                        return Some(base);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// OHOS primary: open /proc/self/exe, locate the `.bun` section by FILE
-    /// OFFSET (sh_offset) via the ELF section header table, then mmap it
-    /// MAP_PRIVATE so JSC can mutate bytecode in place. Independent of vaddr
-    /// / PIE relocations — works as long as /proc/self/exe is readable.
-    #[cfg(target_env = "ohos")]
-    fn ohos_primary_get_data() -> Option<(*mut u8, usize)> {
-        use std::fs::File;
-        use std::os::fd::AsRawFd;
-        use std::ptr;
-        let file = File::open("/proc/self/exe").ok()?;
-        let (sh_offset, sh_size) = locate_bun_section(&file)?;
-        let mut hdr = [0u8; 8];
-        read_at(&file, sh_offset, &mut hdr)?;
-        let byte_count = u64::from_le_bytes(hdr) as usize;
-        if byte_count.checked_add(8)? != sh_size as usize {
-            return None;
-        }
-        let mapping = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                sh_size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                sh_offset as i64,
-            )
-        };
-        if mapping == libc::MAP_FAILED {
-            return None;
-        }
-        Some((unsafe { (mapping as *mut u8).add(8) }, byte_count))
-    }
-
-    #[cfg(target_env = "ohos")]
-    const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
-    #[cfg(target_env = "ohos")]
-    const EHDR_E_SHOFF: usize = 0x28;
-    #[cfg(target_env = "ohos")]
-    const EHDR_E_SHENTSIZE: usize = 0x3a;
-    #[cfg(target_env = "ohos")]
-    const EHDR_E_SHNUM: usize = 0x3c;
-    #[cfg(target_env = "ohos")]
-    const EHDR_E_SHSTRNDX: usize = 0x3e;
-    #[cfg(target_env = "ohos")]
-    const SHDR_SIZE: usize = 0x40;
-    #[cfg(target_env = "ohos")]
-    const SHDR_SH_NAME: usize = 0x00;
-    #[cfg(target_env = "ohos")]
-    const SHDR_SH_OFFSET: usize = 0x18;
-    #[cfg(target_env = "ohos")]
-    const SHDR_SH_SIZE: usize = 0x20;
-    #[cfg(target_env = "ohos")]
-    const BUN_SECTION_NAME: &[u8] = b".bun\0";
-
-    #[cfg(target_env = "ohos")]
-    fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> Option<()> {
-        use std::os::fd::AsRawFd;
-        let n = unsafe {
-            libc::pread64(
-                file.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                offset as i64,
-            )
-        };
-        if n < 0 || n as usize != buf.len() {
-            return None;
-        }
-        Some(())
-    }
-
-    /// Walk the ELF section header table to find `.bun`; return (sh_offset, sh_size).
-    #[cfg(target_env = "ohos")]
-    fn locate_bun_section(file: &std::fs::File) -> Option<(u64, u64)> {
-        let mut ehdr = [0u8; 64];
-        read_at(file, 0, &mut ehdr)?;
-        if ehdr[0..4] != ELF_MAGIC {
-            return None;
-        }
-        let shoff = u64::from_le_bytes(ehdr[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].try_into().ok()?);
-        let shentsize =
-            u16::from_le_bytes(ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2].try_into().ok()?);
-        let shnum = u16::from_le_bytes(ehdr[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].try_into().ok()?);
-        let shstrndx =
-            u16::from_le_bytes(ehdr[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2].try_into().ok()?);
-        if shentsize != SHDR_SIZE as u16 || shstrndx >= shnum {
-            return None;
-        }
-        let shstrtab_shoff = shoff + (shstrndx as u64) * SHDR_SIZE as u64;
-        let mut shstrtab_shdr = [0u8; 64];
-        read_at(file, shstrtab_shoff, &mut shstrtab_shdr)?;
-        let shstrtab_offset = u64::from_le_bytes(
-            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
-        );
-        let shstrtab_size =
-            u64::from_le_bytes(shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
-        let shstrtab_size_usize = shstrtab_size as usize;
-        let mut shstrtab = vec![0u8; shstrtab_size_usize];
-        read_at(file, shstrtab_offset, &mut shstrtab)?;
-        for i in 0..shnum {
-            let shdr_off = shoff + (i as u64) * SHDR_SIZE as u64;
-            let mut shdr = [0u8; 64];
-            read_at(file, shdr_off, &mut shdr)?;
-            let name_off =
-                u32::from_le_bytes(shdr[SHDR_SH_NAME..SHDR_SH_NAME + 4].try_into().ok()?) as usize;
-            if name_off + 5 <= shstrtab_size_usize
-                && &shstrtab[name_off..name_off + 5] == BUN_SECTION_NAME
-            {
-                let sec_offset = u64::from_le_bytes(
-                    shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
-                );
-                let sec_size =
-                    u64::from_le_bytes(shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
-                return Some((sec_offset, sec_size));
-            }
-        }
-        None
     }
 }
 
@@ -1263,7 +1098,7 @@ pub(crate) fn to_bytes(
         flags,
     };
 
-    // SAFETY: `Offsets` is `#[repr(C)]` POD; same `sliceAsBytes` rationale as above.
+    // SAFETY: `Offsets` is `#[repr(C)]` POD; same `modules_as_bytes` rationale as above.
     let offsets_as_bytes: &[u8] = unsafe {
         core::slice::from_raw_parts((&raw const offsets).cast::<u8>(), size_of::<Offsets>())
     };
@@ -1344,12 +1179,50 @@ impl CompileResult {
     }
 }
 
-pub(crate) fn inject(
+/// The temp copy of the executable that `inject` wrote the module graph into:
+/// its open fd plus the absolute path it was created at, which the caller
+/// renames into place (an fd cannot be mapped back to a path on every
+/// filesystem).
+pub(crate) struct Injected<'a> {
+    pub fd: Fd,
+    pub temp_path: &'a ZStr,
+}
+
+impl<'a> Injected<'a> {
+    /// `zname` was opened relative to `cwd` (or is already absolute); pin it in
+    /// `temp_path_buf` so a later `chdir` cannot retarget the rename/unlink.
+    fn new(fd: Fd, cwd: &[u8], zname: &ZStr, temp_path_buf: &'a mut PathBuffer) -> Injected<'a> {
+        let len = path::resolve_path::join_abs_string_buf_z::<path::platform::Auto>(
+            cwd,
+            &mut temp_path_buf[..],
+            &[zname.as_bytes()],
+        )
+        .len();
+        Injected {
+            fd,
+            temp_path: ZStr::from_buf(&temp_path_buf[..], len),
+        }
+    }
+}
+
+pub(crate) fn inject<'a>(
     bytes: &[u8],
     self_exe: &ZStr,
     inject_options: &InjectOptions,
     target: &CompileTarget,
-) -> Fd {
+    temp_path_buf: &'a mut PathBuffer,
+) -> Option<Injected<'a>> {
+    let mut cwd_buf = bun_paths::path_buffer_pool::get();
+    let cwd: &[u8] = match bun_sys::getcwd(&mut cwd_buf) {
+        Ok(len) => &cwd_buf[..len],
+        Err(err) => {
+            bun_core::pretty_errorln!(
+                "<r><red>error<r><d>:<r> failed to get the current directory\n{}",
+                err
+            );
+            return None;
+        }
+    };
     let mut buf = PathBuffer::uninit();
     // Note: `tmpname` borrows `buf` mutably for the &ZStr it returns. The
     // tmpdir-fallback retry below may need to repoint `zname` at a heap-owned
@@ -1371,7 +1244,7 @@ pub(crate) fn inject(
                 "<r><red>error<r><d>:<r> failed to get temporary file name: {}",
                 bstr::BStr::new(e.name())
             );
-            return Fd::INVALID;
+            return None;
         }
     };
 
@@ -1411,7 +1284,7 @@ pub(crate) fn inject(
                     e.to_system_errno()
                         .unwrap_or(bun_sys::SystemErrno::EUNKNOWN)
                 );
-                return Fd::invalid();
+                return None;
             }
             let out = &out_buf[..zname.len()];
             let file = match Syscall::open_file_at_windows(
@@ -1430,7 +1303,7 @@ pub(crate) fn inject(
                         "<r><red>error<r><d>:<r> failed to open temporary file to copy bun into\n{}",
                         e
                     );
-                    return Fd::invalid();
+                    return None;
                 }
             };
 
@@ -1504,9 +1377,14 @@ pub(crate) fn inject(
                                 bun_sys::E::EPERM | bun_sys::E::EAGAIN | bun_sys::E::EBUSY => {
                                     continue;
                                 }
-                                _ => break,
+                                _ => {}
                             }
                         }
+                        bun_core::pretty_errorln!(
+                            "<r><red>error<r><d>:<r> failed to open temporary file to copy bun into\n{}",
+                            err
+                        );
+                        return None;
                     }
                 }
             }
@@ -1533,7 +1411,7 @@ pub(crate) fn inject(
                             err
                         );
                         cleanup(zname, fd);
-                        return Fd::INVALID;
+                        return None;
                     }
                 }
             }
@@ -1551,7 +1429,7 @@ pub(crate) fn inject(
                     e
                 );
                 cleanup(zname, fd);
-                return Fd::INVALID;
+                return None;
             }
 
             break 'brk fd;
@@ -1566,7 +1444,7 @@ pub(crate) fn inject(
                 Err(err) => {
                     bun_core::pretty_errorln!("Error reading standalone module graph: {}", err);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
             let mut macho_file = match bun_macho::MachoFile::init(&input_bytes, bytes.len()) {
@@ -1574,20 +1452,20 @@ pub(crate) fn inject(
                 Err(e) => {
                     bun_core::pretty_errorln!("Error initializing standalone module graph: {}", e);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
             if let Err(e) = macho_file.write_section(bytes) {
                 bun_core::pretty_errorln!("Error writing standalone module graph: {}", e);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             drop(input_bytes);
 
             if let Err(err) = Syscall::set_file_offset(cloned_executable_fd, 0) {
                 bun_core::pretty_errorln!("Error seeking to start of temporary file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
 
             let mut buffered_writer = std::io::BufWriter::with_capacity(
@@ -1600,19 +1478,24 @@ pub(crate) fn inject(
                     bstr::BStr::new(e.name())
                 );
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             if let Err(e) = std::io::Write::flush(&mut buffered_writer) {
                 bun_core::pretty_errorln!("Error flushing standalone module graph: {}", e);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             #[cfg(not(windows))]
             {
                 // SAFETY: libc fchmod on a valid native fd.
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
             }
-            return cloned_executable_fd;
+            return Some(Injected::new(
+                cloned_executable_fd,
+                cwd,
+                zname,
+                temp_path_buf,
+            ));
         }
         CompileTargetOs::Windows => {
             let input_bytes = match bun_sys::File::borrow(&cloned_executable_fd).read_to_end() {
@@ -1620,7 +1503,7 @@ pub(crate) fn inject(
                 Err(err) => {
                     bun_core::pretty_errorln!("Error reading standalone module graph: {}", err);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
             let mut pe_file = match bun_pe::PEFile::init(&input_bytes) {
@@ -1628,35 +1511,35 @@ pub(crate) fn inject(
                 Err(e) => {
                     bun_core::pretty_errorln!("Error initializing PE file: {}", e);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
             if inject_options.hide_console {
                 if let Err(e) = pe_file.set_subsystem(bun_pe::IMAGE_SUBSYSTEM_WINDOWS_GUI) {
                     bun_core::pretty_errorln!("Error setting PE subsystem: {}", e);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             }
             // Always strip authenticode when adding .bun section for --compile
             if let Err(e) = pe_file.add_bun_section(bytes) {
                 bun_core::pretty_errorln!("Error adding Bun section to PE file: {}", e);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             drop(input_bytes);
 
             if let Err(err) = Syscall::set_file_offset(cloned_executable_fd, 0) {
                 bun_core::pretty_errorln!("Error seeking to start of temporary file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
 
             let mut writer = bun_sys::FileWriter(cloned_executable_fd);
             if let Err(e) = pe_file.write(&mut writer) {
                 bun_core::pretty_errorln!("Error writing PE file: {}", bstr::BStr::new(e.name()));
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             // Truncate to the in-memory PE size; Authenticode strip can make it shorter than the base.
             if let Err(err) = Syscall::ftruncate(
@@ -1665,7 +1548,7 @@ pub(crate) fn inject(
             ) {
                 bun_core::pretty_errorln!("Error truncating PE file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             // Set executable permissions when running on POSIX hosts, even for Windows targets
             #[cfg(not(windows))]
@@ -1673,7 +1556,12 @@ pub(crate) fn inject(
                 // SAFETY: libc fchmod on a valid native fd.
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
             }
-            return cloned_executable_fd;
+            return Some(Injected::new(
+                cloned_executable_fd,
+                cwd,
+                zname,
+                temp_path_buf,
+            ));
         }
         CompileTargetOs::Linux | CompileTargetOs::Freebsd => {
             // ELF section approach: find .bun section and expand it
@@ -1682,7 +1570,7 @@ pub(crate) fn inject(
                 Err(err) => {
                     bun_core::pretty_errorln!("Error reading executable: {}", err);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
 
@@ -1691,7 +1579,7 @@ pub(crate) fn inject(
                 Err(e) => {
                     bun_core::pretty_errorln!("Error initializing ELF file: {}", e);
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             };
 
@@ -1700,13 +1588,13 @@ pub(crate) fn inject(
             if let Err(e) = elf_file.write_bun_section(bytes) {
                 bun_core::pretty_errorln!("Error writing .bun section to ELF: {}", e);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
 
             if let Err(err) = Syscall::set_file_offset(cloned_executable_fd, 0) {
                 bun_core::pretty_errorln!("Error seeking to start of temporary file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
 
             // Write the modified ELF data back to the file
@@ -1714,7 +1602,7 @@ pub(crate) fn inject(
             if let Err(err) = write_file.write_all(&elf_file.data) {
                 bun_core::pretty_errorln!("Error writing ELF file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
             // Truncate the file to the exact size of the modified ELF
             if let Err(err) = Syscall::ftruncate(
@@ -1723,7 +1611,7 @@ pub(crate) fn inject(
             ) {
                 bun_core::pretty_errorln!("Error truncating ELF file: {}", err);
                 cleanup(zname, cloned_executable_fd);
-                return Fd::INVALID;
+                return None;
             }
 
             #[cfg(not(windows))]
@@ -1731,17 +1619,12 @@ pub(crate) fn inject(
                 // SAFETY: libc fchmod on a valid native fd.
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
             }
-            #[cfg(target_env = "ohos")]
-            {
-                let out_str = unsafe { core::str::from_utf8_unchecked(zname.as_bytes()) };
-                let out_path = std::path::Path::new(out_str);
-                // The base bun binary is already signed, but we've appended
-                // the JS bundle after the original signature.  Strip the old
-                // .codesign and sign the modified file so the signature
-                // covers the entire standalone binary.
-                let _ = ohos_sign::sign_selfsign_inplace_with_strip(out_path);
-            }
-            return cloned_executable_fd;
+            return Some(Injected::new(
+                cloned_executable_fd,
+                cwd,
+                zname,
+                temp_path_buf,
+            ));
         }
         _ => {
             let total_byte_count: usize;
@@ -1757,7 +1640,7 @@ pub(crate) fn inject(
                                 e
                             );
                             cleanup(zname, cloned_executable_fd);
-                            return Fd::invalid();
+                            return None;
                         }
                     };
             }
@@ -1769,7 +1652,7 @@ pub(crate) fn inject(
                         Err(err) => {
                             bun_core::pretty_errorln!("{}", err);
                             cleanup(zname, cloned_executable_fd);
-                            return Fd::INVALID;
+                            return None;
                         }
                     };
                     break 'brk fstat.st_size.max(0);
@@ -1793,7 +1676,7 @@ pub(crate) fn inject(
                         seek_position
                     );
                     cleanup(zname, cloned_executable_fd);
-                    return Fd::INVALID;
+                    return None;
                 }
             }
 
@@ -1807,7 +1690,7 @@ pub(crate) fn inject(
                             err
                         );
                         cleanup(zname, cloned_executable_fd);
-                        return Fd::INVALID;
+                        return None;
                     }
                 }
             }
@@ -1820,7 +1703,12 @@ pub(crate) fn inject(
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
             }
 
-            return cloned_executable_fd;
+            return Some(Injected::new(
+                cloned_executable_fd,
+                cwd,
+                zname,
+                temp_path_buf,
+            ));
         }
     }
 }
@@ -2083,11 +1971,23 @@ pub fn to_executable(
         bun_core::ZBox::from_vec_with_nul(dest_z.as_bytes().to_vec())
     };
 
-    let fd = inject(&bytes, &self_exe, windows_options, target);
-    // Note: a scopeguard closure capturing `fd` by value would not observe
-    // later reassignments; capturing by `&mut` conflicts with later uses. Explicit
-    // `if fd != Fd::INVALID { fd.close(); }` calls are inserted at every return below
-    // (both error and success paths).
+    let mut temp_path_buf = bun_paths::path_buffer_pool::get();
+    let Some(injected) = inject(
+        &bytes,
+        &self_exe,
+        windows_options,
+        target,
+        &mut temp_path_buf,
+    ) else {
+        // inject() has already printed the specific error.
+        return Ok(CompileResult::fail_fmt(format_args!(
+            "failed to write compiled executable {}",
+            bstr::BStr::new(outfile)
+        )));
+    };
+    let fd = injected.fd;
+    // Closed explicitly at every return below rather than by a guard: on Windows
+    // the handle has to be closed mid-function, before `MoveFileExW`.
     debug_assert!(fd.kind() == bun_sys::FdKind::System);
 
     #[cfg(unix)]
@@ -2098,20 +1998,7 @@ pub fn to_executable(
 
     #[cfg(windows)]
     {
-        // Get the current path of the temp file
-        let mut temp_buf = PathBuffer::uninit();
-        let temp_path = match bun_sys::get_fd_path(fd, &mut temp_buf) {
-            Ok(p) => p,
-            Err(e) => {
-                if fd != Fd::INVALID {
-                    fd.close();
-                }
-                return Ok(CompileResult::fail_fmt(format_args!(
-                    "Failed to get temp file path: {}",
-                    bstr::BStr::new(e.name())
-                )));
-            }
-        };
+        let temp_path: &[u8] = injected.temp_path.as_bytes();
 
         // Build the absolute destination path
         // On Windows, we need an absolute path for MoveFileExW
@@ -2120,9 +2007,7 @@ pub fn to_executable(
         let cwd_path: &[u8] = match bun_sys::getcwd(&mut cwd_buf) {
             Ok(len) => &cwd_buf[..len],
             Err(e) => {
-                if fd != Fd::INVALID {
-                    fd.close();
-                }
+                fd.close();
                 return Ok(CompileResult::fail_fmt(format_args!(
                     "Failed to get current directory: {}",
                     bstr::BStr::new(e.name())
@@ -2168,6 +2053,7 @@ pub fn to_executable(
         } == windows::FALSE
         {
             let werr = windows::Win32Error::get();
+            let _ = Syscall::unlink(injected.temp_path);
             if let Some(sys_err) = werr.to_system_errno() {
                 if sys_err == bun_sys::SystemErrno::EISDIR {
                     return Ok(CompileResult::fail_fmt(format_args!(
@@ -2220,24 +2106,7 @@ pub fn to_executable(
 
     #[cfg(not(windows))]
     {
-        let mut buf2 = PathBuffer::uninit();
-        // Note: borrowck — `get_fd_path` returns `&mut [u8]` borrowing `buf2`;
-        // copy it into an owned buffer so `temp_posix_buf` can also borrow `buf2`'s
-        // sibling without overlap.
-        let temp_location: Vec<u8> = match bun_sys::get_fd_path(fd, &mut buf2) {
-            Ok(p) => p.to_vec(),
-            Err(e) => {
-                if fd != Fd::INVALID {
-                    fd.close();
-                }
-                return Ok(CompileResult::fail_fmt(format_args!(
-                    "failed to get path for fd: {}",
-                    e
-                )));
-            }
-        };
-        let mut temp_posix_buf = PathBuffer::uninit();
-        let temp_posix = path::resolve_path::z(&temp_location, &mut temp_posix_buf);
+        let temp_posix = injected.temp_path;
         let outfile_basename = bun_paths::basename(outfile);
         let mut outfile_posix_buf = PathBuffer::uninit();
         let outfile_posix = path::resolve_path::z(outfile_basename, &mut outfile_posix_buf);
@@ -2257,16 +2126,14 @@ pub fn to_executable(
             } else {
                 return Ok(CompileResult::fail_fmt(format_args!(
                     "failed to rename {} to {}: {}",
-                    bstr::BStr::new(&temp_location),
+                    bstr::BStr::new(temp_posix.as_bytes()),
                     bstr::BStr::new(outfile),
                     bstr::BStr::new(e.name())
                 )));
             }
         }
 
-        if fd != Fd::INVALID {
-            fd.close();
-        }
+        fd.close();
         Ok(CompileResult::Success)
     }
 }
