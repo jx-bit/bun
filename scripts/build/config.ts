@@ -79,6 +79,8 @@ export interface Config {
   ohos: boolean;
   /** linux || darwin || freebsd */
   unix: boolean;
+  /** darwin || freebsd — kqueue-based event loop */
+  kqueue: boolean;
   x64: boolean;
   arm64: boolean;
 
@@ -240,10 +242,10 @@ export interface Config {
   /** Parsed `LLVM version:` from `rustc -vV`. Captured once; feeds workarounds.ts. */
   rustLlvmVersion: string | undefined;
   strip: string;
-  /** llvm-nm, for `DirectBuild.forbidUndefined`; undefined skips those checks. */
-  nm: string | undefined;
   /** Set when the target is darwin. Undefined on non-darwin targets. */
   dsymutil: string | undefined;
+  /** llvm-nm, for `DirectBuild.forbidUndefined`; undefined skips those checks. */
+  nm: string | undefined;
   /** Self-host bun for codegen (bun install, bun build). */
   bun: string;
   /** npm, set only when `packageManager` is "npm". */
@@ -282,7 +284,7 @@ export interface Config {
   rc: string | undefined;
   /** Windows: llvm-mt for nested cmake (CMAKE_MT). May be absent in some LLVM distros. */
   mt: string | undefined;
-  /** x64: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
+  /** Windows-x64: nasm for BoringSSL's NASM-syntax assembly. */
   nasm: string | undefined;
 
   // ─── macOS SDK (darwin only, undefined elsewhere) ───
@@ -311,8 +313,24 @@ export interface Config {
    * undefined on native Windows builds (VS dev shell supplies the SDK).
    */
   winsysroot: string | undefined;
+  /** Android NDK root. undefined when abi != "android". */
+  androidNdk: string | undefined;
+  /** Android API level (the N in `__ANDROID_API__=N`). undefined when abi != "android". */
+  androidApiLevel: number | undefined;
   /** NDK compiler-rt/libunwind dir: `<ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux`. */
   androidNdkRuntimeDir: string | undefined;
+  /** FreeBSD release version targeted (e.g. "14.3"). undefined when os != "freebsd". */
+  freebsdVersion: string | undefined;
+
+  // ─── OHOS cross-compilation (ohos only, undefined elsewhere) ───
+  /** Sysroot path for OHOS NDK. */
+  ohosSysroot: string | undefined;
+  /** OHOS SDK root path. */
+  ohosSdkRoot: string | undefined;
+  /** Cross-compiled libc++/libunwind path. */
+  ohosCrossLibs: string | undefined;
+  /** Cross-compiled ICU path. */
+  ohosIcuDir: string | undefined;
 
   // ─── OHOS cross-compilation (ohos only, undefined elsewhere) ───
   /** Sysroot path for OHOS NDK. */
@@ -368,11 +386,6 @@ export interface PartialConfig {
   ci?: boolean;
   buildkite?: boolean;
   webkit?: WebKitMode;
-  /**
-   * `name=path[,name=path...]` — build these deps from a local checkout
-   * (e.g. `mimalloc=~/code/mimalloc`). `~` expands to $HOME; relative paths
-   * resolve against the repo root. See `Config.localDeps`.
-   */
   localDeps?: string;
   /** `bun` (default) or `npm`. See `Config.packageManager`. */
   packageManager?: PackageManager;
@@ -469,9 +482,8 @@ export interface Toolchain {
    * can't read Mach-O, so darwin cross-compiles swap this in as `cfg.strip`.
    */
   llvmStrip: string | undefined;
-  /** llvm-nm; undefined skips the per-dep undefined-symbol checks (source.ts). */
-  nm: string | undefined;
   dsymutil: string | undefined;
+  nm: string | undefined;
   bun: string;
   /** Found only when the build installs with npm. */
   npm?: string | undefined;
@@ -504,7 +516,11 @@ export interface Toolchain {
    * source.ts) sidesteps the need.
    */
   mt: string | undefined;
-  /** x64 targets: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
+  /**
+   * Windows only: nasm. BoringSSL's win-x64 assembly is NASM syntax;
+   * clang's integrated assembler can't read it. win-aarch64 uses gas
+   * .S files instead, so this is x64-only in practice.
+   */
   nasm: string | undefined;
 }
 
@@ -728,6 +744,24 @@ function linkNdkRuntimesIntoClang(cc: string, ndk: string, host: Host, triple: s
         `If the final link fails on libclang_rt.builtins.a, run: sudo mkdir -p "${targetDir}" "${join(flatDir, arch)}" && ${lnCmds}`,
     );
   }
+}
+
+function parseLocalDeps(spec: string | undefined, cwd: string): Record<string, string> {
+  const out = Object.create(null) as Record<string, string>;
+  if (spec === undefined || spec === "") return out;
+  for (const entry of spec.split(",")) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0 || eq === entry.length - 1) {
+      throw new BuildError(`--local-deps: expected name=path, got '${entry}'`, {
+        hint: "Example: --local-deps=mimalloc=~/code/mimalloc",
+      });
+    }
+    const name = entry.slice(0, eq);
+    let path = entry.slice(eq + 1);
+    if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
+    out[name] = resolve(cwd, path);
+  }
+  return out;
 }
 
 /**
@@ -1155,7 +1189,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const pkgJsonPath = resolve(cwd, "package.json");
   const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string };
   const version = pkgJson.version;
-  const revision = getGitRevision(cwd, debug && !ci ? buildDir : undefined);
+  const revision = getGitRevision(cwd);
 
   // Defaults from versions.ts. Override via --webkit-version=<hash> etc.
   // to test a branch before bumping the pinned default.
@@ -1244,6 +1278,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     freebsd,
     ohos,
     unix,
+    kqueue,
     x64,
     arm64,
     host,
@@ -1288,7 +1323,6 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     cc: toolchain.cc,
     hostCc: ohos ? findHostCc() : toolchain.cc,
     cxx: toolchain.cxx,
-    hostCc: toolchain.hostCc ?? toolchain.cc,
     hostCxx: toolchain.hostCxx ?? toolchain.cxx,
     clangVersion: toolchain.clangVersion,
     clangResourceDir: toolchain.clangResourceDir,
@@ -1304,8 +1338,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
           ? `/usr/bin/${crossTarget}-strip`
           : (toolchain.llvmStrip ?? toolchain.strip)
         : toolchain.strip),
-    nm: toolchain.nm,
     dsymutil: toolchain.dsymutil,
+    nm: toolchain.nm,
     bun: toolchain.bun,
     npm: packageManager === "npm" ? toolchain.npm : undefined,
     jsRuntime: toolchain.jsRuntime,
@@ -1336,6 +1370,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     crossTarget,
     sysroot,
     winsysroot,
+    androidNdk,
+    androidApiLevel,
     androidNdkRuntimeDir,
     freebsdVersion,
     ohosSysroot,
@@ -1491,31 +1527,6 @@ export function findRepoRoot(): string {
 }
 
 /**
- * Parse `--local-deps=name=path[,name=path...]` into name → absolute path.
- * Names are checked against `allDeps` later (bun.ts) where the dep list is
- * in scope; here we only validate shape and resolve paths.
- */
-function parseLocalDeps(spec: string | undefined, cwd: string): Record<string, string> {
-  // Null prototype: any name (even `__proto__`) is stored as a plain entry and
-  // reaches the unknown-dep check in validateBunConfig.
-  const out = Object.create(null) as Record<string, string>;
-  if (spec === undefined || spec === "") return out;
-  for (const entry of spec.split(",")) {
-    const eq = entry.indexOf("=");
-    if (eq <= 0 || eq === entry.length - 1) {
-      throw new BuildError(`--local-deps: expected name=path, got '${entry}'`, {
-        hint: "Example: --local-deps=mimalloc=~/code/mimalloc",
-      });
-    }
-    const name = entry.slice(0, eq);
-    let path = entry.slice(eq + 1);
-    if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
-    out[name] = resolve(cwd, path);
-  }
-  return out;
-}
-
-/**
  * Get the current git revision (HEAD sha).
  *
  * Uses `git rev-parse` rather than reading .git/HEAD directly — the sha
@@ -1551,29 +1562,17 @@ function readRustToolchainChannel(cwd: string): string | undefined {
   return m?.[1];
 }
 
-function getGitRevision(cwd: string, pinDir: string | undefined): string {
+function getGitRevision(cwd: string): string {
   // CI env first — authoritative and zero-cost.
   const envSha = process.env.BUILDKITE_COMMIT ?? process.env.GITHUB_SHA ?? process.env.GIT_SHA;
   if (envSha !== undefined && envSha.length > 0) {
     return envSha;
   }
-  // Local debug builds pin the sha at first configure: it is a const in `bun_core`, so tracking HEAD would recompile every Rust crate on each commit/checkout/pull.
-  const pinFile = pinDir === undefined ? undefined : resolve(pinDir, "git-revision");
-  if (pinFile !== undefined && existsSync(pinFile)) {
-    const pinned = readFileSync(pinFile, "utf8").trim();
-    if (/^[0-9a-f]{40}$/.test(pinned)) return pinned;
-  }
-  let sha: string;
   try {
-    sha = execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
+    return execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
   } catch {
     return "unknown";
   }
-  if (pinFile !== undefined) {
-    mkdirSync(pinDir!, { recursive: true });
-    writeFileSync(pinFile, sha + "\n");
-  }
-  return sha;
 }
 
 /**
@@ -1657,7 +1656,9 @@ export function formatConfig(cfg: Config, exe: string): string {
     `  ${label("target")} ${cfg.os}-${cfg.arch}${cfg.abi !== undefined ? "-" + cfg.abi : ""}`,
     `  ${label("build type")} ${cfg.buildType}`,
     `  ${label("build dir")} ${relBuildDir}`,
-    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}${cfg.debug && !cfg.ci ? " (pinned; rm <build dir>/git-revision to refresh)" : ""}`,
+    // Revision makes it obvious why configure re-ran after a commit
+    // (the sha changes → the build's -Dsha equivalent changes → build.ninja differs).
+    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}`,
   ];
   const features: string[] = [];
   if (cfg.lto) features.push("lto");

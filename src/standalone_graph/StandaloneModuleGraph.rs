@@ -550,13 +550,9 @@ mod elf {
     pub(super) fn get_data() -> Option<(*mut u8, usize)> {
         #[cfg(target_env = "ohos")]
         {
-            // Primary: open /proc/self/exe + locate .bun section by FILE OFFSET
-            // + mmap. Bypasses PIE vaddr relocations entirely — more robust than
-            // vaddr+load_base (which miscomputes when PT_LOAD[0].vaddr != 0).
             if let Some(data) = ohos_primary_get_data() {
                 return Some(data);
             }
-            // Fallback below: vaddr + PIE load base (when /proc/self/exe unreadable).
         }
         // SAFETY: FFI call.
         let vaddr_ptr = unsafe { Bun__getStandaloneModuleGraphELFVaddr() };
@@ -578,12 +574,6 @@ mod elf {
         // permission for the in-place bytecode mutation done by JSC.
         #[cfg(target_env = "ohos")]
         let target = {
-            // OHOS binaries are PIE: the link-time vaddr must shift by the
-            // ASLR load base. /proc/self/maps is readable even when
-            // /proc/self/exe is execute-only; its first file-backed mapping
-            // at offset 0 is the ELF PT_LOAD header — its start is the PIE
-            // base (hmdfs maps the header r--p, not r-xp, so matching on
-            // execute permission misses it).
             let load_base = ohos_pie_load_base()?;
             (load_base.wrapping_add(vaddr as usize)) as *mut u8
         };
@@ -601,68 +591,6 @@ mod elf {
         }
         // SAFETY: payload_len bytes follow the 8-byte header at `target`.
         Some((unsafe { target.add(8) }, payload_len as usize))
-    }
-
-    /// OHOS PIE load base: scan /proc/self/maps for the first file-backed
-    /// mapping at offset 0 (the ELF PT_LOAD header). Its start address is the
-    /// ASLR base the kernel loaded the PIE image at.
-    #[cfg(target_env = "ohos")]
-    fn ohos_pie_load_base() -> Option<usize> {
-        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-        for line in maps.lines() {
-            let mut c = line.split_whitespace();
-            let addr_range = c.next()?;
-            c.next(); // perms
-            let file_off = c.next()?;
-            c.next(); // dev
-            let inode = c.next().unwrap_or("0");
-            let path = c.next().unwrap_or("");
-            if file_off == "00000000"
-                && inode != "0"
-                && !path.is_empty()
-                && !path.starts_with('[')
-            {
-                if let Some(start) = addr_range.split('-').next() {
-                    if let Ok(base) = usize::from_str_radix(start, 16) {
-                        return Some(base);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// OHOS primary: open /proc/self/exe, locate the `.bun` section by FILE
-    /// OFFSET (sh_offset) via the ELF section header table, then mmap it
-    /// MAP_PRIVATE so JSC can mutate bytecode in place. Independent of vaddr
-    /// / PIE relocations — works as long as /proc/self/exe is readable.
-    #[cfg(target_env = "ohos")]
-    fn ohos_primary_get_data() -> Option<(*mut u8, usize)> {
-        use std::fs::File;
-        use std::os::fd::AsRawFd;
-        use std::ptr;
-        let file = File::open("/proc/self/exe").ok()?;
-        let (sh_offset, sh_size) = locate_bun_section(&file)?;
-        let mut hdr = [0u8; 8];
-        read_at(&file, sh_offset, &mut hdr)?;
-        let byte_count = u64::from_le_bytes(hdr) as usize;
-        if byte_count.checked_add(8)? != sh_size as usize {
-            return None;
-        }
-        let mapping = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                sh_size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                sh_offset as i64,
-            )
-        };
-        if mapping == libc::MAP_FAILED {
-            return None;
-        }
-        Some((unsafe { (mapping as *mut u8).add(8) }, byte_count))
     }
 
     #[cfg(target_env = "ohos")]
@@ -687,33 +615,101 @@ mod elf {
     const BUN_SECTION_NAME: &[u8] = b".bun\0";
 
     #[cfg(target_env = "ohos")]
-    fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> Option<()> {
-        use std::os::fd::AsRawFd;
-        let n = unsafe {
-            libc::pread64(
-                file.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                offset as i64,
-            )
-        };
-        if n < 0 || n as usize != buf.len() {
-            return None;
+    fn ohos_pie_load_base() -> Option<usize> {
+        // /proc/self/maps parsed at the byte level: mapped paths can contain
+        // non-UTF-8 bytes (which would fail the previous read_to_string), and
+        // the workspace disallows str::lines/str::split.
+        let fd = bun_sys::openat_a(
+            bun_sys::Fd::cwd(),
+            b"/proc/self/maps",
+            bun_sys::O::RDONLY,
+            0,
+        )
+        .ok()?;
+        let _file = bun_sys::File::from_fd(fd);
+        let mut maps = Vec::new();
+        loop {
+            let mut chunk = [0u8; 8192];
+            let n = bun_sys::read(fd, &mut chunk).ok()?;
+            if n == 0 {
+                break;
+            }
+            maps.extend_from_slice(&chunk[..n]);
         }
-        Some(())
+        drop(_file);
+        for line in bun_core::strings::split(&maps, b"\n") {
+            let mut fields = bun_core::strings::split(line, b" ").filter(|f| !f.is_empty());
+            let addr_range = fields.next()?;
+            fields.next()?; // perms
+            let file_off = fields.next()?;
+            fields.next()?; // dev
+            let inode = fields.next().unwrap_or(b"0");
+            let path = fields.next().unwrap_or(b"");
+            if file_off == b"00000000"
+                && inode != b"0"
+                && !path.is_empty()
+                && path.first() != Some(&b'[')
+            {
+                let start = bun_core::strings::split(addr_range, b"-").next()?;
+                let start = core::str::from_utf8(start).ok()?;
+                if let Ok(base) = usize::from_str_radix(start, 16) {
+                    return Some(base);
+                }
+            }
+        }
+        None
     }
 
-    /// Walk the ELF section header table to find `.bun`; return (sh_offset, sh_size).
     #[cfg(target_env = "ohos")]
-    fn locate_bun_section(file: &std::fs::File) -> Option<(u64, u64)> {
+    fn ohos_primary_get_data() -> Option<(*mut u8, usize)> {
+        use std::ptr;
+        let fd =
+            bun_sys::openat_a(bun_sys::Fd::cwd(), b"/proc/self/exe", bun_sys::O::RDONLY, 0).ok()?;
+        let _file = bun_sys::File::from_fd(fd);
+        let (sh_offset, sh_size) = locate_bun_section(fd)?;
+        let mut hdr = [0u8; 8];
+        read_at(fd, sh_offset, &mut hdr)?;
+        let byte_count = u64::from_le_bytes(hdr) as usize;
+        if byte_count.checked_add(8)? != sh_size as usize {
+            return None;
+        }
+        // SAFETY: `fd` is a live read-only descriptor for /proc/self/exe and
+        // [sh_offset, sh_offset + sh_size) lies within the file (the section
+        // header bounds were validated by locate_bun_section); mapping a
+        // regular-file range MAP_PRIVATE cannot violate memory safety.
+        let mapping = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                sh_size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE,
+                fd.native(),
+                sh_offset as i64,
+            )
+        };
+        if mapping == libc::MAP_FAILED {
+            return None;
+        }
+        // SAFETY: the mapping covers `sh_size` bytes and the length check
+        // above guarantees `byte_count + 8 == sh_size`, so skipping the
+        // 8-byte count header stays within the mapping.
+        let data = unsafe { mapping.cast::<u8>().add(8) };
+        Some((data, byte_count))
+    }
+
+    #[cfg(target_env = "ohos")]
+    fn locate_bun_section(fd: bun_sys::Fd) -> Option<(u64, u64)> {
         let mut ehdr = [0u8; 64];
-        read_at(file, 0, &mut ehdr)?;
+        read_at(fd, 0, &mut ehdr)?;
         if ehdr[0..4] != ELF_MAGIC {
             return None;
         }
         let shoff = u64::from_le_bytes(ehdr[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].try_into().ok()?);
-        let shentsize =
-            u16::from_le_bytes(ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2].try_into().ok()?);
+        let shentsize = u16::from_le_bytes(
+            ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2]
+                .try_into()
+                .ok()?,
+        );
         let shnum = u16::from_le_bytes(ehdr[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].try_into().ok()?);
         let shstrndx =
             u16::from_le_bytes(ehdr[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2].try_into().ok()?);
@@ -722,33 +718,46 @@ mod elf {
         }
         let shstrtab_shoff = shoff + (shstrndx as u64) * SHDR_SIZE as u64;
         let mut shstrtab_shdr = [0u8; 64];
-        read_at(file, shstrtab_shoff, &mut shstrtab_shdr)?;
+        read_at(fd, shstrtab_shoff, &mut shstrtab_shdr)?;
         let shstrtab_offset = u64::from_le_bytes(
-            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
+            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8]
+                .try_into()
+                .ok()?,
         );
-        let shstrtab_size =
-            u64::from_le_bytes(shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
+        let shstrtab_size = u64::from_le_bytes(
+            shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8]
+                .try_into()
+                .ok()?,
+        );
         let shstrtab_size_usize = shstrtab_size as usize;
         let mut shstrtab = vec![0u8; shstrtab_size_usize];
-        read_at(file, shstrtab_offset, &mut shstrtab)?;
+        read_at(fd, shstrtab_offset, &mut shstrtab)?;
         for i in 0..shnum {
             let shdr_off = shoff + (i as u64) * SHDR_SIZE as u64;
             let mut shdr = [0u8; 64];
-            read_at(file, shdr_off, &mut shdr)?;
+            read_at(fd, shdr_off, &mut shdr)?;
             let name_off =
                 u32::from_le_bytes(shdr[SHDR_SH_NAME..SHDR_SH_NAME + 4].try_into().ok()?) as usize;
             if name_off + 5 <= shstrtab_size_usize
                 && &shstrtab[name_off..name_off + 5] == BUN_SECTION_NAME
             {
-                let sec_offset = u64::from_le_bytes(
-                    shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
-                );
+                let sec_offset =
+                    u64::from_le_bytes(shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?);
                 let sec_size =
                     u64::from_le_bytes(shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
                 return Some((sec_offset, sec_size));
             }
         }
         None
+    }
+
+    #[cfg(target_env = "ohos")]
+    fn read_at(fd: bun_sys::Fd, offset: u64, buf: &mut [u8]) -> Option<()> {
+        let n = bun_sys::pread(fd, buf, offset as i64).ok()?;
+        if n != buf.len() {
+            return None;
+        }
+        Some(())
     }
 
     /// `MADV_WILLNEED` over `[lo, hi)`: queues page-cache readahead for the
@@ -2295,6 +2304,25 @@ pub(crate) fn inject<'a>(
                 return None;
             }
 
+            // OHOS: the stub may carry a codesign section (device-signed
+            // binaries do). The clone + payload expansion invalidates it -
+            // the section still describes the stub's size/hash - and the
+            // kernel refuses to exec files whose section fails that check.
+            // Strip the inherited section and re-sign the complete output
+            // so compile artifacts are directly executable. No-op when the
+            // stub has no section (the spawn-time signer covers those).
+            #[cfg(target_env = "ohos")]
+            if ohos_sign::has_codesign(&elf_file.data) {
+                match ohos_sign::sign_selfsign_with_strip(&elf_file.data) {
+                    Ok(signed) => elf_file.data = signed,
+                    Err(err) => {
+                        bun_core::pretty_errorln!("Error re-signing compiled output: {}", err);
+                        cleanup(zname, cloned_executable_fd);
+                        return None;
+                    }
+                }
+            }
+
             if let Err(err) = Syscall::set_file_offset(cloned_executable_fd, 0) {
                 bun_core::pretty_errorln!("Error seeking to start of temporary file: {}", err);
                 cleanup(zname, cloned_executable_fd);
@@ -2322,16 +2350,6 @@ pub(crate) fn inject<'a>(
             {
                 // SAFETY: libc fchmod on a valid native fd.
                 unsafe { bun_sys::c::fchmod(cloned_executable_fd.native(), 0o755) };
-            }
-            #[cfg(target_env = "ohos")]
-            {
-                let out_str = unsafe { core::str::from_utf8_unchecked(zname.as_bytes()) };
-                let out_path = std::path::Path::new(out_str);
-                // The base bun binary is already signed, but we've appended
-                // the JS bundle after the original signature.  Strip the old
-                // .codesign and sign the modified file so the signature
-                // covers the entire standalone binary.
-                let _ = ohos_sign::sign_selfsign_inplace_with_strip(out_path);
             }
             return Some(Injected::new(
                 cloned_executable_fd,

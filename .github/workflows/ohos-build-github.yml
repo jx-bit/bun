@@ -33,6 +33,9 @@ on:
     branches:
       - ohos-aarch64
       - claude/ohos-*
+  pull_request:
+    branches:
+      - ohos-aarch64
   workflow_dispatch:
     inputs:
       webkit_ref:
@@ -59,7 +62,7 @@ env:
   TAP_IN_CONTAINER: /storage/Users/currentUser/.harmonybrew/Homebrew/Library/Taps/social4hyq/homebrew-core
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: caad865eb1a6e5ca4427f5ea1f066140b11953e7
+  WEBKIT_REF: 0f966e81b78c84bb23213e391bc679c4ef83e56b
   RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
 

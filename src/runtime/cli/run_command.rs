@@ -284,7 +284,6 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         use_system_shell: bool,
         shell_path: Option<&[u8]>,
     ) -> crate::Result<()> {
-        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
         #[cfg(target_env = "ohos")]
         ohos_set_pwd(env, cwd);
 
@@ -642,48 +641,78 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
 
         // SAFETY: `Transpiler::init` always sets `fs` to the process singleton.
         let top_level_dir = unsafe { (*this_transpiler.fs).top_level_dir };
-        let root_dir_info: bun_resolver::DirInfoRef =
+        let root_dir_info: Option<bun_resolver::DirInfoRef> =
             match this_transpiler.resolver.read_dir_info(top_level_dir) {
+                #[cfg(target_env = "ohos")]
+                Err(err)
+                    if with_linker
+                        && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
+                            || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES)) =>
+                {
+                    None
+                }
                 Err(err) => {
                     if !opts.log_errors {
                         return Err(crate::Error::CouldntReadCurrentDirectory);
-                    } else {
-                        // SAFETY: `ctx.log` set in `create_context_data` (single-
-                        // threaded CLI startup), process-lifetime.
-                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                            Output::error_writer(),
-                        ));
-                        pretty_errorln!(
-                            "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
-                            bstr::BStr::new(err.name()),
-                            bun_core::fmt::QuotedFormatter {
-                                text: top_level_dir
-                            },
-                        );
-                        Output::flush();
-                        return Err(err.into());
                     }
+                    // SAFETY: `ctx.log` set in `create_context_data` (single-
+                    // threaded CLI startup), process-lifetime.
+                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                        Output::error_writer(),
+                    ));
+                    pretty_errorln!(
+                        "<r><red>error<r><d>:<r> <b>{}<r> loading directory {}",
+                        bstr::BStr::new(err.name()),
+                        bun_core::fmt::QuotedFormatter {
+                            text: top_level_dir
+                        },
+                    );
+                    Output::flush();
+                    return Err(err.into());
                 }
+                #[cfg(target_env = "ohos")]
+                Ok(None) if with_linker => None,
                 Ok(None) => {
-                    if cfg!(target_env = "ohos") {
-                        let home = std::env::var("HOME").unwrap_or_default();
-                        this_transpiler
-                            .resolver
-                            .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
-                            .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
-                            .ok_or(crate::Error::CouldntReadCurrentDirectory)?
-                    } else {
-                        // SAFETY: see `Err` arm above.
-                        let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
-                            Output::error_writer(),
-                        ));
-                        pretty_errorln!("error loading current directory");
-                        Output::flush();
-                        return Err(crate::Error::CouldntReadCurrentDirectory);
-                    }
+                    // SAFETY: see `Err` arm above.
+                    let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+                        Output::error_writer(),
+                    ));
+                    pretty_errorln!("error loading current directory");
+                    Output::flush();
+                    return Err(crate::Error::CouldntReadCurrentDirectory);
                 }
-                Ok(Some(info)) => info,
+                Ok(Some(info)) => Some(info),
             };
+
+        #[cfg(target_env = "ohos")]
+        let mut root_dir_info_is_fallback = false;
+        #[cfg(target_env = "ohos")]
+        let root_dir_info: bun_resolver::DirInfoRef = match root_dir_info {
+            Some(info) => info,
+            None => {
+                root_dir_info_is_fallback = true;
+                let home = bun_core::env_var::HOME::get().unwrap_or(b"");
+                let info = this_transpiler
+                    .resolver
+                    .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home })
+                    .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
+                    .ok_or(crate::Error::InstallFailed)?;
+                if opts.log_errors {
+                    pretty_errorln!(
+                        "<r><yellow>warn<r><d>:<r> cannot read {}; resolving from <b>{}<r> instead",
+                        bun_core::fmt::QuotedFormatter {
+                            text: top_level_dir
+                        },
+                        bstr::BStr::new(info.abs_path),
+                    );
+                    Output::flush();
+                }
+                info
+            }
+        };
+        #[cfg(not(target_env = "ohos"))]
+        let root_dir_info: bun_resolver::DirInfoRef =
+            root_dir_info.expect("Ok(None)/EPERM/EACCES arms are OHOS-only; other arms diverge");
 
         this_transpiler.resolver.store_fd = false;
 
@@ -762,7 +791,14 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
             }
         }
 
-        if let Some(package_json) = root_dir_info.enclosing_package_json {
+        #[cfg(target_env = "ohos")]
+        let seed_package_env = !root_dir_info_is_fallback;
+        #[cfg(not(target_env = "ohos"))]
+        let seed_package_env = true;
+        if let Some(package_json) = root_dir_info
+            .enclosing_package_json
+            .filter(|_| seed_package_env)
+        {
             if !package_json.name.is_empty() {
                 if env_loader.map.get(NpmArgs::PACKAGE_NAME).is_none() {
                     env_loader
@@ -2098,10 +2134,6 @@ impl RunCommand {
         original_script_for_bun_run: Option<&[u8]>,
     ) -> crate::Result<::core::convert::Infallible> {
         use crate::api::bun_process::{Status as SpawnStatus, sync};
-
-        // OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd().
-        #[cfg(target_env = "ohos")]
-        ohos_set_pwd(env, cwd);
 
         let mut argv: Vec<Box<[u8]>> = Vec::with_capacity(1 + passthrough.len());
         argv.push(executable.to_vec().into_boxed_slice());
