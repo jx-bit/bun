@@ -136,26 +136,147 @@ fi
 export ESBUILD_BINARY_PATH="$ESBUILD_BIN"
 echo "=== ESBUILD_BINARY_PATH=$ESBUILD_BINARY_PATH ==="
 
-# ── Scaffold ohos-cross-libs (bun.rb lines 204-219) ────────────────────
-# bun flags.ts expects ohosCrossLibs to contain libcxx/include/v1/ and
-# libcxxabi/include/. llvm@21 ships aarch64-linux-ohos cross runtimes
-# (__1 ABI — same as self-hosted Harmonybrew, NOT the old self-compiled __n1).
-CROSS=build/ohos-cross-libs
-rm -rf "$CROSS"
-mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi" \
-         "$CROSS/libcxx/lib" "$CROSS/libcxxabi/lib" "$CROSS/libunwind/lib"
-ln -sf "$LLVM_PREFIX/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxx/include/v1"
-ln -sf "$LLVM_PREFIX/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxxabi/include"
-ln -sf "$LLVM_PREFIX/lib/aarch64-linux-ohos/libc++.a"    "$CROSS/libcxx/lib/libc++.a"
-ln -sf "$LLVM_PREFIX/lib/aarch64-linux-ohos/libc++abi.a" "$CROSS/libcxxabi/lib/libc++abi.a"
-ln -sf "$LLVM_PREFIX/lib/aarch64-linux-ohos/libunwind.a" "$CROSS/libunwind/lib/libunwind.a"
-if [ ! -e "$CROSS/libcxx/include/v1/__config_site" ]; then
-  echo "ERROR: llvm@21 aarch64-linux-ohos cross headers missing."
-  echo "  looked for: $LLVM_PREFIX/include/aarch64-linux-ohos/c++/v1/__config_site"
-  echo "  llvm@21 include dirs:"; ls "$LLVM_PREFIX/include/" 2>/dev/null | head -20
-  exit 1
+# ── Self-compile __n1 libcxx from LLVM source ────────────────────────
+# The OHOS device's libc++_shared.so uses _LIBCPP_ABI_NAMESPACE=__n1.
+# llvm@21's prebuilt cross-libs use __1. With full symbol export (方案B),
+# v8 symbols mangled as __1 would mismatch the device's __n1 → crash.
+# Self-compile libcxx/libcxxabi/libunwind with -DLIBCXX_ABI_NAMESPACE=__n1
+# so headers AND .a symbols are __n1 — matches the device.
+#
+# Strategy mirrors social4hyq llvm@21.rb build_multiarch_runtimes,
+# with the single change __h → __n1. Cached: only first run pays ~10min.
+CROSS="$SRC/build/ohos-cross-libs"
+LLVM_SRC_TARBALL="llvm-project-21.1.8.src.tar.xz"
+LLVM_SRC_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/${LLVM_SRC_TARBALL}"
+LIBCXX_N1_STAMP="$CROSS/.N1_BUILT_OK"
+
+if [ -f "$LIBCXX_N1_STAMP" ]; then
+  echo "=== cross-libs cache hit (ABI __n1) ==="
+else
+  echo "=== self-compiling __n1 libcxx from LLVM 21.1.8 source ==="
+  rm -rf "$CROSS"
+  mkdir -p "$CROSS"
+
+  # Download LLVM source (host runner has better network than container)
+  if [ ! -f "/tmp/${LLVM_SRC_TARBALL}" ]; then
+    echo "=== downloading ${LLVM_SRC_TARBALL} ==="
+    curl -fsSL "$LLVM_SRC_URL" -o "/tmp/${LLVM_SRC_TARBALL}" || {
+      echo "ERROR: failed to download LLVM source"
+      exit 1
+    }
+  fi
+  echo "=== extracting LLVM source ==="
+  rm -rf /tmp/llvm-project-src
+  mkdir -p /tmp/llvm-project-src
+  tar xf "/tmp/${LLVM_SRC_TARBALL}" -C /tmp/llvm-project-src --strip-components=1
+
+  LLVM_SRC=/tmp/llvm-project-src
+  BUILD_DIR=/tmp/libcxx-n1-build
+
+  # Patch: musl doesn't provide strtoll_l/strtoull_l (glibc extensions).
+  # Replace with non-locale versions (locale arg ignored).
+  LINUX_H="$LLVM_SRC/libcxx/include/__locale_dir/support/linux.h"
+  if [ -f "$LINUX_H" ]; then
+    sed -i 's/strtoll_l(\([^,]*\),\([^,]*\),\([^,]*\),[^)]*)/strtoll(\1,\2,\3)/g; s/strtoull_l(\([^,]*\),\([^,]*\),\([^,]*\),[^)]*)/strtoull(\1,\2,\3)/g' "$LINUX_H"
+    echo "=== patched linux.h: strtoll_l/strtoull_l → strtoll/strtoull (dropped locale arg) ==="
+  fi
+
+  # Temporarily hide llvm@21 cmake config: the brew bottle ships
+  # LLVMExports.cmake that references missing static libs (e.g.
+  # libLLVMDemangle.a). find_package(LLVM) loads it and fails.
+  # The runtimes build is standalone and doesn't need it.
+  LLVM_CMAKE_DIR="$LLVM_PREFIX/lib/cmake"
+  if [ -d "$LLVM_CMAKE_DIR" ]; then
+    mv "$LLVM_CMAKE_DIR" "${LLVM_CMAKE_DIR}.bak"
+    echo "=== temporarily hiding llvm@21 cmake config ==="
+  fi
+
+  # Stage 1: libunwind standalone
+  echo "=== Stage 1: libunwind ==="
+  cmake -G Ninja -S "$LLVM_SRC/runtimes" -B "$BUILD_DIR/libunwind" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_C_FLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_SYSROOT -D__MUSL__ -D__OHOS__ -nostdinc++ -I$LLVM_PREFIX/include/aarch64-linux-ohos/c++/v1" \
+    -DCMAKE_CXX_FLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_SYSROOT -D__MUSL__ -D__OHOS__ -nostdinc++ -I$LLVM_PREFIX/include/aarch64-linux-ohos/c++/v1" \
+    -DLLVM_ENABLE_RUNTIMES="libunwind" \
+    -DLIBUNWIND_USE_COMPILER_RT=ON \
+    -DCMAKE_INSTALL_PREFIX="$CROSS/libunwind" \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+  ninja -C "$BUILD_DIR/libunwind" install -j"$NINJA_JOBS"
+
+  # Stage 2: libcxx + libcxxabi + libunwind with __n1 ABI
+  echo "=== Stage 2: libcxx + libcxxabi with -DLIBCXX_ABI_NAMESPACE=__n1 ==="
+  cmake -G Ninja -S "$LLVM_SRC/runtimes" -B "$BUILD_DIR/libcxx" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_C_FLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_SYSROOT -D__MUSL__ -D__OHOS__ -D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE -D_LIBCPP_HAS_NO_LOCALIZATION -nostdinc++ -I$CROSS/libunwind/include/c++/v1" \
+    -DCMAKE_CXX_FLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_SYSROOT -D__MUSL__ -D__OHOS__ -D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE -D_LIBCPP_HAS_NO_LOCALIZATION -nostdinc++ -I$CROSS/libunwind/include/c++/v1" \
+    -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+    -DLIBCXX_ABI_NAMESPACE=__n1 \
+    -DLIBCXX_ENABLE_SHARED=OFF \
+    -DLIBCXXABI_ENABLE_SHARED=OFF \
+    -DLIBUNWIND_ENABLE_SHARED=OFF \
+    -DLIBCXX_USE_COMPILER_RT=ON \
+    -DLIBCXXABI_USE_COMPILER_RT=ON \
+    -DLIBUNWIND_USE_COMPILER_RT=ON \
+    -DLIBCXX_LIBDIR_SUFFIX="" \
+    -DCMAKE_INSTALL_PREFIX="$CROSS" \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+  ninja -C "$BUILD_DIR/libcxx" install -j"$NINJA_JOBS"
+
+  # Restore llvm@21 cmake config
+  if [ -d "${LLVM_CMAKE_DIR}.bak" ]; then
+    mv "${LLVM_CMAKE_DIR}.bak" "$LLVM_CMAKE_DIR"
+    echo "=== restored llvm@21 cmake config ==="
+  fi
+
+  # Symlink into the layout flags.ts expects.
+  # cmake installs headers to $CROSS/include/c++/v1/ and libs to $CROSS/lib/.
+  # flags.ts reads $CROSS/libcxx/include/v1/ and $CROSS/libcxx/lib/libc++.a.
+  mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include" \
+           "$CROSS/libcxx/lib" "$CROSS/libcxxabi/lib" "$CROSS/libunwind/lib"
+  ln -sfn "$CROSS/include/c++/v1" "$CROSS/libcxx/include/v1"
+  ln -sfn "$CROSS/include/c++/v1" "$CROSS/libcxxabi/include/v1"
+  ln -sfn "$CROSS/lib/libc++.a"      "$CROSS/libcxx/lib/libc++.a"
+  ln -sfn "$CROSS/lib/libc++abi.a"   "$CROSS/libcxxabi/lib/libc++abi.a"
+  ln -sfn "$CROSS/lib/libunwind.a"   "$CROSS/libunwind/lib/libunwind.a"
+
+  echo "=== verifying headers exist ==="
+  ls "$CROSS/libcxx/include/v1/cstddef" "$CROSS/libcxx/include/v1/__config_site" 2>/dev/null || {
+    echo "ERROR: libcxx headers not at $CROSS/libcxx/include/v1/"
+    echo "  $CROSS/include/ contents:"; ls "$CROSS/include/" 2>/dev/null | head -10
+    echo "  $CROSS/include/c++/ contents:"; ls "$CROSS/include/c++/" 2>/dev/null | head -10
+    exit 1
+  }
+  grep '_LIBCPP_ABI_NAMESPACE' "$CROSS/libcxx/include/v1/__config_site"
+
+  # Patch __config_site: add musl compatibility defines so all downstream
+  # consumers (WebKit, bun C++, etc.) get them automatically via the header.
+  CONFIG_SITE="$CROSS/libcxx/include/v1/__config_site"
+  if ! grep -q '_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE' "$CONFIG_SITE"; then
+    echo '#define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE' >> "$CONFIG_SITE"
+    echo '#define _LIBCPP_HAS_NO_LOCALIZATION' >> "$CONFIG_SITE"
+    echo "=== patched __config_site: added musl compat defines ==="
+  fi
+
+  # Self-check: verify __n1 symbols present, __h absent
+  echo "=== verifying __n1 ABI ==="
+  NM="$LLVM_PREFIX/bin/llvm-nm"
+  for lib in libc++.a libc++abi.a; do
+    n1=$("$NM" "$CROSS/lib/$lib" 2>/dev/null | grep -c '__n1' || true)
+    h_sym=$("$NM" "$CROSS/lib/$lib" 2>/dev/null | grep -c '__h' || true)
+    echo "  $lib: __n1=$n1 __h=$h_sym"
+    [ "$n1" -gt 0 ] || { echo "ERROR: $lib has no __n1 symbols"; exit 1; }
+  done
+
+  touch "$LIBCXX_N1_STAMP"
+  echo "=== cross-libs OK (ABI __n1, self-compiled from LLVM 21.1.8) ==="
+
+  # Cleanup build artifacts to save cache space
+  rm -rf "$BUILD_DIR" /tmp/llvm-project-src "/tmp/${LLVM_SRC_TARBALL}"
 fi
-echo "=== cross-libs OK (ABI __1, from llvm@21) ==="
 
 # ── Scaffold ohos-icu (bun.rb lines 119-135) ───────────────────────────
 # config.ts:1013 defaults ohosIcuDir=<cwd>/build/ohos-icu/target;

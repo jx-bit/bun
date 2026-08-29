@@ -236,7 +236,14 @@ jobs:
         id: webkit-cache
         with:
           path: build/release-ohos/deps/WebKit
-          key: webkit-ohos-container-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-1
+          key: webkit-ohos-container-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-n1
+
+      - name: Cache __n1 cross-libs
+        uses: actions/cache@v4
+        id: cross-libs-cache
+        with:
+          path: build/ohos-cross-libs
+          key: ohos-libcxx-n1-llvm21.1.8-1
 
       # ── bun install (root + node-fallbacks) ──────────────────────
       # BUN_INSTALL_IGNORE_SCRIPTS=1 skips esbuild's postinstall (install.js),
@@ -296,16 +303,16 @@ jobs:
           file "$OUT" | grep -iqE "ELF.*(arm64|aarch64)" || { echo "ERROR: not ARM64 ELF"; exit 1; }
           echo "=== NEEDED libs ==="
           readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
-          # Correctness criterion (ohos-symbols-dyn-fix + ohos-v8-abi-fix):
-          # v8 must NOT be an undefined symbol — else the device tries to
-          # resolve it against the device's __n1 libcxx and crashes with
-          # "v8::Array::New... symbol not found". symbols.dyn local:* → only
-          # Bun__dlopen exported → v8 UND must be 0.
+          # v8 symbols are DEFINED in bun's C++ V8 compat layer (not UND).
+          # v8 UND must be 0 — otherwise the device tries to resolve v8
+          # against its libc++_shared.so and crashes on ABI mismatch.
           echo "=== v8 undefined symbols (want 0) ==="
           v8_und=$(readelf --dyn-syms "$OUT" 2>/dev/null | grep -c "_ZN2v8.*UND" || true)
           echo "v8 UND = $v8_und"
-          [ "$v8_und" -eq 0 ] || { echo "ERROR: v8 UND symbols present — symbols.dyn/flags.ts regression"; exit 1; }
-          echo "=== exported symbols (want only Bun__dlopen) ==="
+          [ "$v8_und" -eq 0 ] || { echo "ERROR: v8 UND symbols present"; exit 1; }
+          echo "=== exported symbol count ==="
+          readelf --dyn-syms "$OUT" 2>/dev/null | grep -c "GLOBAL.*T " || true
+          echo "=== sample exported symbols ==="
           readelf --dyn-syms "$OUT" 2>/dev/null | grep -E "GLOBAL.*T " | head -5
           echo "=== validation OK ==="
 
