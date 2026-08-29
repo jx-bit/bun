@@ -36,18 +36,17 @@ impl Symlinker {
         match strategy {
             Strategy::IgnoreFailure => {
                 return match self.symlink() {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(true),
                     Err(symlink_err) => match symlink_err.get_errno() {
                         Errno::ENOENT => {
                             let Some(dest_parent) = self.dest.dirname() else {
-                                return Ok(());
+                                return Ok(false);
                             };
 
                             let _ = Fd::cwd().make_path(dest_parent);
-                            let _ = self.symlink();
-                            Ok(())
+                            Ok(self.symlink().is_ok())
                         }
-                        _ => Ok(()),
+                        _ => Ok(false),
                     },
                 };
             }

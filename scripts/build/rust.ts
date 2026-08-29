@@ -56,6 +56,7 @@ export function rustTriple(os: OS, arch: Arch, abi: Abi | undefined): string {
   if (os === "darwin") return `${rustArch}-apple-darwin`;
   if (os === "windows") return `${rustArch}-pc-windows-msvc`;
   if (os === "freebsd") return `${rustArch}-unknown-freebsd`;
+  if (os === "ohos") return `${rustArch}-unknown-linux-ohos`;
   // linux
   assert(abi !== undefined, "linux build missing abi");
   if (abi === "android") return `${rustArch}-linux-android`;
@@ -96,6 +97,7 @@ export const allRustTargets = [
   "aarch64-pc-windows-msvc",
   "x86_64-unknown-freebsd",
   "aarch64-unknown-freebsd",
+  "aarch64-unknown-linux-ohos",
 ] as const;
 
 /**
@@ -105,7 +107,7 @@ export const allRustTargets = [
  * triple in CI's matrix is aarch64-freebsd.
  */
 export function rustTargetIsTier3(triple: string): boolean {
-  return triple === "aarch64-unknown-freebsd";
+  return triple === "aarch64-unknown-freebsd" || triple === "aarch64-unknown-linux-ohos";
 }
 
 /**
@@ -498,6 +500,9 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
   // issue 30205), turning benign at-exit state into reported leaks.
   if (!cfg.asan) rustflags.push("-Zshare-generics=y");
   rustflags.push(...rustCpuTargetFlags(cfg));
+  // OHOS: sign the binary at link time via --code-sign (requires the OHOS
+  // signing linker, provided by the OHOS SDK's llvm/bin/ld.lld).
+  if (cfg.ohos) rustflags.push("-Clink-arg=--code-sign");
   // `bun_core::build_options::ENABLE_ASAN = cfg!(bun_asan)` — must agree with
   // the C++ `ASAN_ENABLED` macro so Global::exit() picks the same libc exit
   // path (`exit` vs `quick_exit`) that c-bindings.cpp registered Bun__onExit on.
