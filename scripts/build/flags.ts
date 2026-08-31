@@ -225,7 +225,7 @@ export const globalFlags: Flag[] = [
     desc: "OHOS: suppress WebKit cmakeconfig vs PlatformHave.h HAVE_INT128_T conflict",
   },
   {
-    flag: c => [`-nostdinc++`, `-I${c.ohosCrossLibs}/libcxx/include/v1`, `-I${c.ohosCrossLibs}/libcxxabi/include`],
+    flag: c => [`-nostdinc++`, `-I${c.ohosCrossLibs}/libcxx/include/v1`, `-I${c.ohosCrossLibs}/libcxxabi/include`, `-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE`, `-D_LIBCPP_HAS_NO_LOCALIZATION`],
     when: c => c.ohos && !!c.ohosCrossLibs,
     lang: "cxx",
     desc: "OHOS: use musl-compatible LLVM 22 libc++ headers",
@@ -1315,37 +1315,18 @@ export const linkerFlags: Flag[] = [
     desc: "OHOS: LLD alignment warnings → ignore (SCTLR_EL1.A is 0 on aarch64)",
   },
   {
-    // OHOS: restrict .dynsym to Bun__dlopen only (local: *;). Exporting the
-    // full v8/napi/uv symbol set (dynamic-list + linker.lds v8::*) makes the
-    // binary depend on device-side symbol resolution, which breaks when the
-    // built-in v8::Array::New mangling (__1 vs __n1) doesn't match the
-    // device libc++_shared.so. With local: *; the device never resolves
-    // v8/napi/uv symbols, so ABI is irrelevant — matches sb-fy-sb's working
-    // build. Also saves ~1.8MB/process (20K → 459 .dynsym entries, avoids
-    // OOM on the 31GB no-swap device during full test runs).
-    // --undefined keeps uSockets SSL symbols that gc-sections would strip
-    // (referenced only from Rust) + Bun__dlopen + the .bun section.
+    // OHOS: mirror the Linux link block — full dynamic-list + version script.
+    // symbols.dyn exports v8/napi/uv symbols; linker.lds controls visibility.
+    // The OHOS shim symbols in linker.lds are UND on Linux → needs
+    // --undefined-version (added in the Linux block below).
     flag: c => [
-      "-Wl,--gc-sections",
-      "-Wl,--export-dynamic",
-      `-Wl,--version-script=${c.cwd}/src/symbols.dyn`,
-      "-Wl,--undefined=us_ssl_pop_pending_session",
-      "-Wl,--undefined=us_ssl_pop_pending_keylog",
-      "-Wl,--undefined=us_ssl_enable_pending_events",
-      "-Wl,--undefined=us_socket_write_check_error",
-      "-Wl,--undefined=us_internal_ssl_loop_state_save",
-      "-Wl,--undefined=us_internal_ssl_loop_state_restore",
-      "-Wl,--undefined=us_ssl_parse_pkcs12",
-      "-Wl,--undefined=us_ssl_ctx_add_ca_cert",
-      "-Wl,--undefined=us_socket_get_tos",
-      "-Wl,--undefined=us_socket_sni_resolve",
-      "-Wl,--undefined=us_socket_set_tos",
-      "-Wl,--undefined=us_socket_tls_feed",
-      "-Wl,--undefined=Bun__dlopen",
-      "-Wl,--undefined=BUN_COMPILED",
+      "-Wl,-Bsymbolic-functions",
+      "-rdynamic",
+      `-Wl,--dynamic-list=${c.cwd}/src/symbols.dyn`,
+      `-Wl,--version-script=${c.cwd}/src/linker.lds`,
     ],
-    when: c => c.release && c.ohos,
-    desc: "OHOS: restrict .dynsym to Bun__dlopen (local:*) + force-keep uSockets SSL/.bun symbols",
+    when: c => c.ohos,
+    desc: "OHOS: dynamic symbol list + version script (mirror linux block; exposes napi_/node_api_ for .node dlopen)",
   },
 
   // ─── Linux ───
@@ -1568,6 +1549,9 @@ export const linkerFlags: Flag[] = [
       "-rdynamic",
       `-Wl,--dynamic-list=${c.cwd}/src/symbols.dyn`,
       `-Wl,--version-script=${c.cwd}/src/linker.lds`,
+      // linker.lds contains OHOS shim symbols (syscall, close_range, etc.)
+      // that are UND on Linux. lld errors without this flag.
+      "-Wl,--undefined-version",
     ],
     when: c => c.linux,
     desc: "Dynamic symbol list + version script",
