@@ -20,6 +20,13 @@ BUN_1.2 {
 	linkat;
 	symlinkat;
 	splice;
+	getaddrinfo;
+	epoll_ctl;
+	epoll_wait;
+	epoll_pwait;
+	poll;
+	ppoll;
+	close;
 
 
   uv_accept;
