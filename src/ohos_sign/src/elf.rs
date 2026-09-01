@@ -21,7 +21,10 @@ impl fmt::Display for SignError {
             SignError::NoSectionHeaders => write!(f, "ELF has no section header table"),
             SignError::ShstrtabOutOfBounds => write!(f, "shstrtab out of bounds"),
             SignError::AlreadySigned => {
-                write!(f, "already has .codesign section; strip first or use --force")
+                write!(
+                    f,
+                    "already has .codesign section; strip first or use --force"
+                )
             }
             SignError::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -59,11 +62,19 @@ fn write_u64(buf: &mut [u8], off: usize, v: u64) {
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
-    (v + a - 1) / a * a
+    v.div_ceil(a) * a
 }
 
-/// Validate header and return (e_shoff, e_shnum, e_shstrndx, e_shentsize).
-fn parse_header(elf: &[u8]) -> Result<(u64, u16, u16, u16), SignError> {
+/// Parsed ELF section header table metadata.
+struct SectionHeaderTable {
+    e_shoff: u64,
+    e_shnum: u16,
+    e_shstrndx: u16,
+    e_shentsize: u16,
+}
+
+/// Validate header and return section header table metadata.
+fn parse_header(elf: &[u8]) -> Result<SectionHeaderTable, SignError> {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 {
         return Err(SignError::NotElf64);
     }
@@ -83,17 +94,22 @@ fn parse_header(elf: &[u8]) -> Result<(u64, u16, u16, u16), SignError> {
     if sht_end > elf.len() {
         return Err(SignError::NoSectionHeaders);
     }
-    Ok((e_shoff, e_shnum, e_shstrndx, e_shentsize))
+    Ok(SectionHeaderTable {
+        e_shoff,
+        e_shnum,
+        e_shstrndx,
+        e_shentsize,
+    })
 }
 
 /// Read section header entry at index i with given entry size.
-fn sh_entry<'a>(elf: &'a [u8], e_shoff: usize, i: usize, e_shentsize: usize) -> &'a [u8] {
+fn sh_entry(elf: &[u8], e_shoff: usize, i: usize, e_shentsize: usize) -> &[u8] {
     &elf[e_shoff + i * e_shentsize..e_shoff + (i + 1) * e_shentsize]
 }
 
 /// Find the index of a section by name in the shstrtab; returns offset of that section entry.
-fn find_section_by_name<'a>(
-    elf: &'a [u8],
+fn find_section_by_name(
+    elf: &[u8],
     e_shoff: u64,
     e_shnum: u16,
     e_shstrndx: u16,
@@ -110,30 +126,46 @@ fn find_section_by_name<'a>(
     for i in 0..e_shnum as usize {
         let entry = sh_entry(elf, e_shoff as usize, i, e_shentsize);
         let name_off = read_u32(entry, 0) as usize;
-        if name_off + name.len() <= shstr_sz {
-            if &elf[shstr_off + name_off..shstr_off + name_off + name.len()] == name {
-                return Some(e_shoff as usize + i * e_shentsize);
-            }
+        if name_off + name.len() <= shstr_sz
+            && &elf[shstr_off + name_off..shstr_off + name_off + name.len()] == name
+        {
+            return Some(e_shoff as usize + i * e_shentsize);
         }
     }
     None
 }
 
 pub fn has_codesign_section(elf: &[u8]) -> bool {
-    let Ok((e_shoff, e_shnum, e_shstrndx, e_shentsize)) = parse_header(elf) else {
+    let Ok(header) = parse_header(elf) else {
         return false;
     };
-    find_section_by_name(elf, e_shoff, e_shnum, e_shstrndx, e_shentsize, CODESIGN_NAME).is_some()
+    find_section_by_name(
+        elf,
+        header.e_shoff,
+        header.e_shnum,
+        header.e_shstrndx,
+        header.e_shentsize,
+        CODESIGN_NAME,
+    )
+    .is_some()
 }
 
 /// Strip .codesign section. Returns true if a section was removed.
 /// Rebuilds the ELF in-place by rewriting shstrtab and SHT without the removed entry.
 pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
-    let (e_shoff, e_shnum, e_shstrndx, e_shentsize) = parse_header(elf)?;
-    let e_shentsize = e_shentsize as usize;
-    let Some(cs_entry_off) =
-        find_section_by_name(elf, e_shoff, e_shnum, e_shstrndx, e_shentsize as u16, CODESIGN_NAME)
-    else {
+    let header = parse_header(elf)?;
+    let e_shoff = header.e_shoff;
+    let e_shnum = header.e_shnum;
+    let e_shstrndx = header.e_shstrndx;
+    let e_shentsize = header.e_shentsize as usize;
+    let Some(cs_entry_off) = find_section_by_name(
+        elf,
+        e_shoff,
+        e_shnum,
+        e_shstrndx,
+        e_shentsize as u16,
+        CODESIGN_NAME,
+    ) else {
         return Ok(false);
     };
     let cs_idx = (cs_entry_off - e_shoff as usize) / e_shentsize;
@@ -190,8 +222,16 @@ pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
     let shstr_entry_off_in_new = new_shstrndx * 64;
     if new_shstrndx < cs_idx {
         // entry index unchanged, update sh_offset and sh_size
-        write_u64(elf, new_sht_off_usize + shstr_entry_off_in_new + 24, new_shstr_off);
-        write_u64(elf, new_sht_off_usize + shstr_entry_off_in_new + 32, new_shstr.len() as u64);
+        write_u64(
+            elf,
+            new_sht_off_usize + shstr_entry_off_in_new + 24,
+            new_shstr_off,
+        );
+        write_u64(
+            elf,
+            new_sht_off_usize + shstr_entry_off_in_new + 32,
+            new_shstr.len() as u64,
+        );
     } else {
         // index shifted down by 1
         let adj = (new_shstrndx - 1) * 64;
@@ -210,7 +250,7 @@ pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
     }
 
     // Update ELF header: e_shoff, e_shnum; keep e_shstrndx (same index if shstrndx < cs_idx)
-    write_u64(elf, E_SHOFF, new_sht_off as u64);
+    write_u64(elf, E_SHOFF, new_sht_off);
     write_u16(elf, E_SHNUM, new_shnum);
     // If cs_idx < e_shstrndx, shstrndx shifts down
     if cs_idx < e_shstrndx as usize {
@@ -224,8 +264,11 @@ pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
 /// Inject a 4KB placeholder .codesign section.
 /// Returns (new_elf_bytes, cs_section_file_offset).
 fn inject_codesign_section(elf: &[u8]) -> Result<(Vec<u8>, u64), SignError> {
-    let (e_shoff, e_shnum, e_shstrndx, e_shentsize) = parse_header(elf)?;
-    let entsz = e_shentsize as usize;
+    let header = parse_header(elf)?;
+    let e_shoff = header.e_shoff;
+    let e_shnum = header.e_shnum;
+    let e_shstrndx = header.e_shstrndx;
+    let entsz = header.e_shentsize as usize;
 
     let shstr_e = e_shoff as usize + e_shstrndx as usize * entsz;
     let shstr_off = read_u64(elf, shstr_e + 24);
@@ -325,14 +368,14 @@ pub fn sign(elf: &[u8], force: bool) -> Result<Vec<u8>, SignError> {
     payload[8 + descriptor::SIZE..].copy_from_slice(&signature);
 
     // Write payload then merkle tree bytes into the cs section
-    let cs_section = &mut tmp[cs_off as usize..cs_off as usize + PAGE as usize];
+    let cs_section = &mut tmp[cs_off as usize..cs_off as usize + PAGE];
     cs_section[..payload_len].copy_from_slice(&payload);
     // Write merkle tree intermediate hashes after the signature, as the
     // upstream binary-sign-tool does. The section is 4KB; if tree bytes
     // exceed available space they are silently truncated (the kernel does
     // not verify the tree for self-signed binaries).
     let tree_start = payload_len;
-    let tree_max = PAGE as usize - tree_start;
+    let tree_max = PAGE - tree_start;
     if !tree_bytes.is_empty() {
         let n = tree_bytes.len().min(tree_max);
         cs_section[tree_start..tree_start + n].copy_from_slice(&tree_bytes[..n]);

@@ -75,7 +75,10 @@ fn sign_rejects_non_64byte_section_header_entries() {
     // silently misparsing the section header table.
     elf[0x3a..0x3c].copy_from_slice(&40u16.to_le_bytes());
     let result = sign_selfsign(&elf);
-    assert!(result.is_err(), "sign must reject a non-64-byte e_shentsize");
+    assert!(
+        result.is_err(),
+        "sign must reject a non-64-byte e_shentsize"
+    );
 }
 
 #[test]
@@ -97,7 +100,10 @@ fn sign_rejects_truncated_section_header_table() {
 fn sign_adds_codesign_section() {
     let elf = tiny_elf64();
     let signed = sign_selfsign(&elf).expect("sign failed");
-    assert!(has_codesign(&signed), ".codesign section must be present after signing");
+    assert!(
+        has_codesign(&signed),
+        ".codesign section must be present after signing"
+    );
 }
 
 #[test]
@@ -174,7 +180,11 @@ fn codesign_section_offset(elf: &[u8]) -> u64 {
         let name_off = u32::from_le_bytes(elf[e..e + 4].try_into().unwrap()) as u64;
         if name_off < shstr_sz {
             let name_start = (shstr_off + name_off) as usize;
-            let name = elf[name_start..].iter().take_while(|&&b| b != 0).copied().collect::<Vec<_>>();
+            let name = elf[name_start..]
+                .iter()
+                .take_while(|&&b| b != 0)
+                .copied()
+                .collect::<Vec<_>>();
             if name == b".codesign" {
                 return u64::from_le_bytes(elf[e + 24..e + 32].try_into().unwrap());
             }

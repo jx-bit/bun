@@ -59,6 +59,9 @@ jobs:
           ninja-targets: codegen clone-lolhtml clone-rust-argon2
 
       - name: cargo clippy
+        # `-D warnings` (set in rust:clippy) upgrades clippy warnings to
+        # errors — same ratchet as mordant's baseline: existing warnings
+        # must be fixed before new ones can be introduced.
         env:
           BUN_CODEGEN_DIR: ${{ github.workspace }}/build/debug/codegen
         run: bun run rust:clippy
