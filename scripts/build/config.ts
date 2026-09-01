@@ -852,23 +852,18 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   // LTO: default on for CI release non-asan non-assertions builds on Linux
   // and on darwin cross-compiles. Windows is NOT in the default even though
   // the windows x64 cross toolchain fully supports ThinLTO + cross-language
-  // LTO (and `--lto=on` still builds that way): LLVM's ThinLTO backend
-  // pipeline miscompiles JSC on x86-64 at -O1 and above — JS-visible
-  // corruption in the bundler tests, the same family as the linux x86-64
-  // ThinLTO miscompile that keeps linux on full LTO — and the regular-LTO
-  // route for COFF (full-LTO WebKit windows artifacts + a COFF rust summary
-  // fix-up) hasn't been built yet. Re-enable the default once one of those
-  // lands. The -lto WebKit prebuilts only exist for the cross toolchain, so
-  // native windows/darwin lanes are non-LTO regardless.
-  const ltoDefault = release && (linux || darwinCross) && ci && !assertions && !asan;
+  // LTO: default on for CI release non-asan non-assertions builds across
+  // linux, darwin-cross, and windows-cross. All three use ThinLTO (the JSC
+  // ThinLTO miscompile was fixed upstream). The -lto WebKit prebuilts only
+  // exist for the cross toolchain, so native windows/darwin stay non-LTO.
+  const windowsCross = windows && host.os !== "windows";
+  const ltoDefault = release && (linux || darwinCross || windowsCross) && ci && !assertions && !asan;
   let lto = partial.lto ?? ltoDefault;
   // ASAN and LTO don't mix — ASAN wins (silently, no warn — config is explicit).
   // Android: no LTO prebuilt WebKit exists; force off so the right tarball is fetched.
-  // Windows arm64 / baseline: same — oven-sh/WebKit ships no
-  // bun-webkit-windows-arm64-lto (LLVM's CodeView emitter aborts on ARM64
-  // NEON tuple registers during LTO codegen), and the pinned WEBKIT_VERSION
-  // predates the -baseline-lto variant.
-  if ((asan && lto) || abi === "android" || (windows && (arm64 || baseline))) {
+  // Windows arm64: oven-sh/WebKit ships no bun-webkit-windows-arm64-lto
+  // (LLVM's CodeView emitter aborts on ARM64 NEON tuple registers).
+  if ((asan && lto) || abi === "android" || (windows && arm64)) {
     lto = false;
   }
 

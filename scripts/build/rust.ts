@@ -103,11 +103,16 @@ export const allRustTargets = [
 /**
  * Tier 3 targets — rustup ships no prebuilt `rust-std` for these, so
  * `rustup target add` would fail and cargo needs `-Zbuild-std` (which in turn
- * needs the `rust-src` component). As of nightly-2026-05, the only Tier 3
+ * needs the `rust-src` component). As of nightly-2026-07-20, the only Tier 3
  * triple in CI's matrix is aarch64-freebsd.
+ *
+ * Note: aarch64-unknown-linux-ohos was previously listed here as Tier 3,
+ * but it was promoted to Tier 2 (with Host Tools) upstream — it has prebuilt
+ * `rust-std` (verified: static.rust-lang.org/dist/2026-07-20/rust-std-nightly-aarch64-unknown-linux-ohos.tar.gz
+ * returns HTTP 200). See https://doc.rust-lang.org/nightly/rustc/platform-support/openharmony.html
  */
 export function rustTargetIsTier3(triple: string): boolean {
-  return triple === "aarch64-unknown-freebsd" || triple === "aarch64-unknown-linux-ohos";
+  return triple === "aarch64-unknown-freebsd";
 }
 
 /**
