@@ -1,7 +1,7 @@
-mod sha256;
-mod merkle;
 mod descriptor;
 mod elf;
+mod merkle;
+mod sha256;
 
 pub use elf::SignError;
 
@@ -45,6 +45,10 @@ pub fn strip_codesign(elf: &mut Vec<u8>) -> Result<bool, SignError> {
 }
 
 /// Sign a file in-place. Creates a `.unsigned` sibling during the operation.
+// ohos_sign is a standalone crate (no bun_sys dependency); std::fs is the
+// only available file I/O. The clippy.toml disallowed-methods exemption
+// applies only to this crate.
+#[allow(clippy::disallowed_methods)]
 pub fn sign_selfsign_inplace(path: &std::path::Path) -> Result<(), SignError> {
     let bytes = std::fs::read(path)?;
     let signed = sign_selfsign(&bytes)?;
@@ -53,6 +57,7 @@ pub fn sign_selfsign_inplace(path: &std::path::Path) -> Result<(), SignError> {
 }
 
 /// Sign a file in-place, stripping any existing `.codesign` section first.
+#[allow(clippy::disallowed_methods)]
 pub fn sign_selfsign_inplace_with_strip(path: &std::path::Path) -> Result<(), SignError> {
     let bytes = std::fs::read(path)?;
     let signed = sign_selfsign_with_strip(&bytes)?;
