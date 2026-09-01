@@ -83,7 +83,10 @@ function withAbi(cfg: Config, abi: Abi): Config {
 }
 
 describe("allRustTargets", () => {
-  test("is exactly the set of triples .buildkite/ci.mjs builds", () => {
+  // OHOS builds via GitHub Actions (ohos-build-github.yml), not Buildkite.
+  const nonBuildkiteTargets = ["aarch64-unknown-linux-ohos"];
+
+  test("is exactly the set of triples .buildkite/ci.mjs builds, plus non-Buildkite targets", () => {
     const ciScript = readFileSync(join(repoRoot, ".buildkite", "ci.mjs"), "utf8");
     const matrix = /^const buildPlatforms = \[\n([\s\S]*?)^\];/m.exec(ciScript);
     if (matrix === null) throw new Error("buildPlatforms not found in .buildkite/ci.mjs");
@@ -108,7 +111,8 @@ describe("allRustTargets", () => {
     });
 
     const listed: string[] = [...allRustTargets].sort();
-    expect(listed).toEqual([...new Set(built)].sort());
+    const expected = [...new Set(built), ...nonBuildkiteTargets].sort();
+    expect(listed).toEqual(expected);
   });
 
   test("rust-toolchain.toml preinstalls std for exactly the triples that have a prebuilt one", () => {

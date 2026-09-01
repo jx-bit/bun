@@ -566,9 +566,9 @@ export const globalFlags: Flag[] = [
     // miscompiling ThinLTO backends. Revisit ThinLTO once the bad pass is
     // isolated — the repro is `bun -e 'require("axobject-query")'` failing
     // in the DFG tier.
-    flag: "-flto=full",
-    when: c => c.unix && !c.darwin && c.lto,
-    desc: "Full link-time optimization (linux: ThinLTO miscompiles JSC, see comment)",
+    flag: "-flto=thin",
+    when: c => c.unix && c.lto,
+    desc: "Thin link-time optimization",
   },
   {
     // Windows (cross) uses ThinLTO like darwin: clang-cl accepts -flto=thin
@@ -611,7 +611,7 @@ export const globalFlags: Flag[] = [
     // ThinLTO graph can't drift if that ever changes. Not linux: full LTO
     // (no per-module summaries, so the flag is meaningless there).
     flag: "-fno-split-lto-unit",
-    when: c => (c.darwin || c.windows) && c.lto,
+    when: c => c.lto,
     desc: "Index-based WPD: keep type metadata in the ThinLTO summaries, no regular-LTO half",
   },
 
@@ -972,9 +972,9 @@ export const linkerFlags: Flag[] = [
     desc: "LTO at link time (matches compile-side -flto=thin)",
   },
   {
-    flag: ["-flto=full", "-fwhole-program-vtables", "-fforce-emit-vtables"],
+    flag: ["-flto=thin", "-fwhole-program-vtables", "-fforce-emit-vtables"],
     when: c => c.unix && !c.darwin && c.lto,
-    desc: "LTO at link time (matches compile-side -flto=full)",
+    desc: "LTO at link time (matches compile-side -flto=thin)",
   },
   {
     // Without -O at link time, clang's driver defaults LTO codegen to -O2.
