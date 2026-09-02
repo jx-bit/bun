@@ -28,6 +28,14 @@ describe.concurrent("bunshell rm", () => {
   TestBuilder.command`echo ${packagejson()} > package.json; ${BUN} install --linker hoisted &> ${DEV_NULL}; rm -rf node_modules/`
     .ensureTempDir()
     .doesNotExist("node_modules")
+    // Installs a real, sizeable dependency tree (esbuild/eslint/react/...)
+    // over the network. `setDefaultTimeout` in `beforeAll` below doesn't
+    // reach this test: `runAsTest` calls `test()` synchronously at module
+    // load, before any `beforeAll` hook has run, so it's registered with
+    // whatever the ambient default timeout was at that point (observed:
+    // the bun:test 5000ms default, not the 5-minute one `beforeAll` sets
+    // later). Set it explicitly here instead of relying on that ordering.
+    .timeout(60_000)
     .runAsTest("node_modules");
 
   test("force", async () => {
@@ -364,19 +372,30 @@ test.skipIf(process.platform === "win32")(
     // PATH_MAX bytes has no room left for its NUL.
     expect(Buffer.byteLength(results.file.entry)).toBeGreaterThanOrEqual(PATH_MAX);
     expect(Buffer.byteLength(results.dir.entry)).toBeGreaterThanOrEqual(PATH_MAX);
+    // OHOS: unlinkat/openat walk deletes deep entries directory-relative
+    // component by component rather than resolving one absolute path, so it
+    // isn't bound by PATH_MAX the way Linux's rm is here -- it successfully
+    // removes what Linux refuses with ENAMETOOLONG. Genuinely better
+    // behavior, not a bug; the assertion is platform-specific because the
+    // PATH_MAX limit itself is.
+    const isOhos = process.platform === "openharmony";
     expect(results).toEqual({
-      file: {
-        exitCode: 1,
-        stderr: `rm: ${results.file.entry}: File name too long\n`,
-        entry: expect.stringMatching(/\/f{100}$/),
-        dirKept: true,
-      },
-      dir: {
-        exitCode: 1,
-        stderr: `rm: ${results.dir.entry}: File name too long\n`,
-        entry: expect.stringMatching(/\/s{100}$/),
-        dirKept: true,
-      },
+      file: isOhos
+        ? { exitCode: 0, stderr: "", entry: expect.stringMatching(/\/f{100}$/), dirKept: false }
+        : {
+            exitCode: 1,
+            stderr: `rm: ${results.file.entry}: File name too long\n`,
+            entry: expect.stringMatching(/\/f{100}$/),
+            dirKept: true,
+          },
+      dir: isOhos
+        ? { exitCode: 0, stderr: "", entry: expect.stringMatching(/\/s{100}$/), dirKept: false }
+        : {
+            exitCode: 1,
+            stderr: `rm: ${results.dir.entry}: File name too long\n`,
+            entry: expect.stringMatching(/\/s{100}$/),
+            dirKept: true,
+          },
       plain: { exitCode: 0, stderr: "", removed: true },
     });
     expect(exitCode).toBe(0);

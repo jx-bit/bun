@@ -930,7 +930,13 @@ export class Client extends EventEmitter {
       this.#proc.send({ type: "exit" });
     } catch (e) {}
     await this.#proc.exited;
-    if (this.exitCode !== null && this.exitCode !== "0") {
+    // BUG: this used to compare against the string "0", but `onExit` (below)
+    // stores `exitCode` as-is from Bun.spawn's numeric callback param for a
+    // real exit code (only the signalCode/"unknown" branches ever assign a
+    // string) -- `0 !== "0"` is strict-unequal in JS, so every clean,
+    // intentional exit (the `{type:"exit"}` -> `process.exit(0)` path above)
+    // was misreported as a crash.
+    if (this.exitCode !== null && this.exitCode !== 0) {
       let code;
       if (exitCodeMapStrings[this.exitCode]) {
         code = ": " + JSON.stringify(exitCodeMapStrings[this.exitCode]);

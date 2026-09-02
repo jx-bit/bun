@@ -30,11 +30,16 @@ afterEach(() => {
 
 test.skipIf(isWindows)("the configure-time rustc probe pins the rustup proxy to the pinned channel", () => {
   using dir = tempDir("build-rustc-probe", {
+    // `echo` (not `printf`) so this only needs a shell builtin: with PATH
+    // emptied to keep no real rustup/cargo in reach, a shell whose `printf`
+    // isn't built in (e.g. OHOS's /bin/sh, which resolves it externally via
+    // $PATH like any other command) can't find it and the probe silently
+    // sees no rustc output at all.
     "bin/rustc": [
       "#!/bin/sh",
       'case "$1" in',
-      '  --print) printf "%s\\n" "sysroot-for:${RUSTUP_TOOLCHAIN:-unset}" ;;',
-      '  -vV) printf "host: host-for:%s\\nLLVM version: 22.1.4\\n" "${RUSTUP_TOOLCHAIN:-unset}" ;;',
+      '  --print) echo "sysroot-for:${RUSTUP_TOOLCHAIN:-unset}" ;;',
+      '  -vV) echo "host: host-for:${RUSTUP_TOOLCHAIN:-unset}"; echo "LLVM version: 22.1.4" ;;',
       "esac",
       "",
     ].join("\n"),
