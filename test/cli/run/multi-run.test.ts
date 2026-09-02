@@ -1,7 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { realpathSync } from "fs";
 import { bunEnv, bunExe, isOHOS, isWindows, tempDir } from "harness";
 import path from "path";
+
+// This file spawns several real subprocesses per test (often concurrently,
+// via describe.concurrent); OHOS's slower fork/spawn overhead pushes some of
+// them past the 5000ms default (observed 5.0-7.6s even running in isolation,
+// not just under concurrent load).
+if (isOHOS) setDefaultTimeout(20_000);
 
 // Helper: spawn bun with multi-run flags, returns { stdout, stderr, exitCode }
 async function runMulti(

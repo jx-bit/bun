@@ -254,6 +254,7 @@ async function runSecurityScannerTest(options: SecurityScannerTestOptions) {
 
   if (hasTTY) {
     let responseSent = false;
+    let lastDataAt = Date.now();
 
     await using terminal = new Bun.Terminal({
       cols: 80,
@@ -261,6 +262,7 @@ async function runSecurityScannerTest(options: SecurityScannerTestOptions) {
       data(_term, data) {
         const text = new TextDecoder().decode(data);
         errAndOut += text;
+        lastDataAt = Date.now();
 
         if (DO_TEST_DEBUG) {
           const lines = text.split("\n");
@@ -287,6 +289,26 @@ async function runSecurityScannerTest(options: SecurityScannerTestOptions) {
     });
 
     exitCode = await proc.exited;
+
+    if (process.platform === "openharmony") {
+      // `proc.exited` (wait4()) and the PTY master fully draining its last
+      // buffered writes are two independent events; on this platform the gap
+      // between them can itself exceed a short quiet-window check (there can
+      // be a lull *before* the final burst arrives, not just after), so
+      // require both a minimum floor since exit AND a quiet period since the
+      // last chunk, bounded so a real hang still times out via the test's own
+      // timeout instead of hanging here.
+      const minDrainMs = 400;
+      const quietWindowMs = 150;
+      const maxDrainMs = 3000;
+      const exitAt = Date.now();
+      while (
+        (Date.now() - exitAt < minDrainMs || Date.now() - lastDataAt < quietWindowMs) &&
+        Date.now() - exitAt < maxDrainMs
+      ) {
+        await Bun.sleep(20);
+      }
+    }
   } else {
     // Non-TTY mode: use piped stdin to ensure isatty(stdin) returns false
     await using proc = Bun.spawn({
@@ -594,24 +616,37 @@ export function runSecurityScannerTests(selfModuleName: string, hasExistingNodeM
                   scannerReturns === "fatal" ||
                   (scannerReturns === "warn" && (!hasTTY || ttyResponse === "n"));
 
-                test(testName, async () => {
-                  await runSecurityScannerTest({
-                    command,
-                    args,
-                    hasExistingNodeModules,
-                    linker,
-                    scannerType,
-                    scannerReturns,
-                    shouldFail,
-                    hasLockfile,
+                // OHOS: PTY-attached (`hasTTY`) cases wait for the terminal's output to
+                // go quiet after `proc.exited` before reading it back (see the drain loop
+                // in runSecurityScannerTest) because on this platform the gap between the
+                // child exiting and the PTY master fully draining its last writes can be
+                // large enough to lose the final output otherwise. Under the full-matrix
+                // run's system load that wait can push an already-slow case past the
+                // default 5000ms test timeout, so give TTY cases more room here.
+                const testTimeoutMs = hasTTY && process.platform === "openharmony" ? 10_000 : undefined;
 
-                    // TODO(@alii): Test this case
-                    scannerSyncronouslyThrows: false,
+                test(
+                  testName,
+                  async () => {
+                    await runSecurityScannerTest({
+                      command,
+                      args,
+                      hasExistingNodeModules,
+                      linker,
+                      scannerType,
+                      scannerReturns,
+                      shouldFail,
+                      hasLockfile,
 
-                    hasTTY,
-                    ttyResponse,
-                  });
-                });
+                      // TODO(@alii): Test this case
+                      scannerSyncronouslyThrows: false,
+
+                      hasTTY,
+                      ttyResponse,
+                    });
+                  },
+                  testTimeoutMs,
+                );
               });
             });
           });
