@@ -339,8 +339,7 @@ function llvmInstallHint(os: OS): string {
   if (os === "darwin") return `Install with: brew install llvm@${LLVM_MAJOR}`;
   if (os === "linux")
     return `Install with: apt install clang-${LLVM_MAJOR} lld-${LLVM_MAJOR}  (or equivalent for your distro)`;
-  if (os === "ohos")
-    return `Install LLVM 22+ and provide --ohos-sysroot and --ohos-sdk-root`;
+  if (os === "ohos") return `Install LLVM 22+ and provide --ohos-sysroot and --ohos-sdk-root`;
   if (os === "windows") return `Install LLVM ${LLVM_VERSION} from https://github.com/llvm/llvm-project/releases`;
   return "";
 }

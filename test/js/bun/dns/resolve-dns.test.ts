@@ -49,8 +49,7 @@ describe("dns", () => {
       ])("%j", async ({ options, address: expectedAddress, family: expectedFamily }) => {
         // this behavior matchs nodejs
         const isIPv6Request = options.family === "IPv6" || options.family === 6;
-        const expect_to_fail =
-          (isWindows && backend !== "c-ares" && isIPv6Request && hostname !== "localhost");
+        const expect_to_fail = isWindows && backend !== "c-ares" && isIPv6Request && hostname !== "localhost";
         // OHOS: IPv6 works for both system and c-ares backends since ::1 was
         // added to /etc/hosts (2026-07-28). The old expect_to_fail OHOS branch
         // is removed — it caused 12 false-positive failures.

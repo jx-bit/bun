@@ -69,7 +69,7 @@
     "test:release": "node scripts/runner.node.mjs --exec-path ./build/release/bun",
     "rust:check": "cargo check --workspace --keep-going",
     "rust:check-all": "bun scripts/rust-check-all.ts",
-    "rust:clippy": "cargo clippy --workspace --no-deps --keep-going",
+    "rust:clippy": "cargo clippy --workspace --no-deps --keep-going -- -D warnings",
     "rust:mordant": "DYLINT_RUSTFLAGS='-A unknown_lints' cargo dylint --all --workspace -- --keep-going",
     "rust:mordant:baseline": "DYLINT_RUSTFLAGS='-A unknown_lints' MORDANT_BASELINE_WRITE=1 cargo dylint --all --workspace",
     "rust:miri": "bun scripts/rust-miri.ts",

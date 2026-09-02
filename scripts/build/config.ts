@@ -7,7 +7,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
 import { homedir, arch as hostArch, platform as hostPlatform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { NODEJS_ABI_VERSION, NODEJS_V8_VERSION, NODEJS_VERSION } from "./deps/nodejs-headers.ts";
@@ -1128,7 +1128,9 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     if (!existsSync(ohosSysroot)) {
       throw new BuildError(`OHOS sysroot not found at ${ohosSysroot}`);
     }
-    ohosCrossLibs = partial.ohosCrossLibs ? resolve(cwd, partial.ohosCrossLibs) : resolve(cwd, "build", "ohos-cross-libs");
+    ohosCrossLibs = partial.ohosCrossLibs
+      ? resolve(cwd, partial.ohosCrossLibs)
+      : resolve(cwd, "build", "ohos-cross-libs");
     ohosIcuDir = partial.ohosIcuDir ? resolve(cwd, partial.ohosIcuDir) : resolve(cwd, "build", "ohos-icu", "target");
     // Populate generic cross-compile fields so downstream plumbing sees OHOS settings
     sysroot = ohosSysroot;
@@ -1609,11 +1611,7 @@ function findOhosSdkRoot(): string | undefined {
   if (envRoot && existsSync(resolve(envRoot, "ohos/native/sysroot"))) {
     return envRoot;
   }
-  const candidates = [
-    resolve(homedir(), "setup-ohos-sdk"),
-    resolve(homedir(), "ohos-sdk"),
-    "/opt/ohos-sdk",
-  ];
+  const candidates = [resolve(homedir(), "setup-ohos-sdk"), resolve(homedir(), "ohos-sdk"), "/opt/ohos-sdk"];
   for (const dir of candidates) {
     if (existsSync(resolve(dir, "ohos/native/sysroot"))) return dir;
   }

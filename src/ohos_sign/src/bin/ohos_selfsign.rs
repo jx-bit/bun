@@ -1,3 +1,8 @@
+// Standalone CLI for the ohos_sign crate, which has no workspace
+// dependencies — bun_core::output / bun_sys are unavailable here, so
+// std I/O macros and std::fs are the only option.
+#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
+
 use std::path::Path;
 use std::process::ExitCode;
 

@@ -39,8 +39,7 @@ describe.skipIf(!isOHOS || !node)("os.userInfo() for a bun-spawned node child (O
   })();
 
   const userInfoScript =
-    "try { console.log(JSON.stringify(require('os').userInfo())); }" +
-    " catch (e) { console.log('THROW:' + e.code); }";
+    "try { console.log(JSON.stringify(require('os').userInfo())); }" + " catch (e) { console.log('THROW:' + e.code); }";
 
   test("node child does not throw and gets a non-placeholder username", () => {
     const out = execFileSync(node!, ["-e", userInfoScript], { env: cleanEnv }).toString().trim();

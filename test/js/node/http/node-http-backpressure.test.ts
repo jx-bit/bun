@@ -314,45 +314,53 @@ describe("backpressure", () => {
     });
   });
 
-  it("should handle backpressure with INT_MAX bytes", async () => {
-    const totalSize = 1024 * 1024 * 1024 * 2; // 2^31, one past INT_MAX
-    const chunk = Buffer.alloc(64 * 1024 * 1024, "a");
-    await using server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/octet-stream",
-        "Transfer-Encoding": "chunked",
+  it(
+    "should handle backpressure with INT_MAX bytes",
+    async () => {
+      const totalSize = 1024 * 1024 * 1024 * 2; // 2^31, one past INT_MAX
+      const chunk = Buffer.alloc(64 * 1024 * 1024, "a");
+      await using server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Transfer-Encoding": "chunked",
+        });
+
+        writeBytes(res, totalSize, chunk);
       });
 
-      writeBytes(res, totalSize, chunk);
-    });
+      await once(server.listen(0), "listening");
 
-    await once(server.listen(0), "listening");
+      const PORT = (server.address() as AddressInfo).port;
+      const totalBytes = await countResponseBytes(PORT);
 
-    const PORT = (server.address() as AddressInfo).port;
-    const totalBytes = await countResponseBytes(PORT);
+      expect(totalBytes).toBe(totalSize);
+    },
+    OHOS_TIMEOUT,
+  );
 
-    expect(totalBytes).toBe(totalSize);
-  }, OHOS_TIMEOUT);
-
-  it("should handle backpressure with more than INT_MAX bytes", async () => {
-    // enough to fill the socket buffer
-    const smallPayloadSize = 1024 * 1024;
-    const totalSize = 1024 * 1024 * 1024 * 2; // 2^31, one past INT_MAX
-    const chunk = Buffer.alloc(64 * 1024 * 1024, "a");
-    await using server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/octet-stream",
-        "Transfer-Encoding": "chunked",
+  it(
+    "should handle backpressure with more than INT_MAX bytes",
+    async () => {
+      // enough to fill the socket buffer
+      const smallPayloadSize = 1024 * 1024;
+      const totalSize = 1024 * 1024 * 1024 * 2; // 2^31, one past INT_MAX
+      const chunk = Buffer.alloc(64 * 1024 * 1024, "a");
+      await using server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Transfer-Encoding": "chunked",
+        });
+        res.write(Buffer.alloc(smallPayloadSize, "a"));
+        writeBytes(res, totalSize, chunk);
       });
-      res.write(Buffer.alloc(smallPayloadSize, "a"));
-      writeBytes(res, totalSize, chunk);
-    });
 
-    await once(server.listen(0), "listening");
+      await once(server.listen(0), "listening");
 
-    const PORT = (server.address() as AddressInfo).port;
-    const totalBytes = await countResponseBytes(PORT);
+      const PORT = (server.address() as AddressInfo).port;
+      const totalBytes = await countResponseBytes(PORT);
 
-    expect(totalBytes).toBe(totalSize + smallPayloadSize);
-  }, OHOS_TIMEOUT);
+      expect(totalBytes).toBe(totalSize + smallPayloadSize);
+    },
+    OHOS_TIMEOUT,
+  );
 });

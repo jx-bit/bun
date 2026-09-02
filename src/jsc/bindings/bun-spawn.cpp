@@ -508,7 +508,8 @@ extern "C" ssize_t posix_spawn_bun(
             int n = snprintf(pwdBuf, sizeof(pwdBuf), "PWD=%s", request->chdir);
             if (n > 0 && static_cast<size_t>(n) < sizeof(pwdBuf)) {
                 size_t count = 0;
-                while (envp[count] && count < kMaxEnvEntries) count++;
+                while (envp[count] && count < kMaxEnvEntries)
+                    count++;
                 // Bails out (leaving the stale-$PWD bug in place rather than
                 // risking anything) only past ~1024 env vars, far beyond any
                 // real process; every ordinary caller is covered.

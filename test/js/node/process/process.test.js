@@ -400,7 +400,8 @@ it("process.release", () => {
   // OHOS release artifacts are published as a Linux variant (bun-linux-<arch>-ohos),
   // not bun-openharmony-<arch> — process.platform is "openharmony" but the
   // release naming scheme treats it like a musl/baseline-style ABI suffix.
-  const platform = process.platform == "win32" ? "windows" : process.platform == "openharmony" ? "linux" : process.platform;
+  const platform =
+    process.platform == "win32" ? "windows" : process.platform == "openharmony" ? "linux" : process.platform;
   const arch = { arm64: "aarch64", x64: "x64" }[process.arch] || process.arch;
   const abi = familySync() === "musl" ? "-musl" : process.platform === "openharmony" ? "-ohos" : "";
   const nonbaseline = `https://github.com/oven-sh/bun/releases/download/bun-v${process.versions.bun}/bun-${platform}-${arch}${abi}.zip`;

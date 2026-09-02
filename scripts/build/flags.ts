@@ -215,7 +215,14 @@ export const globalFlags: Flag[] = [
 
   // ─── OHOS cross-compilation ───
   {
-    flag: c => [`--target=aarch64-linux-ohos`, `--sysroot=${c.ohosSysroot!}`, `-D__MUSL__`, `-D__OHOS__`, `-mbranch-protection=none`, `-mno-outline-atomics`],
+    flag: c => [
+      `--target=aarch64-linux-ohos`,
+      `--sysroot=${c.ohosSysroot!}`,
+      `-D__MUSL__`,
+      `-D__OHOS__`,
+      `-mbranch-protection=none`,
+      `-mno-outline-atomics`,
+    ],
     when: c => c.ohos && c.arm64,
     desc: "OHOS target triple + sysroot + musl libc (no PAC/BTI/outline-atomics for OHOS device compat)",
   },
@@ -225,7 +232,13 @@ export const globalFlags: Flag[] = [
     desc: "OHOS: suppress WebKit cmakeconfig vs PlatformHave.h HAVE_INT128_T conflict",
   },
   {
-    flag: c => [`-nostdinc++`, `-I${c.ohosCrossLibs}/libcxx/include/v1`, `-I${c.ohosCrossLibs}/libcxxabi/include`, `-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE`, `-D_LIBCPP_HAS_NO_LOCALIZATION`],
+    flag: c => [
+      `-nostdinc++`,
+      `-I${c.ohosCrossLibs}/libcxx/include/v1`,
+      `-I${c.ohosCrossLibs}/libcxxabi/include`,
+      `-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE`,
+      `-D_LIBCPP_HAS_NO_LOCALIZATION`,
+    ],
     when: c => c.ohos && !!c.ohosCrossLibs,
     lang: "cxx",
     desc: "OHOS: use musl-compatible LLVM 22 libc++ headers",
@@ -1268,25 +1281,26 @@ export const linkerFlags: Flag[] = [
     desc: "OHOS: allow iostream stub duplicate; mimalloc override disabled",
   },
   {
-    flag: c => [
-      // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
-      // crtendS.o). clang auto-adds them, failing bun link. -nostartfiles
-      // skips crt begin/end (keeps compiler-rt + libc). Explicit musl crt.
-      // NOT -nodefaultlibs (would drop compiler-rt — see webkit.ts).
-      "-nostartfiles",
-      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/Scrt1.o`,
-      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crti.o`,
-      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crtn.o`,
-      `-L${c.ohosCrossLibs!}/libcxx/lib`,
-      `-L${c.ohosCrossLibs!}/libcxxabi/lib`,
-      `-L${c.ohosCrossLibs!}/libunwind/lib`,
-      `-L${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos`,
-      c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
-      "-lc++",
-      "-lc++abi",
-      "-lunwind",
-      "-lc",
-    ].filter(f => f !== ""),
+    flag: c =>
+      [
+        // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
+        // crtendS.o). clang auto-adds them, failing bun link. -nostartfiles
+        // skips crt begin/end (keeps compiler-rt + libc). Explicit musl crt.
+        // NOT -nodefaultlibs (would drop compiler-rt — see webkit.ts).
+        "-nostartfiles",
+        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/Scrt1.o`,
+        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crti.o`,
+        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crtn.o`,
+        `-L${c.ohosCrossLibs!}/libcxx/lib`,
+        `-L${c.ohosCrossLibs!}/libcxxabi/lib`,
+        `-L${c.ohosCrossLibs!}/libunwind/lib`,
+        `-L${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos`,
+        c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
+        "-lc++",
+        "-lc++abi",
+        "-lunwind",
+        "-lc",
+      ].filter(f => f !== ""),
     when: c => c.ohos,
     desc: "OHOS: link __n1 libc++ + libc++abi + libunwind + musl crt (-nostartfiles)",
   },

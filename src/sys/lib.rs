@@ -2163,7 +2163,10 @@ mod posix_impl {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     mod linux_statx {
         // glibc: libc 0.2.x exposes the full surface directly.
-        #[cfg(all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos"))))]
+        #[cfg(all(
+            target_os = "linux",
+            not(any(target_env = "musl", target_env = "ohos"))
+        ))]
         pub(super) use libc::{
             STATX_ATIME, STATX_BLOCKS, STATX_BTIME, STATX_CTIME, STATX_GID, STATX_INO, STATX_MODE,
             STATX_MTIME, STATX_NLINK, STATX_SIZE, STATX_TYPE, STATX_UID, statx,
@@ -2820,8 +2823,7 @@ mod posix_impl {
             };
             if rc != 0 {
                 let errno = crate::linux::errno();
-                return Err(Error::from_code_int(errno, Tag::fchmodat)
-                    .with_path(path.as_bytes()));
+                return Err(Error::from_code_int(errno, Tag::fchmodat).with_path(path.as_bytes()));
             }
             Ok(())
         }
@@ -6070,7 +6072,6 @@ pub mod RTLD {
     pub const LAZY: i32 = 0x1;
     pub const LOCAL: i32 = 0;
 }
-
 
 /// C-compatible entry point for `dlopen` — called from C++ as `Bun__dlopen`.
 /// OHOS: if dlopen fails with EPERM (unsigned .node/.so), sign and retry.

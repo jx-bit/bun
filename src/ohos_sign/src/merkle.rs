@@ -20,10 +20,10 @@ pub fn root_hash_and_tree(data: &[u8], cs_off: u64, cs_len: u64) -> ([u8; H], Ve
         return (sha256::hash(&zeros), Vec::new());
     }
 
-    let npages = (data.len() + PAGE - 1) / PAGE;
+    let npages = data.len().div_ceil(PAGE);
     let cs_page_begin = (cs_off / PAGE as u64) as usize;
     let cs_page_end = if cs_len > 0 {
-        ((cs_off + cs_len + PAGE as u64 - 1) / PAGE as u64) as usize
+        ((cs_off + cs_len).div_ceil(PAGE as u64)) as usize
     } else {
         0
     };
@@ -56,7 +56,7 @@ pub fn root_hash_and_tree(data: &[u8], cs_off: u64, cs_len: u64) -> ([u8; H], Ve
         if packed <= PAGE {
             break; // root level reached (fits in one page)
         }
-        let next_pages = (packed + PAGE - 1) / PAGE;
+        let next_pages = packed.div_ceil(PAGE);
         let mut next: Vec<[u8; H]> = Vec::with_capacity(next_pages);
         for i in 0..next_pages {
             let mut page = [0u8; PAGE];

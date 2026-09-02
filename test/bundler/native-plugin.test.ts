@@ -11,39 +11,40 @@ describe("native-plugins", async () => {
   let tempdir: string = "";
   let outdir: string = "";
 
-  beforeAll(async () => {
-    const files = {
-      "bun-native-bundler-plugin-api/bundler_plugin.h": await Bun.file(bundlerPluginHeader).text(),
-      "plugin.cc": await Bun.file(source).text(),
-      "not_a_plugin.cc": await Bun.file(notAPlugin).text(),
-      "package.json": JSON.stringify({
-        "name": "fake-plugin",
-        "module": "index.ts",
-        "type": "module",
-        "devDependencies": {
-          "@types/bun": "latest",
-        },
-        "peerDependencies": {
-          "typescript": "^5.0.0",
-        },
-        "scripts": {
-          "build:napi": "node-gyp configure && node-gyp build",
-        },
-        "dependencies": {
-          "node-gyp": "10.2.0",
-        },
-      }),
+  beforeAll(
+    async () => {
+      const files = {
+        "bun-native-bundler-plugin-api/bundler_plugin.h": await Bun.file(bundlerPluginHeader).text(),
+        "plugin.cc": await Bun.file(source).text(),
+        "not_a_plugin.cc": await Bun.file(notAPlugin).text(),
+        "package.json": JSON.stringify({
+          "name": "fake-plugin",
+          "module": "index.ts",
+          "type": "module",
+          "devDependencies": {
+            "@types/bun": "latest",
+          },
+          "peerDependencies": {
+            "typescript": "^5.0.0",
+          },
+          "scripts": {
+            "build:napi": "node-gyp configure && node-gyp build",
+          },
+          "dependencies": {
+            "node-gyp": "10.2.0",
+          },
+        }),
 
-      "index.ts": /* ts */ `import values from "./stuff.ts";
+        "index.ts": /* ts */ `import values from "./stuff.ts";
 import json from "./lmao.json";
 const many_foo = ["foo","foo","foo","foo","foo","foo","foo"]
 const many_bar = ["bar","bar","bar","bar","bar","bar","bar"]
 const many_baz = ["baz","baz","baz","baz","baz","baz","baz"]
 console.log(JSON.stringify(json));
 values;`,
-      "stuff.ts": `export default { foo: "bar", baz: "baz" }`,
-      "lmao.json": ``,
-      "binding.gyp": /* gyp */ `{
+        "stuff.ts": `export default { foo: "bar", baz: "baz" }`,
+        "lmao.json": ``,
+        "binding.gyp": /* gyp */ `{
         "targets": [
           {
             "target_name": "xXx123_foo_counter_321xXx",
@@ -57,19 +58,21 @@ values;`,
           }
         ]
       }`,
-    };
+      };
 
-    tempdir = tempDirWithFiles("native-plugins", files);
+      tempdir = tempDirWithFiles("native-plugins", files);
 
-    await makeTree(tempdir, files);
-    outdir = path.join(tempdir, "dist");
+      await makeTree(tempdir, files);
+      outdir = path.join(tempdir, "dist");
 
-    console.log("tempdir", tempdir);
+      console.log("tempdir", tempdir);
 
-    process.chdir(tempdir);
+      process.chdir(tempdir);
 
-    await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
-  }, process.platform === "openharmony" ? 60_000 : 5_000); // node-gyp C++ compile; OHOS toolchain is slower
+      await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
+    },
+    process.platform === "openharmony" ? 60_000 : 5_000,
+  ); // node-gyp C++ compile; OHOS toolchain is slower
 
   beforeEach(() => {
     const tempdir2 = tempDirWithFiles("native-plugins", {});
@@ -81,46 +84,50 @@ values;`,
     process.chdir(cwd);
   });
 
-  it("works in a basic case", async () => {
-    await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
+  it(
+    "works in a basic case",
+    async () => {
+      await Bun.$`${bunExe()} i && ${bunExe()} build:napi`.env(bunEnv).cwd(tempdir);
 
-    const napiModule = require(path.join(tempdir, "build/Release/xXx123_foo_counter_321xXx.node"));
-    const external = napiModule.createExternal();
+      const napiModule = require(path.join(tempdir, "build/Release/xXx123_foo_counter_321xXx.node"));
+      const external = napiModule.createExternal();
 
-    const result = await Bun.build({
-      outdir,
-      entrypoints: [path.join(tempdir, "index.ts")],
-      plugins: [
-        {
-          name: "xXx123_foo_counter_321xXx",
-          setup(build) {
-            const chainedThis = build.onBeforeParse(
-              { filter: /\.ts/ },
-              { napiModule, symbol: "plugin_impl", external },
-            );
-            expect(chainedThis).toBe(build);
+      const result = await Bun.build({
+        outdir,
+        entrypoints: [path.join(tempdir, "index.ts")],
+        plugins: [
+          {
+            name: "xXx123_foo_counter_321xXx",
+            setup(build) {
+              const chainedThis = build.onBeforeParse(
+                { filter: /\.ts/ },
+                { napiModule, symbol: "plugin_impl", external },
+              );
+              expect(chainedThis).toBe(build);
 
-            build.onLoad({ filter: /lmao\.json/ }, async ({ defer }) => {
-              await defer();
-              const count = napiModule.getFooCount(external);
-              return {
-                contents: JSON.stringify({ fooCount: count }),
-                loader: "json",
-              };
-            });
+              build.onLoad({ filter: /lmao\.json/ }, async ({ defer }) => {
+                await defer();
+                const count = napiModule.getFooCount(external);
+                return {
+                  contents: JSON.stringify({ fooCount: count }),
+                  loader: "json",
+                };
+              });
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
 
-    if (!result.success) console.log(result);
-    expect(result.success).toBeTrue();
-    const output = await Bun.$`${bunExe()} run dist/index.js`.cwd(tempdir).json();
-    expect(output).toStrictEqual({ fooCount: 9 });
+      if (!result.success) console.log(result);
+      expect(result.success).toBeTrue();
+      const output = await Bun.$`${bunExe()} run dist/index.js`.cwd(tempdir).json();
+      expect(output).toStrictEqual({ fooCount: 9 });
 
-    const compilationCtxFreedCount = await napiModule.getCompilationCtxFreedCount(external);
-    expect(compilationCtxFreedCount).toBe(2);
-  }, process.platform === "openharmony" ? 60_000 : 5_000); // rebuilds the node-gyp C++ plugin; OHOS toolchain is slower
+      const compilationCtxFreedCount = await napiModule.getCompilationCtxFreedCount(external);
+      expect(compilationCtxFreedCount).toBe(2);
+    },
+    process.platform === "openharmony" ? 60_000 : 5_000,
+  ); // rebuilds the node-gyp C++ plugin; OHOS toolchain is slower
 
   it("doesn't explode when there are a lot of concurrent files", async () => {
     // Generate 100 json files
