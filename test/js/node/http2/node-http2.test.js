@@ -1,5 +1,5 @@
 import { jscDescribe } from "bun:jsc";
-import { bunEnv, bunExe, isASAN, isCI, isDebug, nodeExe } from "harness";
+import { bunEnv, bunExe, isASAN, isCI, isDebug, isOHOS, nodeExe } from "harness";
 import { createTest } from "node-harness";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dc from "node:diagnostics_channel";
@@ -2342,7 +2342,11 @@ it(
       });
     });
   },
-  15_000 * ASAN_MULTIPLIER,
+  // Under the runner's BUN_GARBAGE_COLLECTOR_LEVEL=1, the 10k sequential
+  // requests here GC-churn against the state accumulated by the preceding
+  // tests and need ~18s on this device class (reproduced equally in a
+  // stock-Linux container, i.e. machine speed, not platform behavior).
+  15_000 * ASAN_MULTIPLIER * (isOHOS ? 4 : 1),
 );
 
 it("http2.createServer validates input options", () => {

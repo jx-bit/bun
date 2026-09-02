@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "bun";
 import { beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { chmodSync, existsSync, readdirSync, readFileSync, renameSync, statSync } from "fs";
 import {
   bunEnv,
   bunExe,
@@ -63,6 +63,54 @@ beforeAll(async () => {
       process.exit(1);
     }
     console.timeEnd("Building node-gyp");
+
+    if (process.platform === "openharmony") {
+      // `bun install` here runs node-gyp's own build, not bun's install/build
+      // pipeline, so nothing signs the resulting .node files (same gap as
+      // test/napi/uv.test.ts) — dlopen then fails with EACCES/Permission denied.
+      //
+      // A single sign+chmod pass is not reliably enough: OHOS's exec-permission
+      // check on a just-signed file doesn't always take effect immediately (same
+      // class of flakiness as the herdr formula's signing retry loop — cold
+      // signatures have converged within ~7 attempts there). Re-sign and re-verify
+      // in a bounded retry loop instead of trusting the first attempt.
+      const debugDir = join(__dirname, "napi-app/build/Debug");
+      for (const f of readdirSync(debugDir)) {
+        if (!f.endsWith(".node")) continue;
+        const built = join(debugDir, f);
+        const signed = `${built}.signed`;
+        let verified = false;
+        for (let attempt = 1; attempt <= 8 && !verified; attempt++) {
+          const sign = spawnSync({
+            cmd: ["binary-sign-tool", "sign", "-selfSign", "1", "-inFile", built, "-outFile", signed],
+          });
+          if (!sign.success) {
+            console.error(`failed to sign ${built} (attempt ${attempt}), bailing out!`);
+            process.exit(1);
+          }
+          renameSync(signed, built);
+          chmodSync(built, 0o755);
+
+          // `require()` also rejects a correctly-signed-and-loadable .node that
+          // just isn't a NAPI module (e.g. ffi_addon_{1,2}.node, meant for
+          // bun:ffi's dlopen() instead) with an unrelated "symbol not found"
+          // error — dlopen succeeding at all means the signature/permission
+          // side is fine, so only a loader-level failure means "try signing
+          // again", not any exception require() happens to throw.
+          const probe = spawnSync({
+            cmd: [bunExe(), "-e", `require(${JSON.stringify(built)})`],
+            env: bunEnv,
+            stderr: "pipe",
+          });
+          const stderr = probe.stderr?.toString() ?? "";
+          verified = probe.success || !/error loading shared library|permission denied/i.test(stderr);
+        }
+        if (!verified) {
+          console.error(`${built} still fails to load after signing retries, bailing out!`);
+          process.exit(1);
+        }
+      }
+    }
   }
   // node-gyp rebuild can take a while under a debug/ASAN binary (and the
   // hook may first download an ABI-matching node); default 5s hook timeout

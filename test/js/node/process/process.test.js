@@ -486,11 +486,11 @@ it("process.env reads are never stale after a write (JIT inline-cache soundness)
 const MIN_ICU_VERSIONS_BY_PLATFORM_ARCH = {
   "darwin-x64": "70.1",
   "darwin-arm64": "72.1",
-  "linux-x64": "72.1",
-  "linux-arm64": "72.1",
-  "win32-x64": "72.1",
-  "win32-arm64": "72.1",
-  "openharmony-arm64": "72.1", // built against icu4c@78 (see CLAUDE.md); floor matches the other arm64 platforms
+  "linux-x64": "78.3",
+  "linux-arm64": "78.3",
+  "win32-x64": "78.3",
+  "win32-arm64": "78.3",
+  "openharmony-arm64": "78.3", // built against icu4c@78 (see CLAUDE.md); floor matches the other arm64 platforms
 };
 
 it("ICU version does not regress", () => {

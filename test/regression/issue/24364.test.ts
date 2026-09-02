@@ -19,9 +19,15 @@ test("react-tailwind template passes tsc --noEmit", async () => {
     "tsconfig.json": tsconfigJson,
   });
 
-  // Install typescript and bun types
+  // Install typescript and bun types. Upstream's TS7 tsc execs a native
+  // compiler from @typescript/typescript-<os>-<arch> and does not publish
+  // an openharmony-arm64 one; @ohos-npm-ports/typescript@7.0.2-2 bundles a
+  // working native compiler for OHOS (7.0.2-1 crashed at startup on
+  // fanotify_init(); -2 fixed it).
+  const typescriptSpec =
+    process.platform === "openharmony" ? "typescript@npm:@ohos-npm-ports/typescript@7.0.2-2" : "typescript";
   await using install = Bun.spawn({
-    cmd: [bunExe(), "add", "-d", "typescript", "@types/bun", "@types/react", "bun-plugin-tailwind"],
+    cmd: [bunExe(), "add", "-d", typescriptSpec, "@types/bun", "@types/react", "bun-plugin-tailwind"],
     cwd: String(dir),
     env: bunEnv,
     stdout: "pipe",

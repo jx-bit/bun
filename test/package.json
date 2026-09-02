@@ -5,8 +5,7 @@
     "@types/react-dom": "18.0.11",
     "@types/supertest": "2.0.12",
     "@types/utf-8-validate": "5.0.0",
-    "@types/ws": "8.5.10",
-    "@types/puppeteer": "7.0.4"
+    "@types/ws": "8.5.10"
   },
   "dependencies": {
     "@astrojs/node": "9.1.3",
@@ -125,6 +124,12 @@
   },
   "resolutions": {
     "react": "../node_modules/react",
-    "@types/node": "25.0.0"
-  }
+    "@types/node": "25.0.0",
+    "@resvg/resvg-js": "npm:@ohos-npm-ports/resvg-resvg-js@2.6.2-1",
+    "@napi-rs/canvas": "npm:@ohos-ports/napi-rs-canvas@0.1.80-beta.0",
+    "sharp": "npm:@ohos-ports/sharp@0.34.5-beta.5"
+  },
+  "trustedDependencies": [
+    "sharp"
+  ]
 }

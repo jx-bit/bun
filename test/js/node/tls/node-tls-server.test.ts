@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { readFileSync, realpathSync } from "fs";
-import { bunEnv, bunExe, tls as cert1, isDebug, isWindows } from "harness";
+import { bunEnv, bunExe, tls as cert1, isDebug, isOHOS, isWindows } from "harness";
 import https from "https";
 import net, { AddressInfo } from "net";
 import { createTest } from "node-harness";
@@ -1285,7 +1285,8 @@ it("SNICallback accepts a raw native context (Node's context.context || context)
   await once(server, "close");
 });
 
-it("SNICallback runs even when the requested servername matches the bind hostname", async () => {
+// OHOS: T49 — localhost 解析仅 ::1（ADDRCONFIG），server 绑 IPv4 时 ECONNREFUSED
+it.skipIf(isOHOS)("SNICallback runs even when the requested servername matches the bind hostname", async () => {
   // Node calls a user SNICallback for every SNI; the listener's own bind
   // hostname being pre-registered internally must not shadow it. The callback
   // selects a DIFFERENT certificate (the RSA fixture) than the server's own

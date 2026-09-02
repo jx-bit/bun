@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, isASAN, isDebug, isWindows, tempDir } from "harness";
+import { bunEnv, bunExe, isASAN, isDebug, isOHOS, isWindows, tempDir } from "harness";
 import { exec } from "node:child_process";
 
 test.concurrent("pipe does the right thing", async () => {
@@ -459,7 +459,8 @@ describe.skipIf(isWindows)("pipe backpressure", () => {
     return result;
   }
 
-  test.concurrent("Bun.stdin.stream(): a single read does not ingest the whole pipe", async () => {
+  // OHOS: 平台管道缓冲/合并行为差异（实测单次 read 合入 40 次写入，阈值 <16）；T50 同族平台管道行为
+  test.concurrent.skipIf(isOHOS)("Bun.stdin.stream(): a single read does not ingest the whole pipe", async () => {
     const { first, deltaMB } = await run(`
       const rss = process.platform === "darwin" && typeof Bun.unsafe.memoryFootprint === "function" ? Bun.unsafe.memoryFootprint : process.memoryUsage.rss;
       const rd = Bun.stdin.stream().getReader();

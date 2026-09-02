@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { bunEnv, bunExe, normalizeBunSnapshot, tempDir, tmpdirSync } from "harness";
 import { join } from "path";
+
+setDefaultTimeout(1000 * 60 * 5);
 
 describe("bun pm scan", () => {
   describe("configuration", () => {

@@ -185,11 +185,17 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 # inside the GC-level branch — so under the real runner (not a bare `bun test`)
 # the module has always been reachable. Full real-machine reruns via
 # `node scripts/runner.node.mjs --ignore-expectations=OPENHARMONY` confirmed
-# every file below now passes; entries removed. See OHOS_TEST_TODO.md
+# every file below now passes; entries removed. See OHOS_TEST_STATUS.md
 # ("陈旧 quarantine 确认") for the evidence trail. `test/js/node/fs/fs-oom.test.ts`
-# carried the same (wrong) label but is NOT in this list — it fails for an
-# unrelated, still-real reason (memfd_create + readFileSync EACCES vs the
-# expected ENOMEM; see OHOS_TEST_TODO.md T22) and keeps its own entry below.
+# carried the same (wrong) label and was originally thought to still fail for
+# an unrelated real reason (memfd_create + readFileSync EACCES vs the
+# expected ENOMEM; see OHOS_TEST_STATUS.md T22) — but T22's own fix
+# (be38b72d9, readFileSync now tolerates EACCES/EPERM on fstat instead of
+# propagating it) fixed that too. Re-verified 2026-08-25 with the same env
+# vars the real runner sets (BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING=1,
+# BUN_GARBAGE_COLLECTOR_LEVEL=1): 13 pass / 2 skip / 0 fail, 3/3 stable.
+# No quarantine entry for this file (there never should have been one below
+# this comment — the comment predated the fix and was just never updated).
 
 # bun-pack: the "bun:internal-for-testing unavailable" quarantine was
 # disproven 2026-07-26. Re-verified 2026-07-30 against r42: 76 pass / 0 fail.
@@ -205,11 +211,16 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 # Both class D. Keeping quarantine.
 [ OPENHARMONY ] test/cli/install/bun-upgrade.test.ts [ Skip ] # OHOS has no bun release binary for upgrade download + staging dir recreation differs
 
-# next-pages: next-swc has no openharmony-arm64 binary; all 3 tests fail at
-# "unsupported platforms openharmony/arm64". Class D. Keeping quarantine.
-[ OPENHARMONY ] test/integration/next-pages/test/dev-server.test.ts [ Skip ] # next-swc unsupported platform openharmony/arm64 + puppeteer install fails
-[ OPENHARMONY ] test/integration/next-pages/test/dev-server-ssr-100.test.ts [ Skip ] # next-swc unsupported platform openharmony/arm64
-[ OPENHARMONY ] test/integration/next-pages/test/next-build.test.ts [ Skip ] # next-swc unsupported platform openharmony/arm64
+# next-pages: all 3 files import `bun:internal-for-testing` at module top
+# level, which doesn't exist in a release build (ENOENT, deterministic,
+# fails before any next-swc/puppeteer code runs) -- re-verified 2026-08-25,
+# corrects the earlier "next-swc unsupported platform" reason recorded here,
+# which described a deeper layer these files can no longer even reach.
+# Whether next-swc itself would also block them is unverified (can't get
+# past the import). Class D either way. Keeping quarantine.
+[ OPENHARMONY ] test/integration/next-pages/test/dev-server.test.ts [ Skip ] # bun:internal-for-testing ENOENT in release build (blocks before next-swc/puppeteer ever run)
+[ OPENHARMONY ] test/integration/next-pages/test/dev-server-ssr-100.test.ts [ Skip ] # bun:internal-for-testing ENOENT in release build (blocks before next-swc ever runs)
+[ OPENHARMONY ] test/integration/next-pages/test/next-build.test.ts [ Skip ] # bun:internal-for-testing ENOENT in release build (blocks before next-swc ever runs)
 
 # --- cli/install migration: network-dependent tests ---
 # "bun pm migrate -f" and "bun install --lockfile-only" resolve from npm registry;
@@ -257,6 +268,8 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 # takes 11s+ on OHOS; TLS at localhost requires cert setup; .unix socket
 # failing on hmdfs. All networking-related, not test logic failures.
 [ OPENHARMONY ] test/js/web/fetch/fetch.unix.test.ts [ Flaky ] # unix socket on hmdfs
+[ OPENHARMONY ] test/js/web/fetch/fetch-tcp-keepalive.test.ts [ Skip ] # /proc/self/net/tcp blocked by OHOS app sandbox (EACCES); the LD_PRELOAD shim half already verifies SO_KEEPALIVE is set, but the /proc/net/tcp timer-state half cannot run
+[ OPENHARMONY ] test/js/web/fetch/fetch-tls-abortsignal-timeout.test.ts [ Flaky ] # tight <=50ms(non-debug)/500ms(debug) abort-latency budget for timeout(0)/timeout(1); passes standalone, fails under concurrent CPU contention (confirmed via A/B: 5/5 solo pass, 2/6 fail at 4-way concurrency, observed diff 80-96ms vs 50-51ms budget) — 2026-08-25
 
 # --- "localhost" resolves to nothing when family-restricted to IPv6 ---
 # This sandbox's /etc/hosts maps `::1` to `ip6-localhost`/`ip6-loopback`, not
@@ -307,7 +320,6 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 #
 # Four entries are kept below because they fail 100% deterministically
 # (not flaky) for real, still-uninvestigated reasons — see OHOS_TEST_TODO.md.
-[ OPENHARMONY ] test/regression/issue/24364.test.ts [ Skip ] # react-tailwind template's tsc --noEmit needs @typescript/typescript-openharmony-arm64, which upstream does not publish (same class as test/integration/bun-types/bun-types.test.ts's tsgo gap)
 
 # --- cli/hot + cli/inspect: OHOS unix socket / sourcemap timing ---
 # Patched in-place: inspect unix-domain-socket tests use tmpdirSync() on OHOS
@@ -322,28 +334,102 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 [ OPENHARMONY ] test/js/bun/terminal/terminal-spawn.test.ts [ Flaky ] # subprocess-with-terminal 5s timeouts (1+ test)
 [ OPENHARMONY ] test/js/bun/repl/repl.test.ts [ Flaky ] # PTY-based REPL tests 5s timeouts (2-4 tests)
 
+# --- js/bun/secrets: no OS keyring backend in this sandbox ---
+# Bun.secrets on Linux/FreeBSD dlopens libsecret + glib + gobject, then talks
+# to a keyring daemon (gnome-keyring et al.) over a D-Bus session bus. This
+# device has none of that stack: no libsecret formula in harmonybrew, no
+# D-Bus session running (dbus-daemon/dbus-launch are installed but idle, no
+# socket), no keyring daemon. bun also has no OHOS-native Secrets backend
+# (only Darwin/Windows/Linux exist) -- would need real OHOS secure-storage
+# API bindings to do this properly, not a fake desktop keyring stood up just
+# to pass the test. Structural, not fixable in userland. 2026-08-28.
+[ OPENHARMONY ] test/js/bun/secrets.test.ts [ Skip ] # libsecret/D-Bus keyring stack absent from the sandbox
+[ OPENHARMONY ] test/js/bun/secrets-error-codes.test.ts [ Skip ] # libsecret/D-Bus keyring stack absent from the sandbox
+
+# --- js/bun/websocket: file-internal concurrency overload ---
+# ~120 it.concurrent cases in one file, each spinning up a real Bun.serve +
+# client WebSocket pair. The plain (non-.concurrent) "ServerWebSocket >
+# readyState"/"close()" sub-block gets starved under that load and times out
+# at the default 10s (2-8 of 120 tests, varying which/how-many per run,
+# never a clean 0-fail run in 11 reruns on 2026-08-25). Running just that
+# sub-block in isolation (-t filter, no contention from the other ~113
+# tests) passes cleanly and fast every time -- confirms the WebSocket
+# logic itself is correct, this is resource contention from real
+# concurrent sockets on a constrained device, not a functional bug.
+[ OPENHARMONY ] test/js/bun/websocket/websocket-server.test.ts [ Flaky ] # ~120-way it.concurrent overload starves the non-concurrent readyState/close() sub-block (2-8 tests)
+
+# --- js/bun/spawn: getMaxFD leak detection false positive on OHOS ---
+# OHOS kernel close() leaves a stale /proc/self/fd entry (fd number is actually
+# reusable — verified: socketpair reuses the closed fd number immediately).
+# getMaxFD() reads /proc/self/fd and is fooled by the stale entry, so the
+# "didn't leak any fds" assertion fails 100% deterministically. Not a real bun fd leak.
+[ OPENHARMONY ] test/js/bun/spawn/spawn-streaming-stdin.test.ts [ Skip ] # getMaxFD leak check is a false positive (OHOS kernel stale /proc/self/fd entry after close)
+
 # --- js/third_party: packages with prebuilt native bindings, no OHOS target ---
-# These fail at import/require time (native .node/.so binding load), so the
-# whole file genuinely cannot run — not a case of quarantining 1-2 broken
-# cases. Each upstream package only ships prebuilt binaries for a fixed set of
-# platform triples and has no openharmony-arm64 build.
-[ OPENHARMONY ] test/integration/sharp/sharp.test.ts [ Skip ] # sharp has no OHOS prebuilt binary (checked latest 0.35.3: still no openharmony build)
-# astro@5.5.5 pins its own nested rollup@4.37.0 (independent of test/package.json's
-# top-level rollup dep, see below) which predates rollup's openharmony-arm64 binary.
-[ OPENHARMONY ] test/js/third_party/astro/astro-post.test.js [ Skip ] # astro's transitively-pinned rollup has no OHOS build
-[ OPENHARMONY ] test/js/third_party/prisma/prisma.test.ts [ Skip ] # pulls in @napi-rs/canvas native binding, no OHOS build (checked latest 1.0.2: still no openharmony build)
-[ OPENHARMONY ] test/js/third_party/resvg/bbox.test.js [ Skip ] # @resvg/resvg-js has no OHOS prebuilt binary (checked latest 2.6.2: still no openharmony build)
-[ OPENHARMONY ] test/js/third_party/@napi-rs/canvas/napi-rs-canvas.test.ts [ Skip ] # @napi-rs/canvas has no OHOS prebuilt binary (checked latest 1.0.2: still no openharmony build)
-# rspack's WASM fallback also fails: napi-rs's generated *.wasi.cjs hardcodes
-# `preopens: {'/': '/'}` (path.parse(cwd).root is always '/' on POSIX, not
-# configurable), and OHOS's app sandbox refuses to open '/' in ANY mode
-# (verified: fs.openSync("/", "r") itself throws EACCES) — same root cause as
-# the WASI test and bundler_edgecase's root-dir case below, just reached via
-# a different path. bun's installer also treats these packages' "cpu":
-# ["wasm32"] as a real arch restriction and won't install them on arm64
-# without a manual override, so this doesn't even get as far as the sandbox
-# wall on a normal install.
-[ OPENHARMONY ] test/js/bun/test/parallel/test-integration-rspack.ts [ Skip ] # rspack has no OHOS native binding; WASM fallback hits the '/' preopen sandbox wall
+# 2026-08-29 re-check: upstream/community landscape moved since this block was
+# written (checked npm registry: rollup/esbuild/rolldown now ship official
+# openharmony-arm64 builds; @ohos-ports has real-machine-verified community
+# ports for resvg-js/napi-rs-canvas/rspack-binding). canvas and rspack are
+# fully unquarantined below (test/package.json "resolutions" + this rspack
+# test's own OHOS branch, each real-machine verified 2-3x clean). astro,
+# resvg, sharp, and prisma all still hit a real blocker each -- just a
+# different, deeper one than the stale "no OHOS binary" reason on file.
+#
+# astro@5.5.5's own rollup is unblocked (transitively resolves to 4.62.2,
+# which has rollup's official openharmony-arm64 build) and `build()` now
+# genuinely runs to completion, but this surfaces a separate, real flake:
+# `preview({port: 0})` resolves before the HTTP server is actually accepting
+# connections on this device -- 1/4 isolated runs got a clean 4/4 pass, the
+# other 3/4 got ECONNREFUSED on the two direct-fetch() tests specifically
+# (the two node-subprocess-fetch tests never failed) with an unexpectedly
+# fixed port (4321, astro's static default) in the error, not a race on port
+# assignment itself. Consistent with this repo's broader "OHOS process/server
+# startup is slower, timing assumptions that hold upstream don't hold here"
+# theme; needs a real wait-for-ready fix (poll/retry before the first
+# request), not just a resolutions bump -- left as Flaky, not unquarantined.
+[ OPENHARMONY ] test/js/third_party/astro/astro-post.test.js [ Flaky ] # astro's own rollup is fixed (build() runs), but preview({port:0})'s promise resolves before the server actually accepts connections; ~3/4 isolated runs ECONNREFUSED on the two direct-fetch tests, needs a wait-for-ready fix
+# @resvg/resvg-js is fixed at the require()/render() level (community port
+# @ohos-npm-ports/resvg-resvg-js@2.6.2-1 -- migrated 2026-08-29 from the
+# @ohos-ports/resvg-resvg-js@2.6.2-1 build this section originally referenced,
+# see test/package.json's resolutions; both are the ohos-ports/ohos-ports and
+# ohos-npm-ports/ohos-npm-ports community repos respectively, byte-identical
+# build.sh recipe, confirmed working PNG output in isolation), but this
+# specific test's hardcoded bbox-after-crop expectation doesn't match
+# bit-for-bit: expects 112.20712208389321, this build's resvg produces
+# 112.20712280273438 (differs at the 6th decimal place, reproducible 100% in
+# isolation, not a concurrency artifact, identical value on both community
+# builds since they share the same build recipe -- confirmed the migration
+# does not change this). Root cause identified: both community builds compile
+# the exact same upstream source with stable rustc 1.98.0 via `brew install
+# rust`, while upstream's own CI pins nightly-2023-12-11 (a toolchain that
+# predates rustc's OHOS-host support and can't be used here) -- a genuine
+# cross-compiler floating-point rounding difference in this SVG's multi-step
+# affine transform + arc-to-bezier math, not a missing feature or an OHOS
+# platform limitation.
+[ OPENHARMONY ] test/js/third_party/resvg/bbox.test.js [ Skip ] # @ohos-npm-ports/resvg-resvg-js@2.6.2-1 renders correctly but this build's bbox-after-crop float output differs from upstream's hardcoded expectation at the 6th decimal place (rustc 1.98.0 vs upstream's pinned nightly-2023-12-11, not a missing-feature gap)
+#
+# sharp has real upstream+community native support in principle
+# (test/package.json resolutions -> npm:@ohos-ports/sharp@0.34.5-beta.5,
+# confirmed real image work in isolation), but this specific beta build
+# crashes at `require("sharp")` itself: `lib/utility.js` unconditionally reads
+# `format.jp2k.output.alias`, and this build's native binding has no jp2k
+# (JPEG 2000) codec compiled in, so `format.jp2k` is undefined -- a bug in the
+# port's build, not an OHOS platform limitation. The port's `beta` npm dist-tag
+# (0.34.5-beta.11 as of this check) iterates fast and may already fix it, but
+# every beta since -beta.6 is younger than this repo's own
+# `[install].minimumReleaseAge` (3 days) and gets blocked by that gate --
+# recheck once a fixed build clears it.
+[ OPENHARMONY ] test/integration/sharp/sharp.test.ts [ Skip ] # @ohos-ports/sharp@0.34.5-beta.5 crashes at require() time (format.jp2k undefined, missing codec in this beta build) -- not an "OHOS has no binary" case anymore, recheck a newer beta once past the 3-day minimumReleaseAge gate
+# prisma.test.ts's own @napi-rs/canvas import is fixed by the same
+# test/package.json resolutions entry as the standalone canvas test, but that
+# only gets the file as far as an independent, deeper blocker: prisma's own
+# query-engine
+# `.so.node` (`libquery_engine-debian-openssl-1.1.x.so.node`) is a glibc
+# binary (`DT_NEEDED librt.so.1`), and bun/OHOS is musl -- same class of
+# problem as sharp/canvas originally were, but for prisma's engine itself,
+# which has no musl/OHOS build anywhere (upstream or community). Real
+# "port prisma's query engine" work, not a resolutions-only fix.
+[ OPENHARMONY ] test/js/third_party/prisma/prisma.test.ts [ Skip ] # prisma's own query-engine .so.node is glibc-linked, incompatible with musl/OHOS bun (no musl/OHOS build exists); unrelated to @napi-rs/canvas, which is fixed
 
 
 # --- FUSE mount tests: /dev/fuse exists but the OHOS app sandbox denies access
@@ -372,6 +458,8 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 [ OPENHARMONY ] test/js/node/process/process.test.js [ Failure ] # class C: 测试硬编码 v26.3.0，bun node compat 已是 v26.5.0
 [ OPENHARMONY ] test/cli/install/bun-security-scanner-matrix-with-node-modules.test.ts [ Failure ] # class C: exitCode mismatch（OHOS env）
 [ OPENHARMONY ] test/js/web/workers/message-port-context-destroy-leak.test.ts [ Failure ] # class A（上游缺陷）: per-Worker lifecycle leak ~1.4-1.8MB, MessagePort 只是放大器 — see OHOS_TEST_TODO.md T35（未修，等上游 fix）
+[ OPENHARMONY ] test/js/bun/spawn/spawn-cgroup.test.ts [ Failure ] # 结构性：cgroup-join 整条路径（clone3 + 子进程写 cgroup.procs 兜底，bun-spawn.cpp）限定在 OS(LINUX) && !defined(__OHOS__)，OHOS 上 spawn({cgroup}) 是 no-op，4/13 用例断言 cgroup.procs 被写入必挂
+[ OPENHARMONY ] test/js/bun/http/serve-file-slice-read-error.test.ts [ Skip ] # 结构性不可测：用例靠 ptrace(PTRACE_TRACEME) 注入 EIO 故障，本机沙箱 seccomp 拦 ptrace（EPERM）；bun read() 是裸 syscall（rustix linux_raw backend），LD_PRELOAD/ohos-trace-shim 也拦不到，无替代注入手段（2026-08-25 r80 真机复测同一签名确认）
 
 # --- js/bun/io: Bun.file slice+write truncation ---
 # FIXED in r23 (commit 28603b97c). Root cause: copy_file_using_read_write_loop

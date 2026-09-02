@@ -7,6 +7,10 @@ import { join } from "node:path";
 // process.versions.modules. win32-arm64 has no prebuild — skip there rather
 // than fall through to a node-gyp source build.
 const hasPrebuild = !(isWindows && process.arch === "arm64");
+const isOHOSArm64 = process.platform === "openharmony";
+// Upstream has no openharmony-arm64 prebuild; @ohos-ports/datadog-pprof is the
+// same 5.17.0 source republished with an added OHOS prebuild (ohos-ports/ohos-ports#7).
+const pprofDependency = isOHOSArm64 ? "npm:@ohos-ports/datadog-pprof@5.17.0-1" : "5.17.0";
 
 describe.skipIf(!hasPrebuild)("@datadog/pprof", () => {
   test("TimeProfiler start/stop returns a populated profile", async () => {
@@ -15,7 +19,7 @@ describe.skipIf(!hasPrebuild)("@datadog/pprof", () => {
         name: "datadog-pprof-fixture",
         version: "0.0.0",
         dependencies: {
-          "@datadog/pprof": "5.17.0",
+          "@datadog/pprof": pprofDependency,
         },
         trustedDependencies: ["@datadog/pprof"],
       }),

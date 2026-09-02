@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import { bunEnv, bunExe, tmpdirSync } from "harness";
+import { bunEnv, bunExe, isOHOS, tmpdirSync } from "harness";
 import { join } from "path";
 
 const cwd = tmpdirSync();
@@ -19,6 +19,24 @@ await proc.exited;
 console.log([1]);
 expect(proc.signalCode).toBeNull();
 expect(proc.exitCode).toBe(0);
+
+if (isOHOS) {
+  // rsbuild@1 pulls @rspack/core ~1.7.10, whose upstream @rspack/binding has no
+  // OHOS build. The community port @ohos-ports/rspack-binding is a native
+  // (real-machine verified) OHOS build of the 1.7.11 release; the scaffolded
+  // app's own package.json has no override slot, so patch one in before install.
+  // @rspack/core must be pinned to the exact matching 1.7.11 too -- rspack's
+  // own runtime check rejects a core/binding version mismatch (the `~1.7.10`
+  // range otherwise floats core up to whatever newer 1.7.x patch is current).
+  const pkgPath = join(cwd, "app", "package.json");
+  const pkg = await Bun.file(pkgPath).json();
+  pkg.resolutions = {
+    ...pkg.resolutions,
+    "@rspack/core": "1.7.11",
+    "@rspack/binding": "npm:@ohos-ports/rspack-binding@1.7.11-beta.0",
+  };
+  await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
+}
 
 proc = Bun.spawn({
   cmd: [bunExe(), "install"],

@@ -377,7 +377,7 @@ function packagejson() {
   "dependencies": {
     "@biomejs/biome": "^1.5.3",
     "@vscode/debugadapter": "^1.61.0",
-    "esbuild": "^0.17.15",
+    "esbuild": "^0.25.6",
     "eslint": "^8.20.0",
     "eslint-config-prettier": "^8.5.0",
     "mitata": "^0.1.3",
