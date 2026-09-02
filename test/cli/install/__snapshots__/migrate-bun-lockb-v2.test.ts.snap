@@ -1334,6 +1334,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "name": "@esbuild/openharmony-arm64",
       "name_hash": "14507817562898589114",
       "origin": "npm",
+      "os": [],
       "resolution": {
         "resolved": "https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.25.10.tgz",
         "tag": "npm",
@@ -1397,6 +1398,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "name": "@esbuild/netbsd-x64",
       "name_hash": "8663255934676239496",
       "origin": "npm",
+      "os": [],
       "resolution": {
         "resolved": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.25.10.tgz",
         "tag": "npm",
@@ -1416,6 +1418,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "name": "@esbuild/netbsd-arm64",
       "name_hash": "5074083378749729580",
       "origin": "npm",
+      "os": [],
       "resolution": {
         "resolved": "https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.25.10.tgz",
         "tag": "npm",
@@ -1468,6 +1471,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "scripts": {},
     },
     {
+      "arch": [],
       "bin": null,
       "dependencies": [],
       "id": 27,
@@ -1509,6 +1513,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "scripts": {},
     },
     {
+      "arch": [],
       "bin": null,
       "dependencies": [],
       "id": 29,
@@ -1528,6 +1533,7 @@ exports[`migrate migrate-bun-lockb-v2-most-features 1`] = `
       "scripts": {},
     },
     {
+      "arch": [],
       "bin": null,
       "dependencies": [],
       "id": 30,
