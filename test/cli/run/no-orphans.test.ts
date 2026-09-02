@@ -20,8 +20,7 @@ setDefaultTimeout(30_000);
 // Tree under test: test → sh (the "parent" we SIGKILL) → bun-debug → grandchild.
 // We SIGKILL sh and observe bun-debug and the grandchild.
 
-const isPosix =
-  process.platform === "linux" || process.platform === "darwin" || process.platform === "openharmony";
+const isPosix = process.platform === "linux" || process.platform === "darwin" || process.platform === "openharmony";
 
 // OpenHarmony: two kernel-side gaps make the Ctrl-Z job-control cases
 // unrunnable here, while everything else in this file works. Both were

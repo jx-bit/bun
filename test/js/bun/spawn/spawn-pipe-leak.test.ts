@@ -138,13 +138,21 @@ describe.todoIf(
     expect(pct).toBeLessThan(0.8);
   }
 
-  test("'pipe' stdout if read after exit should not leak memory", async () => {
-    await run(readPipeAfterExit);
-  }, timeout);
+  test(
+    "'pipe' stdout if read after exit should not leak memory",
+    async () => {
+      await run(readPipeAfterExit);
+    },
+    timeout,
+  );
 
-  test("'pipe' stdout if not read should not leak memory", async () => {
-    await run(dontRead);
-  }, timeout);
+  test(
+    "'pipe' stdout if not read should not leak memory",
+    async () => {
+      await run(dontRead);
+    },
+    timeout,
+  );
 
   test.todoIf(isWindows)(
     "'pipe' stdout if read before exit should not leak memory",

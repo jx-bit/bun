@@ -51,7 +51,9 @@ function readInterp(path: string): string | null {
     // (observed with the OHOS bottle's binary layout, which carries an extra
     // codesign section). Fall back to a positioned read in that case.
     const region =
-      p_offset + p_filesz <= buf.length ? buf.subarray(p_offset, p_offset + p_filesz) : readAt(path, p_offset, p_filesz);
+      p_offset + p_filesz <= buf.length
+        ? buf.subarray(p_offset, p_offset + p_filesz)
+        : readAt(path, p_offset, p_filesz);
     const nul = region.indexOf(0);
     return region.subarray(0, nul === -1 ? region.length : nul).toString("utf8");
   }

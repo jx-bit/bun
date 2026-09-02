@@ -181,83 +181,87 @@ test("BUN_WATCHER_TRACE with empty path does not create trace", async () => {
   expect(files.length).toBe(0);
 });
 
-test("BUN_WATCHER_TRACE appends across reloads", async () => {
-  using dir = tempDir("watcher-trace-append", {
-    "app.js": `console.log("first-0");`,
-  });
+test(
+  "BUN_WATCHER_TRACE appends across reloads",
+  async () => {
+    using dir = tempDir("watcher-trace-append", {
+      "app.js": `console.log("first-0");`,
+    });
 
-  const traceFile = join(String(dir), "append-trace.log");
-  const env = { ...bunEnv, BUN_WATCHER_TRACE: traceFile };
+    const traceFile = join(String(dir), "append-trace.log");
+    const env = { ...bunEnv, BUN_WATCHER_TRACE: traceFile };
 
-  // First run
-  const proc1 = Bun.spawn({
-    cmd: [bunExe(), "--watch", "app.js"],
-    env,
-    cwd: String(dir),
-    stdout: "pipe",
-    stderr: "inherit",
-    stdin: "ignore",
-  });
+    // First run
+    const proc1 = Bun.spawn({
+      cmd: [bunExe(), "--watch", "app.js"],
+      env,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "inherit",
+      stdin: "ignore",
+    });
 
-  let i = 0;
-  for await (const chunk of proc1.stdout) {
-    const str = new TextDecoder().decode(chunk);
-    if (str.includes(`first-${i}`)) {
-      i++;
-      if (i === 2) break; // Stop after 2 runs
-      await Bun.write(join(String(dir), "app.js"), `console.log("first-${i}");`);
+    let i = 0;
+    for await (const chunk of proc1.stdout) {
+      const str = new TextDecoder().decode(chunk);
+      if (str.includes(`first-${i}`)) {
+        i++;
+        if (i === 2) break; // Stop after 2 runs
+        await Bun.write(join(String(dir), "app.js"), `console.log("first-${i}");`);
+      }
     }
-  }
 
-  proc1.kill();
-  await proc1.exited;
+    proc1.kill();
+    await proc1.exited;
 
-  const firstContent = readFileSync(traceFile, "utf-8");
-  const firstLines = firstContent
-    .trim()
-    .split("\n")
-    .filter(l => l.trim());
-  expect(firstLines.length).toBeGreaterThan(0);
+    const firstContent = readFileSync(traceFile, "utf-8");
+    const firstLines = firstContent
+      .trim()
+      .split("\n")
+      .filter(l => l.trim());
+    expect(firstLines.length).toBeGreaterThan(0);
 
-  // Second run - should append to the same file
-  const proc2 = Bun.spawn({
-    cmd: [bunExe(), "--watch", "app.js"],
-    env,
-    cwd: String(dir),
-    stdout: "pipe",
-    stderr: "inherit",
-    stdin: "ignore",
-  });
+    // Second run - should append to the same file
+    const proc2 = Bun.spawn({
+      cmd: [bunExe(), "--watch", "app.js"],
+      env,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "inherit",
+      stdin: "ignore",
+    });
 
-  let j = 0;
-  for await (const chunk of proc2.stdout) {
-    const str = new TextDecoder().decode(chunk);
-    if (str.includes(`second-${j}`)) {
-      j++;
-      if (j === 2) break; // Stop after 2 runs
-      await Bun.write(join(String(dir), "app.js"), `console.log("second-${j}");`);
-    } else if (str.includes("first-1")) {
-      // Second process starts with previous file content ("first-1"), trigger first modification
-      await Bun.write(join(String(dir), "app.js"), `console.log("second-0");`);
+    let j = 0;
+    for await (const chunk of proc2.stdout) {
+      const str = new TextDecoder().decode(chunk);
+      if (str.includes(`second-${j}`)) {
+        j++;
+        if (j === 2) break; // Stop after 2 runs
+        await Bun.write(join(String(dir), "app.js"), `console.log("second-${j}");`);
+      } else if (str.includes("first-1")) {
+        // Second process starts with previous file content ("first-1"), trigger first modification
+        await Bun.write(join(String(dir), "app.js"), `console.log("second-0");`);
+      }
     }
-  }
 
-  proc2.kill();
-  await proc2.exited;
+    proc2.kill();
+    await proc2.exited;
 
-  const secondContent = readFileSync(traceFile, "utf-8");
-  const secondLines = secondContent
-    .trim()
-    .split("\n")
-    .filter(l => l.trim());
+    const secondContent = readFileSync(traceFile, "utf-8");
+    const secondLines = secondContent
+      .trim()
+      .split("\n")
+      .filter(l => l.trim());
 
-  // Should have more lines after second run
-  expect(secondLines.length).toBeGreaterThan(firstLines.length);
+    // Should have more lines after second run
+    expect(secondLines.length).toBeGreaterThan(firstLines.length);
 
-  // All lines should be valid JSON
-  for (const line of secondLines) {
-    const event = JSON.parse(line);
-    expect(event).toHaveProperty("timestamp");
-    expect(event).toHaveProperty("files");
-  }
-}, process.platform === "openharmony" ? 30000 : 10000); // two --watch process spawns + reload cycles; OHOS fork overhead is 2-3x slower
+    // All lines should be valid JSON
+    for (const line of secondLines) {
+      const event = JSON.parse(line);
+      expect(event).toHaveProperty("timestamp");
+      expect(event).toHaveProperty("files");
+    }
+  },
+  process.platform === "openharmony" ? 30000 : 10000,
+); // two --watch process spawns + reload cycles; OHOS fork overhead is 2-3x slower

@@ -137,17 +137,15 @@ process.exit(0);
 
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 
-    const stderrLines = stderr
-      .split("\n")
-      .filter(
-        l =>
-          l.length > 0 &&
-          !l.startsWith("WARNING: ASAN interferes") &&
-          // OHOS: busybox cat copies the fifo with splice(), and the OHOS
-          // kernel returns EPIPE instead of 0 for pipe→pipe splice at EOF
-          // (T51) — "cat: <fifo>: Broken pipe" is kernel noise, not a leak.
-          !(isOHOS && /^cat: .*: Broken pipe$/.test(l)),
-      );
+    const stderrLines = stderr.split("\n").filter(
+      l =>
+        l.length > 0 &&
+        !l.startsWith("WARNING: ASAN interferes") &&
+        // OHOS: busybox cat copies the fifo with splice(), and the OHOS
+        // kernel returns EPIPE instead of 0 for pipe→pipe splice at EOF
+        // (T51) — "cat: <fifo>: Broken pipe" is kernel noise, not a leak.
+        !(isOHOS && /^cat: .*: Broken pipe$/.test(l)),
+    );
     expect(stderrLines).toEqual([]);
     expect(stdout.trim()).toBe(JSON.stringify({ leaked: 0 }));
     expect(exitCode).toBe(0);

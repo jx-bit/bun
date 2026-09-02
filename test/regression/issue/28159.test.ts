@@ -48,10 +48,7 @@ test("runtime transpiler cache is disabled when BUN_INSPECT is set", async () =>
           : // /tmp is a read-only filesystem on OHOS (EROFS on listen()); use the
             // platform tmpdir there instead of the hardcoded /tmp path.
             "ws+unix://" +
-            join(
-              process.platform === "openharmony" ? tmpdir() : "/tmp",
-              "bun-inspect-fake-" + Date.now() + ".sock",
-            ),
+            join(process.platform === "openharmony" ? tmpdir() : "/tmp", "bun-inspect-fake-" + Date.now() + ".sock"),
     },
     stdout: "pipe",
     stderr: "pipe",
