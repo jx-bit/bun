@@ -1132,9 +1132,7 @@ pub(crate) fn copy_file_fallback(
     let dest_path: &[u8] = dest_path_z.as_bytes();
     let outf = match sys::File::create(dest_dir, dest_path, true) {
         Ok(f) => f,
-        Err(ref e)
-            if e.get_errno() == sys::E::EACCES || e.get_errno() == sys::E::EPERM =>
-        {
+        Err(ref e) if e.get_errno() == sys::E::EACCES || e.get_errno() == sys::E::EPERM => {
             let _ = sys::unlinkat(dest_dir, dest_path_z);
             sys::File::create(dest_dir, dest_path, true)?
         }

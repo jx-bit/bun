@@ -39,7 +39,7 @@ export const WEBKIT_VERSION = "0f966e81b78c84bb23213e391bc679c4ef83e56b";
  *   like the old cmake — avoids debug/release mixing.
  */
 
-import { existsSync, mkdirSync, symlinkSync, cpSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Config } from "../config.ts";
@@ -207,7 +207,7 @@ export const webkit: Dependency = {
         if (!ohosRoot) {
           throw new Error(
             "OHOS build requires OHOS_WEBKIT_ROOT env var pointing to bun-webkit installation.\n" +
-            "  Install with: brew install bun-webkit"
+              "  Install with: brew install bun-webkit",
           );
         }
         mkdirSync(destDir, { recursive: true });
@@ -462,19 +462,31 @@ export const webkit: Dependency = {
       const icuInclude = ohosIcuDir ? `-I${ohosIcuDir}/include` : "";
       if (ohosCrossLibs) {
         args.CMAKE_CXX_FLAGS = [
-          optFlagStr, targetFlag, sysrootFlag, "-D__MUSL__",
-          "-mbranch-protection=none", "-mno-outline-atomics",
+          optFlagStr,
+          targetFlag,
+          sysrootFlag,
+          "-D__MUSL__",
+          "-mbranch-protection=none",
+          "-mno-outline-atomics",
           `-nostdinc++ -I${ohosCrossLibs}/libcxx/include/v1`,
           `-I${ohosCrossLibs}/libcxxabi/include`,
           icuInclude,
           "-fno-c++-static-destructors",
           "-std=gnu++23",
-        ].filter(Boolean).join(" ");
+        ]
+          .filter(Boolean)
+          .join(" ");
         args.CMAKE_C_FLAGS = [
-          optFlagStr, targetFlag, sysrootFlag, "-D__MUSL__",
-          "-mbranch-protection=none", "-mno-outline-atomics",
+          optFlagStr,
+          targetFlag,
+          sysrootFlag,
+          "-D__MUSL__",
+          "-mbranch-protection=none",
+          "-mno-outline-atomics",
           icuInclude,
-        ].filter(Boolean).join(" ");
+        ]
+          .filter(Boolean)
+          .join(" ");
         // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
         // crtendS.o). clang --target=aarch64-linux-ohos auto-adds them, failing
         // the link. -nostartfiles skips only crt begin/end (keeps compiler-rt
@@ -489,7 +501,12 @@ export const webkit: Dependency = {
       if (ohosIcuDir) {
         // hostBin is sibling of ohosIcuDir's parent: ohosIcuDir="<prefix>/target" → hostBin="<prefix>/host/bin"
         const hostBin = resolve(ohosIcuDir, "..", "host", "bin");
-        for (const [key, exe] of [["ICU_GENDATA_EXECUTABLE", "genrb"], ["ICU_GENCCODE_EXECUTABLE", "genccode"], ["ICU_GENCMN_EXECUTABLE", "gencmn"], ["ICU_PKGDATA_EXECUTABLE", "pkgdata"]] as const) {
+        for (const [key, exe] of [
+          ["ICU_GENDATA_EXECUTABLE", "genrb"],
+          ["ICU_GENCCODE_EXECUTABLE", "genccode"],
+          ["ICU_GENCMN_EXECUTABLE", "gencmn"],
+          ["ICU_PKGDATA_EXECUTABLE", "pkgdata"],
+        ] as const) {
           const exePath = resolve(hostBin, exe);
           if (existsSync(exePath)) {
             args[key] = exePath;

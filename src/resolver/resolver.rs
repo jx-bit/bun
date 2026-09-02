@@ -6516,7 +6516,8 @@ impl<'a> Resolver<'a> {
                     Ok(v) => v.map(bun_core::heap::into_raw),
                     Err(err) => {
                         let pretty = tsconfigpath;
-                        let is_not_found_like = err == crate::Error::Sys(bun_errno::SystemErrno::ENOENT)
+                        let is_not_found_like = err
+                            == crate::Error::Sys(bun_errno::SystemErrno::ENOENT)
                             || (cfg!(target_env = "ohos")
                                 && (err == crate::Error::Sys(bun_errno::SystemErrno::EACCES)
                                     || err == crate::Error::Sys(bun_errno::SystemErrno::EPERM)));

@@ -37,18 +37,21 @@ describe.concurrent("require.cache", () => {
 
   // https://github.com/oven-sh/bun/issues/5188
   // msgpackr-extract has no prebuilt binary for win32-arm64 or OHOS, so it's unavailable there
-  test.skipIf((isWindows && isArm64) || process.platform === "openharmony")("require.cache does not include unevaluated modules", async () => {
-    await using proc = Bun.spawn({
-      cmd: [bunExe(), "run", join(import.meta.dir, "require-cache-bug-5188.js")],
-      env: bunEnv,
-      stderr: "inherit",
-    });
+  test.skipIf((isWindows && isArm64) || process.platform === "openharmony")(
+    "require.cache does not include unevaluated modules",
+    async () => {
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), "run", join(import.meta.dir, "require-cache-bug-5188.js")],
+        env: bunEnv,
+        stderr: "inherit",
+      });
 
-    const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
+      const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
 
-    expect(stdout.trim()).toEndWith("--pass--");
-    expect(exitCode).toBe(0);
-  });
+      expect(stdout.trim()).toEndWith("--pass--");
+      expect(exitCode).toBe(0);
+    },
+  );
 
   describe.skipIf(isBroken && isIntelMacOS)("files transpiled and loaded don't leak the output source code", () => {
     test("via require() with a lot of long export names", async () => {

@@ -1809,106 +1809,110 @@ it("should install version tagged with `latest` by default", async () => {
   await access(join(package_dir, "bun.lockb"));
 });
 
-it("should handle Git URL in dependencies (SCP-style)", async () => {
-  const urls: string[] = [];
-  setHandler(dummyRegistry(urls));
-  await writeFile(
-    join(package_dir, "package.json"),
-    JSON.stringify({
-      name: "foo",
-      version: "0.0.1",
-    }),
-  );
-  const {
-    stdout: stdout1,
-    stderr: stderr1,
-    exited: exited1,
-  } = spawn({
-    cmd: [bunExe(), "add", "bun@github.com:mishoo/UglifyJS.git"],
-    cwd: package_dir,
-    stdout: "pipe",
-    stdin: "pipe",
-    stderr: "pipe",
-    env,
-  });
-  const err1 = await new Response(stderr1).text();
-  expect(err1).not.toContain("error:");
-  expect(err1).toContain("Saved lockfile");
-  let out1 = await new Response(stdout1).text();
-  out1 = out1.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "");
-  out1 = out1.replace(/(\.git)#[a-f0-9]+/, "$1");
-  expect(out1.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
-    expect.stringContaining("bun add v1."),
-    "",
-    "installed uglify-js@git+ssh://bun@github.com:mishoo/UglifyJS.git with binaries:",
-    " - uglifyjs",
-    "",
-    "1 package installed",
-  ]);
-  expect(await exited1).toBe(0);
-  expect(urls.sort()).toBeEmpty();
-  expect(requested).toBe(0);
-  expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".bin", ".cache", "uglify-js"]);
-  expect(await readdirSorted(join(package_dir, "node_modules", ".bin"))).toHaveBins(["uglifyjs"]);
-  expect(join(package_dir, "node_modules", ".bin", "uglifyjs")).toBeValidBin(
-    join("..", "uglify-js", "bin", "uglifyjs"),
-  );
-  expect((await readdirSorted(join(package_dir, "node_modules", ".cache")))[0]).toBe("9d05c118f06c3b4c.git");
-  expect(await readdirSorted(join(package_dir, "node_modules", "uglify-js"))).toEqual([
-    ".bun-tag",
-    ".gitattributes",
-    ".github",
-    ".gitignore",
-    "CONTRIBUTING.md",
-    "LICENSE",
-    "README.md",
-    "bin",
-    "lib",
-    "package.json",
-    "test",
-    "tools",
-  ]);
-  const package_json = await file(join(package_dir, "node_modules", "uglify-js", "package.json")).json();
-  expect(package_json.name).toBe("uglify-js");
-  expect(await file(join(package_dir, "package.json")).text()).toEqual(
-    JSON.stringify(
-      {
+it(
+  "should handle Git URL in dependencies (SCP-style)",
+  async () => {
+    const urls: string[] = [];
+    setHandler(dummyRegistry(urls));
+    await writeFile(
+      join(package_dir, "package.json"),
+      JSON.stringify({
         name: "foo",
         version: "0.0.1",
-        dependencies: {
-          "uglify-js": "bun@github.com:mishoo/UglifyJS.git",
+      }),
+    );
+    const {
+      stdout: stdout1,
+      stderr: stderr1,
+      exited: exited1,
+    } = spawn({
+      cmd: [bunExe(), "add", "bun@github.com:mishoo/UglifyJS.git"],
+      cwd: package_dir,
+      stdout: "pipe",
+      stdin: "pipe",
+      stderr: "pipe",
+      env,
+    });
+    const err1 = await new Response(stderr1).text();
+    expect(err1).not.toContain("error:");
+    expect(err1).toContain("Saved lockfile");
+    let out1 = await new Response(stdout1).text();
+    out1 = out1.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "");
+    out1 = out1.replace(/(\.git)#[a-f0-9]+/, "$1");
+    expect(out1.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+      expect.stringContaining("bun add v1."),
+      "",
+      "installed uglify-js@git+ssh://bun@github.com:mishoo/UglifyJS.git with binaries:",
+      " - uglifyjs",
+      "",
+      "1 package installed",
+    ]);
+    expect(await exited1).toBe(0);
+    expect(urls.sort()).toBeEmpty();
+    expect(requested).toBe(0);
+    expect(await readdirSorted(join(package_dir, "node_modules"))).toEqual([".bin", ".cache", "uglify-js"]);
+    expect(await readdirSorted(join(package_dir, "node_modules", ".bin"))).toHaveBins(["uglifyjs"]);
+    expect(join(package_dir, "node_modules", ".bin", "uglifyjs")).toBeValidBin(
+      join("..", "uglify-js", "bin", "uglifyjs"),
+    );
+    expect((await readdirSorted(join(package_dir, "node_modules", ".cache")))[0]).toBe("9d05c118f06c3b4c.git");
+    expect(await readdirSorted(join(package_dir, "node_modules", "uglify-js"))).toEqual([
+      ".bun-tag",
+      ".gitattributes",
+      ".github",
+      ".gitignore",
+      "CONTRIBUTING.md",
+      "LICENSE",
+      "README.md",
+      "bin",
+      "lib",
+      "package.json",
+      "test",
+      "tools",
+    ]);
+    const package_json = await file(join(package_dir, "node_modules", "uglify-js", "package.json")).json();
+    expect(package_json.name).toBe("uglify-js");
+    expect(await file(join(package_dir, "package.json")).text()).toEqual(
+      JSON.stringify(
+        {
+          name: "foo",
+          version: "0.0.1",
+          dependencies: {
+            "uglify-js": "bun@github.com:mishoo/UglifyJS.git",
+          },
         },
-      },
-      null,
-      2,
-    ),
-  );
-  await access(join(package_dir, "bun.lockb"));
-  const {
-    stdout: stdout2,
-    stderr: stderr2,
-    exited: exited2,
-  } = spawn({
-    cmd: [bunExe(), "install"],
-    cwd: package_dir,
-    stdout: "pipe",
-    stdin: "pipe",
-    stderr: "pipe",
-    env,
-  });
-  const err2 = await new Response(stderr2).text();
-  expect(err2).not.toContain("error:");
-  expect(err2).not.toContain("Saved lockfile");
-  const out2 = await new Response(stdout2).text();
-  expect(out2.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
-    expect.stringContaining("bun install v1."),
-    "",
-    "Checked 1 install across 2 packages (no changes)",
-  ]);
-  expect(await exited2).toBe(0);
-  expect(urls.sort()).toBeEmpty();
-  expect(requested).toBe(0);
-}, process.platform === "openharmony" ? 1000 * 60 * 5 : 20000);
+        null,
+        2,
+      ),
+    );
+    await access(join(package_dir, "bun.lockb"));
+    const {
+      stdout: stdout2,
+      stderr: stderr2,
+      exited: exited2,
+    } = spawn({
+      cmd: [bunExe(), "install"],
+      cwd: package_dir,
+      stdout: "pipe",
+      stdin: "pipe",
+      stderr: "pipe",
+      env,
+    });
+    const err2 = await new Response(stderr2).text();
+    expect(err2).not.toContain("error:");
+    expect(err2).not.toContain("Saved lockfile");
+    const out2 = await new Response(stdout2).text();
+    expect(out2.replace(/\s*\[[0-9\.]+m?s\]\s*$/, "").split(/\r?\n/)).toEqual([
+      expect.stringContaining("bun install v1."),
+      "",
+      "Checked 1 install across 2 packages (no changes)",
+    ]);
+    expect(await exited2).toBe(0);
+    expect(urls.sort()).toBeEmpty();
+    expect(requested).toBe(0);
+  },
+  process.platform === "openharmony" ? 1000 * 60 * 5 : 20000,
+);
 
 it("should not save git urls twice", async () => {
   const urls: string[] = [];

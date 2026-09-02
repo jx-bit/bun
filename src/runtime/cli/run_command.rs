@@ -644,9 +644,10 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         let root_dir_info: Option<bun_resolver::DirInfoRef> =
             match this_transpiler.resolver.read_dir_info(top_level_dir) {
                 #[cfg(target_env = "ohos")]
-                Err(err) if with_linker
-                    && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
-                        || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES)) =>
+                Err(err)
+                    if with_linker
+                        && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
+                            || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES)) =>
                 {
                     None
                 }
@@ -693,7 +694,11 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
                 let home = std::env::var("HOME").unwrap_or_default();
                 let info = this_transpiler
                     .resolver
-                    .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home.as_bytes() })
+                    .read_dir_info_ignore_error(if home.is_empty() {
+                        b"/"
+                    } else {
+                        home.as_bytes()
+                    })
                     .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
                     .ok_or(crate::Error::InstallFailed)?;
                 if opts.log_errors {
@@ -794,7 +799,10 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
         let seed_package_env = !root_dir_info_is_fallback;
         #[cfg(not(target_env = "ohos"))]
         let seed_package_env = true;
-        if let Some(package_json) = root_dir_info.enclosing_package_json.filter(|_| seed_package_env) {
+        if let Some(package_json) = root_dir_info
+            .enclosing_package_json
+            .filter(|_| seed_package_env)
+        {
             if !package_json.name.is_empty() {
                 if env_loader.map.get(NpmArgs::PACKAGE_NAME).is_none() {
                     env_loader
@@ -3713,7 +3721,7 @@ impl RunCommand {
             || FILTER == Filter::AllPlusBunJs
             || FILTER == Filter::ScriptAndDescriptions
         {
-        if let Some(package_json) = root_dir_info.enclosing_package_json {
+            if let Some(package_json) = root_dir_info.enclosing_package_json {
                 if let Some(scripts) = package_json.scripts.as_deref() {
                     results.ensure_unused_capacity(scripts.count())?;
                     if FILTER == Filter::ScriptAndDescriptions {

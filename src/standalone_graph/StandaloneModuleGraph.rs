@@ -509,10 +509,7 @@ mod elf {
             c.next(); // dev
             let inode = c.next().unwrap_or("0");
             let path = c.next().unwrap_or("");
-            if file_off == "00000000"
-                && inode != "0"
-                && !path.is_empty()
-                && !path.starts_with('[')
+            if file_off == "00000000" && inode != "0" && !path.is_empty() && !path.starts_with('[')
             {
                 if let Some(start) = addr_range.split('-').next() {
                     if let Ok(base) = usize::from_str_radix(start, 16) {
@@ -561,8 +558,11 @@ mod elf {
             return None;
         }
         let shoff = u64::from_le_bytes(ehdr[EHDR_E_SHOFF..EHDR_E_SHOFF + 8].try_into().ok()?);
-        let shentsize =
-            u16::from_le_bytes(ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2].try_into().ok()?);
+        let shentsize = u16::from_le_bytes(
+            ehdr[EHDR_E_SHENTSIZE..EHDR_E_SHENTSIZE + 2]
+                .try_into()
+                .ok()?,
+        );
         let shnum = u16::from_le_bytes(ehdr[EHDR_E_SHNUM..EHDR_E_SHNUM + 2].try_into().ok()?);
         let shstrndx =
             u16::from_le_bytes(ehdr[EHDR_E_SHSTRNDX..EHDR_E_SHSTRNDX + 2].try_into().ok()?);
@@ -573,10 +573,15 @@ mod elf {
         let mut shstrtab_shdr = [0u8; 64];
         read_at(file, shstrtab_shoff, &mut shstrtab_shdr)?;
         let shstrtab_offset = u64::from_le_bytes(
-            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
+            shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8]
+                .try_into()
+                .ok()?,
         );
-        let shstrtab_size =
-            u64::from_le_bytes(shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
+        let shstrtab_size = u64::from_le_bytes(
+            shstrtab_shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8]
+                .try_into()
+                .ok()?,
+        );
         let shstrtab_size_usize = shstrtab_size as usize;
         let mut shstrtab = vec![0u8; shstrtab_size_usize];
         read_at(file, shstrtab_offset, &mut shstrtab)?;
@@ -589,9 +594,8 @@ mod elf {
             if name_off + 5 <= shstrtab_size_usize
                 && &shstrtab[name_off..name_off + 5] == BUN_SECTION_NAME
             {
-                let sec_offset = u64::from_le_bytes(
-                    shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?,
-                );
+                let sec_offset =
+                    u64::from_le_bytes(shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8].try_into().ok()?);
                 let sec_size =
                     u64::from_le_bytes(shdr[SHDR_SH_SIZE..SHDR_SH_SIZE + 8].try_into().ok()?);
                 return Some((sec_offset, sec_size));

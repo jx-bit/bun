@@ -58,10 +58,12 @@ const TESTS: [name: string, builder: () => TestBuilder, runs?: number][] = [
 
 describe.concurrent("fd leak", () => {
   function fdLeakTest(name: string, builder: () => TestBuilder, runs: number = 1000, threshold: number = 5) {
-    test(`fdleak_${name}`, async () => {
-      const testcode = await Bun.file(join(import.meta.dirname, "./test_builder.ts")).text();
+    test(
+      `fdleak_${name}`,
+      async () => {
+        const testcode = await Bun.file(join(import.meta.dirname, "./test_builder.ts")).text();
 
-      const impl = /* ts */ `
+        const impl = /* ts */ `
               import { openSync, closeSync, readdirSync } from "node:fs";
               import { devNull } from "os";
               const TestBuilder = createTestBuilder(import.meta.path);
@@ -94,20 +96,22 @@ describe.concurrent("fd leak", () => {
               }
             `;
 
-      using dir = tempDir("fdleak", {
-        "script.ts": testcode + impl,
-      });
+        using dir = tempDir("fdleak", {
+          "script.ts": testcode + impl,
+        });
 
-      const { exited, stderr: stream } = Bun.spawn([process.argv0, "--smol", "test", join(dir, "script.ts")], {
-        env: bunEnv,
-        stderr: "pipe",
-      });
-      const [exitCode, stderr] = await Promise.all([exited, stream.text()]);
-      if (exitCode != 0) {
-        console.log("\n\nSTDERR:", stderr);
-      }
-      expect(exitCode).toBe(0);
-    }, timeout);
+        const { exited, stderr: stream } = Bun.spawn([process.argv0, "--smol", "test", join(dir, "script.ts")], {
+          env: bunEnv,
+          stderr: "pipe",
+        });
+        const [exitCode, stderr] = await Promise.all([exited, stream.text()]);
+        if (exitCode != 0) {
+          console.log("\n\nSTDERR:", stderr);
+        }
+        expect(exitCode).toBe(0);
+      },
+      timeout,
+    );
   }
 
   function memLeakTest(
@@ -116,10 +120,12 @@ describe.concurrent("fd leak", () => {
     runs: number = 500,
     threshold: number = DEFAULT_THRESHOLD,
   ) {
-    test(`memleak_${name}`, async () => {
-      const testcode = await Bun.file(join(import.meta.dirname, "./test_builder.ts")).text();
+    test(
+      `memleak_${name}`,
+      async () => {
+        const testcode = await Bun.file(join(import.meta.dirname, "./test_builder.ts")).text();
 
-      const impl = /* ts */ `
+        const impl = /* ts */ `
               import { heapStats } from "bun:jsc";
               const TestBuilder = createTestBuilder(import.meta.path);
               const rss = process.platform === "darwin" && typeof Bun.unsafe.memoryFootprint === "function" ? Bun.unsafe.memoryFootprint : process.memoryUsage.rss;
@@ -153,20 +159,22 @@ describe.concurrent("fd leak", () => {
               }
             `;
 
-      using dir = tempDir("memleak", {
-        "script.ts": testcode + impl,
-      });
+        using dir = tempDir("memleak", {
+          "script.ts": testcode + impl,
+        });
 
-      const { exited, stderr: stream } = Bun.spawn([process.argv0, "--smol", "test", join(dir, "script.ts")], {
-        env: bunEnv,
-        stderr: "pipe",
-      });
-      const [exitCode, stderr] = await Promise.all([exited, stream.text()]);
-      if (exitCode != 0) {
-        console.log("\n\nSTDERR:", stderr);
-      }
-      expect(exitCode).toBe(0);
-    }, timeout);
+        const { exited, stderr: stream } = Bun.spawn([process.argv0, "--smol", "test", join(dir, "script.ts")], {
+          env: bunEnv,
+          stderr: "pipe",
+        });
+        const [exitCode, stderr] = await Promise.all([exited, stream.text()]);
+        if (exitCode != 0) {
+          console.log("\n\nSTDERR:", stderr);
+        }
+        expect(exitCode).toBe(0);
+      },
+      timeout,
+    );
   }
 
   TESTS.forEach(args => {

@@ -628,59 +628,63 @@ it("should call close and exit before process exits", async () => {
   expect(await proc.exited).toBe(0);
 });
 
-it("it accepts stdio passthrough", async () => {
-  const package_dir = tmpdirSync();
+it(
+  "it accepts stdio passthrough",
+  async () => {
+    const package_dir = tmpdirSync();
 
-  await fs.promises.writeFile(
-    path.join(package_dir, "package.json"),
-    JSON.stringify({
-      "name": "npm-run-all-test",
-      "version": "1.0.0",
-      "type": "module",
-      "scripts": {
-        "all": "run-p echo-hello echo-world",
-        "echo-hello": "echo hello",
-        "echo-world": "echo world",
-      },
-      "devDependencies": {
-        "npm-run-all": "4.1.5",
-      },
-    }),
-  );
+    await fs.promises.writeFile(
+      path.join(package_dir, "package.json"),
+      JSON.stringify({
+        "name": "npm-run-all-test",
+        "version": "1.0.0",
+        "type": "module",
+        "scripts": {
+          "all": "run-p echo-hello echo-world",
+          "echo-hello": "echo hello",
+          "echo-world": "echo world",
+        },
+        "devDependencies": {
+          "npm-run-all": "4.1.5",
+        },
+      }),
+    );
 
-  await using installProc = Bun.spawn({
-    cmd: [bunExe(), "install"],
-    cwd: package_dir,
-    stdio: ["inherit", "pipe", "pipe"],
-    env: bunEnv,
-  });
-  const [installStderr, installExitCode] = await Promise.all([installProc.stderr.text(), installProc.exited]);
-  if (installExitCode !== 0) {
-    throw new Error(`bun install failed with exit code ${installExitCode}:\n${installStderr}`);
-  }
+    await using installProc = Bun.spawn({
+      cmd: [bunExe(), "install"],
+      cwd: package_dir,
+      stdio: ["inherit", "pipe", "pipe"],
+      env: bunEnv,
+    });
+    const [installStderr, installExitCode] = await Promise.all([installProc.stderr.text(), installProc.exited]);
+    if (installExitCode !== 0) {
+      throw new Error(`bun install failed with exit code ${installExitCode}:\n${installStderr}`);
+    }
 
-  await using runProc = Bun.spawn({
-    cmd: [bunExe(), "--bun", "run", "all"],
-    cwd: package_dir,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: bunEnv,
-  });
-  const [err, out, exitCode] = await Promise.all([runProc.stderr.text(), runProc.stdout.text(), runProc.exited]);
-  try {
-    // This command outputs in either `["hello", "world"]` or `["world", "hello"]` order.
-    expect([err.split("\n")[0], ...err.split("\n").slice(1, -1).sort(), err.split("\n").at(-1)]).toEqual([
-      "$ run-p echo-hello echo-world",
-      "$ echo hello",
-      "$ echo world",
-      "",
-    ]);
-    expect(out.split("\n").slice(0, -1).sort()).toStrictEqual(["hello", "world"].sort());
-    expect(exitCode).toBe(0);
-  } catch (e) {
-    console.error({ exitCode, err, out });
-    throw e;
-  }
-}, process.platform === "openharmony" ? 90_000 : 30_000); // real `bun install` + run; OHOS network/install overhead is higher
+    await using runProc = Bun.spawn({
+      cmd: [bunExe(), "--bun", "run", "all"],
+      cwd: package_dir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: bunEnv,
+    });
+    const [err, out, exitCode] = await Promise.all([runProc.stderr.text(), runProc.stdout.text(), runProc.exited]);
+    try {
+      // This command outputs in either `["hello", "world"]` or `["world", "hello"]` order.
+      expect([err.split("\n")[0], ...err.split("\n").slice(1, -1).sort(), err.split("\n").at(-1)]).toEqual([
+        "$ run-p echo-hello echo-world",
+        "$ echo hello",
+        "$ echo world",
+        "",
+      ]);
+      expect(out.split("\n").slice(0, -1).sort()).toStrictEqual(["hello", "world"].sort());
+      expect(exitCode).toBe(0);
+    } catch (e) {
+      console.error({ exitCode, err, out });
+      throw e;
+    }
+  },
+  process.platform === "openharmony" ? 90_000 : 30_000,
+); // real `bun install` + run; OHOS network/install overhead is higher
 
 it.if(!isWindows)("spawnSync correctly reports signal codes", () => {
   const trapCode = `
