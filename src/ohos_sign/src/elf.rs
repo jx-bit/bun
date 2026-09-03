@@ -150,6 +150,50 @@ pub fn has_codesign_section(elf: &[u8]) -> bool {
     .is_some()
 }
 
+/// Validate an existing .codesign section: the descriptor's file_size must
+/// equal the actual file length and the recomputed merkle root (over the
+/// file with the section skipped) must match the descriptor's root hash.
+///
+/// `bun build --compile` uses the running executable as its stub, and the
+/// compiled output inherits the stub's section verbatim - the section then
+/// describes the stub rather than the payload-expanded output. Mere
+/// existence (has_codesign_section) therefore does not mean the signature
+/// is usable; the kernel rejects files whose section fails this check.
+pub fn has_valid_codesign(elf: &[u8]) -> bool {
+    let Ok(header) = parse_header(elf) else {
+        return false;
+    };
+    let Some(hdr_off) = find_section_by_name(
+        elf,
+        header.e_shoff,
+        header.e_shnum,
+        header.e_shstrndx,
+        header.e_shentsize,
+        CODESIGN_NAME,
+    ) else {
+        return false;
+    };
+    let entry = &elf[hdr_off..hdr_off + header.e_shentsize as usize];
+    let cs_off = read_u64(entry, 24) as usize; // sh_offset
+    let cs_size = read_u64(entry, 32) as usize; // sh_size
+    // payload: ElfSignInfo header (8B) + descriptor (256B) + signature (32B)
+    if cs_off + 8 + descriptor::SIZE > elf.len() || cs_size < 8 + descriptor::SIZE {
+        return false;
+    }
+    let payload = &elf[cs_off..];
+    if payload[0..4] != descriptor::ELF_SIGN_INFO_TYPE.to_le_bytes() {
+        return false;
+    }
+    let desc = &payload[8..8 + descriptor::SIZE];
+    let file_size = u64::from_le_bytes(desc[8..16].try_into().unwrap());
+    let root: [u8; 32] = desc[16..48].try_into().unwrap();
+    if file_size != elf.len() as u64 {
+        return false;
+    }
+    let (recomputed, _) = merkle::root_hash_and_tree(elf, cs_off as u64, PAGE as u64);
+    recomputed == root
+}
+
 /// Strip .codesign section. Returns true if a section was removed.
 /// Rebuilds the ELF in-place by rewriting shstrtab and SHT without the removed entry.
 pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
