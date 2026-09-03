@@ -1298,7 +1298,7 @@ export const linkerFlags: Flag[] = [
         c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
         "-lc++",
         "-lc++abi",
-        "-lunwind",
+        "-l:libunwind.a",  // static: no libunwind.so.1 exists on devices/CI image
         "-lc",
       ].filter(f => f !== ""),
     when: c => c.ohos,

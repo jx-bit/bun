@@ -1162,6 +1162,12 @@ export function getFileUrl(filename, line) {
 
   const filePath = (cwd ? relative(cwd, filename) : filename).replace(/\\/g, "/");
   const commit = getCommit(cwd);
+  // git may be unavailable or blocked by dubious-ownership in sandboxed
+  // environments (e.g. the OHOS container runs as root over a runner-owned
+  // checkout) — fail soft: the failure annotation just loses its link.
+  if (!baseUrl || !commit) {
+    return;
+  }
   const url = new URL(`blob/${commit}/${filePath}`, `${baseUrl}/`).toString();
   if (typeof line !== "undefined") {
     return new URL(`#L${line}`, url);
