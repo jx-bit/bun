@@ -1,6 +1,8 @@
 // ELF signing and section injection tests.
 
-use ohos_sign::{has_codesign, sign_selfsign, sign_selfsign_with_strip, strip_codesign};
+use ohos_sign::{
+    has_codesign, has_valid_codesign, sign_selfsign, sign_selfsign_with_strip, strip_codesign,
+};
 
 /// Minimal valid ELF64 LE (no sections, just 64-byte ELF header with empty SHT).
 /// We'll use a real minimal ELF with a shstrtab so injection can work.
@@ -191,4 +193,69 @@ fn codesign_section_offset(elf: &[u8]) -> u64 {
         }
     }
     panic!(".codesign section not found");
+}
+
+// ── has_valid_codesign（compile 产物继承段检测）──────────────────────
+
+/// 在签名后的 ELF 里定位 descriptor（ElfSignInfo header 后的 256 字节）。
+/// 测试专用：生产代码走 elf.rs 内部路径。
+fn locate_descriptor(elf: &[u8]) -> Option<usize> {
+    let ty = 1u32.to_le_bytes(); // ELF_SIGN_INFO_TYPE
+    (0..elf.len().saturating_sub(8 + 256))
+        .find(|&i| elf[i..i + 4] == ty && elf[i + 4..i + 8] == (256u32 + 32).to_le_bytes())
+}
+
+#[test]
+fn freshly_signed_section_validates() {
+    let elf = tiny_elf64();
+    let signed = sign_selfsign(&elf).expect("sign failed");
+    assert!(has_codesign(&signed));
+    assert!(
+        has_valid_codesign(&signed),
+        "a freshly signed section must pass validation"
+    );
+}
+
+#[test]
+fn unsigned_elf_fails_validation() {
+    assert!(!has_valid_codesign(&tiny_elf64()));
+}
+
+#[test]
+fn inherited_stale_section_fails_validation() {
+    // 模拟 compile 遗传：向已签名文件追加字节（payload），段内 file_size
+    // 与 hash 便不再匹配追加后的文件 —— has_valid_codesign 必须拒绝。
+    let elf = tiny_elf64();
+    let mut signed = sign_selfsign(&elf).expect("sign failed");
+    let len_before = signed.len();
+    signed.extend_from_slice(b"payload-bytes");
+    assert_ne!(signed.len(), len_before);
+    assert!(
+        !has_valid_codesign(&signed),
+        "appended payload must invalidate the inherited section"
+    );
+}
+
+#[test]
+fn corrupted_root_hash_fails_validation() {
+    let elf = tiny_elf64();
+    let mut signed = sign_selfsign(&elf).expect("sign failed");
+    let pos = locate_descriptor(&signed).expect("descriptor not found");
+    signed[pos + 8 + 16] ^= 0xff; // root hash 第一字节翻转
+    assert!(
+        !has_valid_codesign(&signed),
+        "a flipped root-hash byte must fail validation"
+    );
+}
+
+#[test]
+fn corrupted_file_size_fails_validation() {
+    let elf = tiny_elf64();
+    let mut signed = sign_selfsign(&elf).expect("sign failed");
+    let pos = locate_descriptor(&signed).expect("descriptor not found");
+    signed[pos + 8 + 8] ^= 0x01; // file_size 低位翻转
+    assert!(
+        !has_valid_codesign(&signed),
+        "a corrupted file_size must fail validation"
+    );
 }

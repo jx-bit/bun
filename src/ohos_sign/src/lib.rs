@@ -3,7 +3,7 @@ mod elf;
 mod merkle;
 mod sha256;
 
-pub use elf::SignError;
+pub use elf::{SignError, has_valid_codesign};
 
 // Exported under `__` names so integration tests can reach internal primitives
 // without exposing them as first-class public API.
