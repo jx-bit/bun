@@ -983,8 +983,14 @@ pub unsafe fn spawn_process_posix(
         if p.is_file() {
             if let Ok(bytes) = std::fs::read(p) {
                 if bytes.len() > 4 && bytes[..4] == [0x7f, 0x45, 0x4c, 0x46] {
-                    if !ohos_sign::has_codesign(&bytes) {
-                        let _ = ohos_sign::sign_selfsign_inplace(p);
+                    // has_codesign only checks section presence: a section
+                    // inherited from a different stub (bun build --compile
+                    // clones the running executable) describes the wrong
+                    // file and the kernel still refuses to exec. Validate
+                    // size/hash and re-sign when the section is missing or
+                    // stale (force re-sign strips the stale section first).
+                    if !ohos_sign::has_valid_codesign(&bytes) {
+                        let _ = ohos_sign::sign_selfsign_inplace_with_strip(p);
                     }
                 }
             }

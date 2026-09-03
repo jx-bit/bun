@@ -1749,6 +1749,25 @@ pub(crate) fn inject<'a>(
                 return None;
             }
 
+            // OHOS: the stub may carry a codesign section (device-signed
+            // binaries do). The clone + payload expansion invalidates it -
+            // the section still describes the stub's size/hash - and the
+            // kernel refuses to exec files whose section fails that check.
+            // Strip the inherited section and re-sign the complete output
+            // so compile artifacts are directly executable. No-op when the
+            // stub has no section (the spawn-time signer covers those).
+            #[cfg(target_env = "ohos")]
+            if ohos_sign::has_codesign(&elf_file.data) {
+                match ohos_sign::sign_selfsign_with_strip(&elf_file.data) {
+                    Ok(signed) => elf_file.data = signed,
+                    Err(err) => {
+                        bun_core::pretty_errorln!("Error re-signing compiled output: {}", err);
+                        cleanup(zname, cloned_executable_fd);
+                        return None;
+                    }
+                }
+            }
+
             if let Err(err) = Syscall::set_file_offset(cloned_executable_fd, 0) {
                 bun_core::pretty_errorln!("Error seeking to start of temporary file: {}", err);
                 cleanup(zname, cloned_executable_fd);

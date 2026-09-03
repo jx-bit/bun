@@ -191,7 +191,11 @@ jobs:
           # exists and runner.node.mjs activates under it — confirmed by
           # the upstream fulltest design). The social4hyq/core tap's node
           # bottle 404s on the CDN.
-          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install node" 2>&1 | tail -10
+          # best-effort: the arm64_ohos node bottle has been pruned from
+          # the CDN (404) — the runner falls back to the tested binary
+          # (proven in R12: 172 files, 99.36% with the self-runner)
+          docker exec "$CONTAINER" bash -lc \
+            "$BREW_ENV brew install node 2>&1 | tail -10 || echo '::warning::node bottle unavailable - runner falls back to the tested binary'"
           # runner interpreter: brew node -> brew bun -> the tested binary
           RUNNER=$(docker exec "$CONTAINER" bash -lc \
             'if command -v node >/dev/null 2>&1; then echo node; \
