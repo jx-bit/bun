@@ -1,0 +1,284 @@
+# ──────────────────────────────────────────────────────────────────────
+# OHOS container test lane
+#
+# Runs the JS test suite against the freshly built OHOS aarch64 binary
+# INSIDE the ci-runner image (the same OHOS userland the build links
+# against). No self-hosted runner, no device — fully GitHub-hosted.
+#
+#   resolve-binary: download the binary from ohos-build-github.yml's
+#     artifact (same commit when available, latest successful fallback)
+#   test: brew runtime deps pour node (harness runner); bun install
+#     (root + test/) with the tested binary; runner.node.mjs with
+#     --exec-path=<tested binary>
+#
+# The device/self-hosted lane remains in ohos-full-test.yml (unchanged).
+# Triggers: same shape as the original (push paths / dispatch / weekly).
+# ──────────────────────────────────────────────────────────────────────
+
+name: ohos-container-test
+
+run-name: "ohos-container-test (filter=${{ inputs.test-filter || 'none' }})"
+
+on:
+  push:
+    branches:
+      - ohos-aarch64
+    paths:
+      - '.github/workflows/ohos-container-test.yml'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional --include substring filter (e.g. "js/node/test/parallel"), for a quick partial run instead of the full suite'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    # Weekly, Sunday 21:00 UTC.
+    - cron: '0 21 * * 0'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ohos-container-test-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  # Build job env (self-hosted runner)
+  OHOS_SDK_ROOT: /home/user/setup-ohos-sdk
+  OHOS_SYSROOT: /home/user/setup-ohos-sdk/ohos/native/sysroot
+  OHOS_CROSS_LIBS: /home/user/sources/bun/build/ohos-cross-libs
+  OHOS_ICU_DIR: /home/user/sources/bun/build/ohos-icu/target
+  CARGO_INCREMENTAL: 1
+  CARGO_TARGET_DIR: /home/user/sources/bun/build/release-ohos/rust-target
+  RUSTC_WRAPPER: ""
+  NINJA_JOBS: 2
+  WEBKIT_FORK: oven-sh/WebKit
+  WEBKIT_REF: caad865eb1a6e5ca4427f5ea1f066140b11953e7
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Resolve binary: fetch the OHOS aarch64 binary built by the github-
+  # hosted lane (ohos-build-github.yml, artifact bun-ohos-aarch64-github,
+  # ubuntu-24.04-arm) instead of building on the self-hosted runner.
+  # Prefers a run for the exact commit under test; falls back to the
+  # latest successful run. Re-uploads as bun-ohos-binary so the test
+  # job's download step stays unchanged.
+  # ──────────────────────────────────────────────────────────────────────
+  resolve-binary:
+    name: Resolve OHOS binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Locate the latest successful ohos-build-github run
+        id: locate
+        run: |
+          SHA="${{ github.sha }}"
+          RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ohos-build-github.yml/runs?status=success&per_page=30" \
+            --jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | .id" | head -1)
+          if [ -z "$RUN_ID" ]; then
+            echo "No build for $SHA — falling back to latest successful run"
+            RUN_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ohos-build-github.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$RUN_ID" --jq '"from sha " + .head_sha[:12] + " (" + .head_branch + ")"'
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Using ohos-build-github run $RUN_ID"
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-ohos-aarch64-github
+          path: bin
+          run-id: ${{ steps.locate.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify binary
+        run: |
+          file bin/bun
+          file bin/bun | grep -q "ELF.*ARM aarch64" || {
+            echo "ERROR: Downloaded binary is not an ARM64 ELF"
+            exit 1
+          }
+          echo "✅ Binary resolved from ohos-build-github run ${{ steps.locate.outputs.run_id }}"
+
+      - name: Upload as bun-ohos-binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-test-binary
+          path: bin/bun
+          retention-days: 7
+          if-no-files-found: error
+
+
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Test job: run the suite inside the ci-runner image — the SAME OHOS
+  # userland ohos-build-github.yml builds in. The image's own /lib loader
+  # is the OHOS musl fork the binary links against, so no runtime-lib
+  # injection is needed (the vanilla-ubuntu + musl-tools + loader-symlink
+  # approach failed: the binary also links OHOS-specific symbols the
+  # generic musl lacks). brew's runtime deps provide node (the harness
+  # runner); the binary under test is the exec-path.
+  # ──────────────────────────────────────────────────────────────────────
+  test:
+    name: Test OHOS binary (ci-runner)
+    needs: resolve-binary
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    env:
+      CONTAINER_IMAGE: ghcr.io/social4hyq/ci-runner:latest
+      CONTAINER: ohos-container-test
+      TAP: social4hyq/core
+      BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download OHOS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: container-test-binary
+          path: .bin-ohos
+
+      - name: Pull and start ci-runner container
+        run: |
+          docker pull "$CONTAINER_IMAGE"
+          docker run -d --name "$CONTAINER" --init \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/workspace/bun" \
+            "$CONTAINER_IMAGE" sleep infinity
+
+      - name: Configure container (device path fixup)
+        run: |
+          # PT_INTERP targets real-device paths (/system/bin/sh,
+          # /system/lib/ld-musl-aarch64.so.1); musl tmpfile() hardcodes
+          # /data/local/tmp. The image's own /lib loader IS the OHOS libc.
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /data/local/tmp /system/bin /system/lib && \
+             ln -sf /bin/sh /system/bin/sh && \
+             ln -sf /lib/ld-musl-aarch64.so.1 /system/lib/ld-musl-aarch64.so.1'
+          # the checkout is runner-owned; container git (rev-parse for the
+          # failure annotations) would die on dubious ownership otherwise
+          docker exec "$CONTAINER" bash -lc \
+            'git config --global --add safe.directory /workspace/bun || true'
+
+      - name: Stage binary and verify
+        run: |
+          docker cp .bin-ohos/bun "$CONTAINER:/workspace/bun/bun-ohos"
+          docker exec "$CONTAINER" bash -lc 'chmod 755 /workspace/bun/bun-ohos'
+          docker exec "$CONTAINER" bash -lc '/workspace/bun/bun-ohos --version' \
+            || { echo "ERROR: OHOS binary failed to execute in ci-runner"; exit 1; }
+          echo "OK: OHOS binary runs in ci-runner container"
+
+      - name: Install brew runtime deps + resolve runner interpreter
+        run: |
+          docker exec "$CONTAINER" bash -lc \
+            "git config --global --add safe.directory /storage/Users/currentUser/.harmonybrew/Library/Taps/$TAP 2>/dev/null || true"
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew tap $TAP || true"
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew trust $TAP"
+          # best-effort: the node bottle has 404'd on the CDN before; the
+          # runner has a three-level fallback below
+          # node comes from the DEFAULT core tap (its arm64_ohos bottle
+          # exists and runner.node.mjs activates under it — confirmed by
+          # the upstream fulltest design). The social4hyq/core tap's node
+          # bottle 404s on the CDN.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install node" 2>&1 | tail -10
+          # runner interpreter: brew node -> brew bun -> the tested binary
+          RUNNER=$(docker exec "$CONTAINER" bash -lc \
+            'if command -v node >/dev/null 2>&1; then echo node; \
+             elif [ -x "$(brew --prefix bun-bootstrap 2>/dev/null)/bin/bun" ]; then \
+               echo "$(brew --prefix bun-bootstrap)/bin/bun"; \
+             else echo SELF; fi' | tr -d '\r')
+          if [ "$RUNNER" = "SELF" ]; then
+            echo "::warning::no node/bun in ci-runner — runner falls back to the tested binary itself"
+            RUNNER="/workspace/bun/bun-ohos"
+          fi
+          docker exec "$CONTAINER" bash -lc "'$RUNNER' --version" || { echo "ERROR: runner interpreter broken"; exit 1; }
+          echo "RUNNER=$RUNNER" >> "$GITHUB_ENV"
+
+      - name: Install test dependencies
+        run: |
+          # with the tested binary itself — exercises the OHOS package
+          # manager; --ignore-scripts skips esbuild's platform-detection
+          # postinstall (OHOS node reports openharmony)
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc \
+            'cd /workspace/bun && ./bun-ohos install --ignore-scripts' 2>&1 | tail -10
+          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc \
+            'cd /workspace/bun/test && ../bun-ohos install --ignore-scripts' 2>&1 | tail -10
+          docker exec "$CONTAINER" bash -lc \
+            '[ -d /workspace/bun/test/node_modules ] && echo "node_modules OK" || { echo "ERROR: test/node_modules missing"; exit 1; }'
+
+      # Run the test suite. The image's node (poured via brew, reports
+      # openharmony) runs runner.node.mjs; the tested binary is --exec-path.
+      # GITHUB_ACTIONS is NOT passed into the container (runner.node.mjs has
+      # GITHUB_REPOSITORY-dependent code paths); CI=true only.
+      - name: Run test suite
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          INCLUDE_ARGS=()
+          if [ -n "$TEST_FILTER" ]; then
+            INCLUDE_ARGS=(--include="$TEST_FILTER")
+          fi
+
+          set +e
+          docker exec \
+            -e CI=true \
+            -e BUN_TEST_NO_SECRETS=1 \
+            "$CONTAINER" bash -lc '
+              cd /workspace/bun
+              '"$RUNNER"' scripts/runner.node.mjs \
+                --exec-path=/workspace/bun/bun-ohos \
+                --quiet \
+                --retries=1 \
+                --results-json=results.json \
+                --exclude=integration/bun-types \
+                --exclude=internal/source-lints \
+                --exclude=bake/dev \
+                --exclude=js/bun/ffi/cc.test.ts \
+                --exclude=regression/issue/20144 \
+                --exclude=regression/issue/26249 \
+                "$@"
+            ' _ "${INCLUDE_ARGS[@]}"
+          RUNNER_EXIT=$?
+          set -e
+
+          echo "runner exit code: $RUNNER_EXIT"
+          docker cp "$CONTAINER":/workspace/bun/results.json results.json 2>/dev/null || true
+          exit $RUNNER_EXIT
+
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-container-test-results-${{ github.run_number }}
+          path: results.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Dump container diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== container status ==="
+          docker ps -a --filter "name=$CONTAINER" || true
+          echo "=== container logs (last 80 lines) ==="
+          docker logs --tail 80 "$CONTAINER" 2>&1 || true
+          echo "=== binary info ==="
+          docker exec "$CONTAINER" bash -lc 'file /workspace/bun/bun-ohos; ls -lh /workspace/bun/bun-ohos' 2>/dev/null || true
+          echo "=== node_modules check ==="
+          docker exec "$CONTAINER" bash -lc 'ls /workspace/bun/node_modules/ 2>/dev/null | head -20 || echo "no node_modules"' 2>/dev/null || true
+
+      - name: Cleanup container
+        if: always()
+        run: |
+          docker rm -f "$CONTAINER" 2>/dev/null || true
