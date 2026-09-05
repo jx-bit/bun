@@ -6082,6 +6082,8 @@ pub unsafe extern "C" fn Bun__dlopen(path: *const c_char, flags: core::ffi::c_in
     dlopen(z, flags).unwrap_or(core::ptr::null_mut())
 }
 
+bun_core::declare_scope!(OhosSignRepair, hidden);
+
 /// `dlopen(filename, flags)`. Windows → `LoadLibraryExW` (UTF-8 → UTF-16).
 pub fn dlopen(filename: &ZStr, flags: i32) -> Option<*mut c_void> {
     #[cfg(all(unix, not(target_env = "ohos")))]
@@ -6092,18 +6094,28 @@ pub fn dlopen(filename: &ZStr, flags: i32) -> Option<*mut c_void> {
     }
     #[cfg(target_env = "ohos")]
     {
-        fn ensure_signed(path: &ZStr) {
-            let path_str = core::str::from_utf8(path.as_bytes()).unwrap_or("");
-            let p = std::path::Path::new(path_str);
-            if ohos_sign::has_codesign(&std::fs::read(p).unwrap_or_default()) {
-                return;
-            }
-            let _ = ohos_sign::sign_selfsign_inplace(p);
+        // The kernel validates the .codesign section on dlopen too. Repair
+        // lazily on refusal and retry once: the eager check this replaces read
+        // the full file on every dlopen, and its presence-only check let stale
+        // sections through to the kernel's rejection with no recovery.
+        let handle = unsafe { libc::dlopen(filename.as_ptr(), flags) };
+        if !handle.is_null() {
+            return Some(handle);
         }
-        ensure_signed(filename);
-        // SAFETY: filename is NUL-terminated.
-        let p = unsafe { libc::dlopen(filename.as_ptr(), flags) };
-        if p.is_null() { None } else { Some(p) }
+        let path_str = core::str::from_utf8(filename.as_bytes()).unwrap_or("");
+        if ohos_sign::repair_codesign_if_needed(std::path::Path::new(path_str)) {
+            bun_core::scoped_log!(
+                OhosSignRepair,
+                "re-signed {} after dlopen refusal",
+                path_str
+            );
+            // SAFETY: filename is NUL-terminated.
+            let p = unsafe { libc::dlopen(filename.as_ptr(), flags) };
+            if !p.is_null() {
+                return Some(p);
+            }
+        }
+        None
     }
     #[cfg(windows)]
     {

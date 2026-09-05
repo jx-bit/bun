@@ -2449,9 +2449,12 @@ impl<'a> PackageInstaller<'a> {
 
 // ───────────────────────────── OHOS install-time signing ─────────────────────────────
 
+bun_output::declare_scope!(OhosSignRepair, hidden);
+
 /// On OHOS, scan a package directory for native binaries (.so, .node) and
-/// sign any that are not already signed. Called after a package is installed
-/// into node_modules, before lifecycle scripts run.
+/// repair their codesign: sign unsigned files, strip + re-sign stale
+/// sections. Called after a package is installed into node_modules, before
+/// lifecycle scripts run.
 #[cfg(target_env = "ohos")]
 fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
     let dir = match Dir::open(pkg_dir) {
@@ -2482,9 +2485,12 @@ fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
         full.extend_from_slice(name);
         let full_str = unsafe { core::str::from_utf8_unchecked(&full) };
         let p = std::path::Path::new(full_str);
-        if ohos_sign::has_codesign(&std::fs::read(p).unwrap_or_default()) {
-            continue;
+        // repair_codesign_if_needed: sign when a section is missing, and
+        // strip + re-sign when one is stale (e.g. a patched native module) —
+        // a presence-only check would leave the kernel to reject it at
+        // dlopen with no recovery.
+        if ohos_sign::repair_codesign_if_needed(p) {
+            bun_output::scoped_log!(OhosSignRepair, "re-signed {} during install", full_str);
         }
-        let _ = ohos_sign::sign_selfsign_inplace(p);
     }
 }
