@@ -27,25 +27,16 @@ const guard = (file: string, needle: string) => {
 test("OHOS codesign call sites survive upstream merges", () => {
   // compile path: the payload-expanded output must be stripped and re-signed
   // at write time (dropped by 46557185da, restored by 88a237b0e3).
-  guard(
-    "src/standalone_graph/StandaloneModuleGraph.rs",
-    "ohos_sign::sign_selfsign_with_strip",
-  );
+  guard("src/standalone_graph/StandaloneModuleGraph.rs", "ohos_sign::sign_selfsign_with_strip");
 
   // spawn path: kernel refusal (EACCES/EPERM) triggers a lazy repair + single
   // retry — never an eager per-spawn validation (it re-hashes the ~100 MB
   // binary and doubled the 20260903 fulltest wall time).
-  guard(
-    "src/spawn_sys/spawn_process.rs",
-    "ohos_sign::repair_codesign_if_needed",
-  );
+  guard("src/spawn_sys/spawn_process.rs", "ohos_sign::repair_codesign_if_needed");
 
   // dlopen path: same lazy-repair contract as spawn.
   guard("src/sys/lib.rs", "ohos_sign::repair_codesign_if_needed");
 
   // install path: native modules (.so/.node) repaired at install time.
-  guard(
-    "src/install/PackageInstaller.rs",
-    "ohos_sign::repair_codesign_if_needed",
-  );
+  guard("src/install/PackageInstaller.rs", "ohos_sign::repair_codesign_if_needed");
 });

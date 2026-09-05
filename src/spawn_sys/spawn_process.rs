@@ -976,7 +976,8 @@ pub unsafe fn spawn_process_posix(
     // SAFETY: argv0 is a valid NUL-terminated C string (caller contract).
     let argv0_cstr = unsafe { bun_core::ffi::cstr(argv0) };
     #[cfg_attr(not(target_env = "ohos"), allow(unused_mut))]
-    let mut spawn_result = posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
+    let mut spawn_result =
+        posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
 
     #[cfg(target_env = "ohos")]
     {
