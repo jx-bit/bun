@@ -1,52 +1,47 @@
 # ──────────────────────────────────────────────────────────────────────
-# OHOS container test lane
+# OHOS container FULL-TEST lane
 #
-# Runs the JS test suite against the freshly built OHOS aarch64 binary
-# INSIDE the ci-runner image (the same OHOS userland the build links
-# against). No self-hosted runner, no device — fully GitHub-hosted.
+# Same pipeline as ohos-container-test.yml, but runs the FULL suite
+# (no excludes). Test failures are expected on this lane — the job going
+# red is the signal to triage; results.json (uploaded as an artifact)
+# is the processing input for the failure analysis workflow.
 #
 #   resolve-binary: download the binary from ohos-build-github.yml's
 #     artifact (same commit when available, latest successful fallback)
 #   test: brew runtime deps pour node (harness runner); bun install
 #     (root + test/) with the tested binary; runner.node.mjs with
 #     --exec-path=<tested binary>
-#
-# The device/self-hosted lane remains in ohos-full-test.yml (unchanged).
-# Triggers: same shape as the original (push paths / dispatch / weekly).
 # ──────────────────────────────────────────────────────────────────────
 
-name: ohos-container-test
+name: ohos-container-fulltest
 
-run-name: "ohos-container-test (filter=${{ inputs.test-filter || 'none' }})"
+run-name: "ohos-container-fulltest (filter=${{ inputs.test-filter || 'none' }})"
 
 on:
   push:
     branches:
       - ohos-aarch64
     paths:
-      - '.github/workflows/ohos-container-test.yml'
+      - '.github/workflows/ohos-container-fulltest.yml'
   pull_request:
     branches:
       - ohos-aarch64
     paths:
-      - '.github/workflows/ohos-container-test.yml'
+      - '.github/workflows/ohos-container-fulltest.yml'
   workflow_dispatch:
     inputs:
       test-filter:
-        description: 'Optional --include substring filter (e.g. "js/node/test/parallel"), for a quick partial run instead of the full suite'
+        description: 'Optional --include substring filter (e.g. "js/node/process"), for a partial run instead of the full suite'
         required: false
         type: string
         default: ''
-  schedule:
-    # Weekly, Sunday 21:00 UTC.
-    - cron: '0 21 * * 0'
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: ohos-container-test-${{ github.event_name }}-${{ github.event.number || github.ref }}
+  group: ohos-container-fulltest-${{ github.event_name }}-${{ github.event.number || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -70,10 +65,9 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   # Resolve binary: fetch the OHOS aarch64 binary built by the github-
   # hosted lane (ohos-build-github.yml, artifact bun-ohos-aarch64-github,
-  # ubuntu-24.04-arm) instead of building on the self-hosted runner.
-  # Prefers a run for the exact commit under test; falls back to the
-  # latest successful run. Re-uploads as bun-ohos-binary so the test
-  # job's download step stays unchanged.
+  # ubuntu-24.04-arm). Prefers a run for the exact commit under test;
+  # falls back to the latest successful run. Re-uploads as
+  # container-fulltest-binary so the test job's download step is explicit.
   # ──────────────────────────────────────────────────────────────────────
   resolve-binary:
     name: Resolve OHOS binary
@@ -113,33 +107,28 @@ jobs:
           }
           echo "✅ Binary resolved from ohos-build-github run ${{ steps.locate.outputs.run_id }}"
 
-      - name: Upload as bun-ohos-binary
+      - name: Upload as container-fulltest-binary
         uses: actions/upload-artifact@v4
         with:
-          name: container-test-binary
+          name: container-fulltest-binary
           path: bin/bun
           retention-days: 7
           if-no-files-found: error
 
-
-
   # ──────────────────────────────────────────────────────────────────────
-  # Test job: run the suite inside the ci-runner image — the SAME OHOS
-  # userland ohos-build-github.yml builds in. The image's own /lib loader
-  # is the OHOS musl fork the binary links against, so no runtime-lib
-  # injection is needed (the vanilla-ubuntu + musl-tools + loader-symlink
-  # approach failed: the binary also links OHOS-specific symbols the
-  # generic musl lacks). brew's runtime deps provide node (the harness
-  # runner); the binary under test is the exec-path.
+  # Test job: run the full suite inside the ci-runner image — the SAME
+  # OHOS userland ohos-build-github.yml builds in. Red on test failures is
+  # expected and normal on this lane; results.json (uploaded artifact) is
+  # the processing input.
   # ──────────────────────────────────────────────────────────────────────
   test:
-    name: Test OHOS binary (ci-runner)
+    name: Fulltest OHOS binary (ci-runner)
     needs: resolve-binary
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
+    timeout-minutes: 360
     env:
       CONTAINER_IMAGE: ghcr.io/social4hyq/ci-runner:latest
-      CONTAINER: ohos-container-test
+      CONTAINER: ohos-container-fulltest
       TAP: social4hyq/core
       BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
     steps:
@@ -151,7 +140,7 @@ jobs:
       - name: Download OHOS binary
         uses: actions/download-artifact@v4
         with:
-          name: container-test-binary
+          name: container-fulltest-binary
           path: .bin-ohos
 
       - name: Pull and start ci-runner container
@@ -190,15 +179,8 @@ jobs:
             "git config --global --add safe.directory /storage/Users/currentUser/.harmonybrew/Library/Taps/$TAP 2>/dev/null || true"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew tap $TAP || true"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew trust $TAP"
-          # best-effort: the node bottle has 404'd on the CDN before; the
-          # runner has a three-level fallback below
-          # node comes from the DEFAULT core tap (its arm64_ohos bottle
-          # exists and runner.node.mjs activates under it — confirmed by
-          # the upstream fulltest design). The social4hyq/core tap's node
-          # bottle 404s on the CDN.
           # best-effort: the arm64_ohos node bottle has been pruned from
           # the CDN (404) — the runner falls back to the tested binary
-          # (proven in R12: 172 files, 99.36% with the self-runner)
           docker exec "$CONTAINER" bash -lc \
             "$BREW_ENV brew install node 2>&1 | tail -10 || echo '::warning::node bottle unavailable - runner falls back to the tested binary'"
           # runner interpreter: brew node -> brew bun -> the tested binary
@@ -226,10 +208,8 @@ jobs:
           docker exec "$CONTAINER" bash -lc \
             '[ -d /workspace/bun/test/node_modules ] && echo "node_modules OK" || { echo "ERROR: test/node_modules missing"; exit 1; }'
 
-      # Run the test suite. The image's node (poured via brew, reports
-      # openharmony) runs runner.node.mjs; the tested binary is --exec-path.
-      # GITHUB_ACTIONS is NOT passed into the container (runner.node.mjs has
-      # GITHUB_REPOSITORY-dependent code paths); CI=true only.
+      # Run the FULL suite — no excludes. Red on test failures is normal
+      # here; results.json is the processing input (uploaded below).
       - name: Run test suite
         env:
           TEST_FILTER: ${{ inputs.test-filter }}
@@ -250,12 +230,6 @@ jobs:
                 --quiet \
                 --retries=1 \
                 --results-json=results.json \
-                --exclude=integration/bun-types \
-                --exclude=internal/source-lints \
-                --exclude=bake/dev \
-                --exclude=js/bun/ffi/cc.test.ts \
-                --exclude=regression/issue/20144 \
-                --exclude=regression/issue/26249 \
                 "$@"
             ' _ "${INCLUDE_ARGS[@]}"
           RUNNER_EXIT=$?
@@ -265,12 +239,11 @@ jobs:
           docker cp "$CONTAINER":/workspace/bun/results.json results.json 2>/dev/null || true
           exit $RUNNER_EXIT
 
-
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ohos-container-test-results-${{ github.run_number }}
+          name: ohos-container-fulltest-results-${{ github.run_number }}
           path: results.json
           retention-days: 30
           if-no-files-found: ignore
