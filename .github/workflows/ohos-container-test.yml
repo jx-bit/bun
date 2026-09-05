@@ -25,6 +25,11 @@ on:
       - ohos-aarch64
     paths:
       - '.github/workflows/ohos-container-test.yml'
+  pull_request:
+    branches:
+      - ohos-aarch64
+    paths:
+      - '.github/workflows/ohos-container-test.yml'
   workflow_dispatch:
     inputs:
       test-filter:
@@ -41,7 +46,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ohos-container-test-${{ github.event_name }}
+  group: ohos-container-test-${{ github.event_name }}-${{ github.event.number || github.ref }}
   cancel-in-progress: false
 
 env:
