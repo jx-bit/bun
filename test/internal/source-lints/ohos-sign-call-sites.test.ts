@@ -40,3 +40,12 @@ test("OHOS codesign call sites survive upstream merges", () => {
   // install path: native modules (.so/.node) repaired at install time.
   guard("src/install/PackageInstaller.rs", "ohos_sign::repair_codesign_if_needed");
 });
+
+test("OHOS userspace shebang expansion survives upstream merges", () => {
+  // Text scripts cannot carry a .codesign section, so the kernel refuses to
+  // exec them. The spawn path rewrites `#!` targets to their (signed)
+  // interpreter — without this, every direct script spawn fails with
+  // EACCES/EPERM on device.
+  guard("src/spawn_sys/spawn_process.rs", "ohos_expand_shebang(argv0_cstr, argv)");
+  guard("src/spawn_sys/shebang.rs", "pub(crate) fn parse_shebang");
+});

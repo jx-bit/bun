@@ -975,6 +975,17 @@ pub unsafe fn spawn_process_posix(
     let argv0 = options.argv0.unwrap_or_else(|| unsafe { *argv });
     // SAFETY: argv0 is a valid NUL-terminated C string (caller contract).
     let argv0_cstr = unsafe { bun_core::ffi::cstr(argv0) };
+    // OHOS: rewrite a `#!` script into an exec of its (signed) interpreter so
+    // the script itself never passes the kernel's exec-time signature check.
+    // Must run before the first spawn so both the initial attempt and the
+    // codesign repair retry below target the interpreter.
+    #[cfg(target_env = "ohos")]
+    let shebang_rewrite = ohos_expand_shebang(argv0_cstr, argv);
+    #[cfg(target_env = "ohos")]
+    let (argv0_cstr, argv) = match &shebang_rewrite {
+        Some(rewritten) => (rewritten.interp.as_c_str(), rewritten.ptrs.as_ptr()),
+        None => (argv0_cstr, argv),
+    };
     #[cfg_attr(not(target_env = "ohos"), allow(unused_mut))]
     let mut spawn_result =
         posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
@@ -1052,3 +1063,74 @@ fn set_spawned_stdio(spawned: &mut PosixSpawnResult, i: usize, fd: Fd) {
         _ => unreachable!(),
     }
 }
+
+// ─── OHOS userspace shebang expansion ──────────────────────────────────────
+//
+// A text script cannot be signed (it has nowhere to carry a .codesign
+// section), so on OHOS the kernel refuses to exec it outright and the
+// kernel's own binfmt_script hand-off never gets past that check. Expanding
+// the `#!` line in userspace execs the already-signed interpreter instead
+// and demotes the script to a plain argv entry that is only ever opened and
+// read. Parsing lives in shebang.rs (host-testable); this is the assembly.
+
+#[cfg(target_env = "ohos")]
+struct ShebangRewrite {
+    interp: std::ffi::CString,
+    // Keepalive: holds the argv CStrings whose raw pointers live in `ptrs`.
+    // Never read — the leading underscore marks it as intentionally unread.
+    _owned: Vec<std::ffi::CString>,
+    ptrs: Vec<*const c_char>,
+}
+
+/// Read the spawn target and, when it is a shebang script, rewrite the exec
+/// to target the interpreter: argv becomes
+/// `[interpreter, optional-arg, script, ...original args]`, mirroring
+/// binfmt_script. The interpreter must be an absolute path.
+#[cfg(target_env = "ohos")]
+fn ohos_expand_shebang(argv0_cstr: &CStr, argv: *const *const c_char) -> Option<ShebangRewrite> {
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(argv0_cstr.to_bytes()));
+    // binfmt_script historically reads only the first 128 bytes of the file.
+    // This sandbox's TMPDIR routinely produces 150+ byte interpreter paths,
+    // and the kernel truncates them mid-string — the remainder can still look
+    // like a valid absolute path, so the kernel execs it and reports a
+    // confusing EACCES instead of the real problem. 4096 gives PATH_MAX
+    // headroom.
+    let mut buf = [0u8; 4096];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .ok()?;
+    let (interp, arg) = shebang::parse_shebang(&buf[..n], n < buf.len())?;
+    let interp = std::ffi::CString::new(interp).ok()?;
+    let script = std::ffi::CString::new(argv0_cstr.to_bytes()).ok()?;
+    let arg = arg.map(std::ffi::CString::new).transpose().ok()?;
+
+    let mut owned = Vec::with_capacity(2);
+    let mut ptrs: Vec<*const c_char> = Vec::with_capacity(8);
+    ptrs.push(interp.as_ptr());
+    if let Some(a) = &arg {
+        ptrs.push(a.as_ptr());
+    }
+    ptrs.push(script.as_ptr());
+    owned.push(script);
+    let mut k = 1usize;
+    loop {
+        let p = unsafe { *argv.add(k) };
+        if p.is_null() {
+            break;
+        }
+        ptrs.push(p);
+        k += 1;
+    }
+    ptrs.push(std::ptr::null());
+    Some(ShebangRewrite {
+        interp,
+        _owned: owned,
+        ptrs,
+    })
+}
+
+#[cfg(any(target_env = "ohos", test))]
+mod shebang;
