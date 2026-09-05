@@ -24,6 +24,8 @@ use posix_spawn::{Actions as PosixSpawnActions, Attr as PosixSpawnAttr};
 #[cfg(unix)]
 use crate::{Argv, Envp};
 
+bun_core::declare_scope!(OhosSignRepair, hidden);
+
 // ──────────────────────────────────────────────────────────────────────────
 // PID / fd width aliases
 // ──────────────────────────────────────────────────────────────────────────
@@ -973,30 +975,31 @@ pub unsafe fn spawn_process_posix(
     let argv0 = options.argv0.unwrap_or_else(|| unsafe { *argv });
     // SAFETY: argv0 is a valid NUL-terminated C string (caller contract).
     let argv0_cstr = unsafe { bun_core::ffi::cstr(argv0) };
+    #[cfg_attr(not(target_env = "ohos"), allow(unused_mut))]
+    let mut spawn_result = posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
+
     #[cfg(target_env = "ohos")]
     {
-        // OHOS seccomp blocks exec of unsigned ELF binaries. Sign any
-        // native binary before spawning so posix_spawn doesn't return
-        // EACCES. Only checks regular files with ELF magic.
-        let argv0_str = unsafe { core::str::from_utf8_unchecked(argv0_cstr.to_bytes()) };
-        let p = std::path::Path::new(argv0_str);
-        if p.is_file() {
-            if let Ok(bytes) = std::fs::read(p) {
-                if bytes.len() > 4 && bytes[..4] == [0x7f, 0x45, 0x4c, 0x46] {
-                    // has_codesign only checks section presence: a section
-                    // inherited from a different stub (bun build --compile
-                    // clones the running executable) describes the wrong
-                    // file and the kernel still refuses to exec. Validate
-                    // size/hash and re-sign when the section is missing or
-                    // stale (force re-sign strips the stale section first).
-                    if !ohos_sign::has_valid_codesign(&bytes) {
-                        let _ = ohos_sign::sign_selfsign_inplace_with_strip(p);
-                    }
+        // OHOS kernel validates the .codesign section at exec and refuses
+        // with EACCES (unsigned/stale ELF) or EPERM (script shebang
+        // expansion). Repair lazily here and retry once instead of checking
+        // eagerly before every spawn: an eager check re-hashed the ~100 MB
+        // running binary each time, doubling fulltest wall time.
+        if let Err(err) = &spawn_result {
+            if matches!(err.get_errno(), bun_sys::E::EACCES | bun_sys::E::EPERM) {
+                let argv0_str = unsafe { core::str::from_utf8_unchecked(argv0_cstr.to_bytes()) };
+                if ohos_sign::repair_codesign_if_needed(std::path::Path::new(argv0_str)) {
+                    bun_core::scoped_log!(
+                        OhosSignRepair,
+                        "re-signed {} after spawn refusal",
+                        argv0_str
+                    );
+                    spawn_result =
+                        posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
                 }
             }
         }
     }
-    let spawn_result = posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
 
     match spawn_result {
         Err(err) => {

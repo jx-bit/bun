@@ -1,7 +1,8 @@
 // ELF signing and section injection tests.
 
 use ohos_sign::{
-    has_codesign, has_valid_codesign, sign_selfsign, sign_selfsign_with_strip, strip_codesign,
+    has_codesign, has_valid_codesign, repair_codesign_if_needed, sign_selfsign,
+    sign_selfsign_with_strip, strip_codesign,
 };
 
 /// Minimal valid ELF64 LE (no sections, just 64-byte ELF header with empty SHT).
@@ -258,4 +259,91 @@ fn corrupted_file_size_fails_validation() {
         !has_valid_codesign(&signed),
         "a corrupted file_size must fail validation"
     );
+}
+
+// ── repair_codesign_if_needed（spawn 懒模式修复）──────────────────────
+
+fn temp_elf_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("ohos-sign-repair-{}-{tag}", std::process::id()));
+    std::fs::write(&path, bytes).expect("write temp elf");
+    path
+}
+
+fn remove(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn repair_skips_valid_file_and_leaves_bytes_unchanged() {
+    let signed = sign_selfsign(&tiny_elf64()).expect("sign failed");
+    let path = temp_elf_file("valid", &signed);
+    assert!(
+        !repair_codesign_if_needed(&path),
+        "a validly signed file must not be rewritten"
+    );
+    let after = std::fs::read(&path).expect("read back");
+    assert_eq!(after, signed, "valid file must be byte-identical");
+    remove(&path);
+}
+
+#[test]
+fn repair_signs_unsigned_elf() {
+    let path = temp_elf_file("unsigned", &tiny_elf64());
+    assert!(
+        repair_codesign_if_needed(&path),
+        "unsigned ELF must be signed"
+    );
+    let after = std::fs::read(&path).expect("read back");
+    assert!(
+        has_valid_codesign(&after),
+        "file must validate after repair"
+    );
+    remove(&path);
+}
+
+#[test]
+fn repair_resigns_stale_inherited_section() {
+    let mut stale = sign_selfsign(&tiny_elf64()).expect("sign failed");
+    stale.extend_from_slice(b"payload-bytes");
+    let path = temp_elf_file("stale", &stale);
+    assert!(
+        repair_codesign_if_needed(&path),
+        "stale section must be repaired"
+    );
+    let after = std::fs::read(&path).expect("read back");
+    assert!(
+        has_valid_codesign(&after),
+        "file must validate after repair"
+    );
+    remove(&path);
+}
+
+#[test]
+fn repair_ignores_non_elf_and_missing_files() {
+    let text = temp_elf_file("text", b"#!/bin/sh\necho hi\n");
+    assert!(
+        !repair_codesign_if_needed(&text),
+        "non-ELF must be untouched"
+    );
+    remove(&text);
+
+    let missing =
+        std::env::temp_dir().join(format!("ohos-sign-repair-{}-missing", std::process::id()));
+    assert!(
+        !repair_codesign_if_needed(&missing),
+        "missing file must be a no-op"
+    );
+}
+
+#[test]
+fn repair_skips_non_regular_files() {
+    // /dev/zero is a char device: exec rejects it with EACCES, and a repair
+    // that read it would never reach EOF. metadata.is_file() must exclude it.
+    let dev_zero = std::path::Path::new("/dev/zero");
+    if !dev_zero.exists() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    assert!(!repair_codesign_if_needed(dev_zero));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
