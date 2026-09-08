@@ -1849,9 +1849,7 @@ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTim
     // tmpdir that does. common/index.js derives its AF_UNIX pipe path via
     // path.relative(cwd, NODE_TEST_DIR), and sockaddr_un.sun_path is capped
     // at 108 bytes, so keep the directory name as short as possible.
-    ...(process.platform === "openharmony"
-      ? { NODE_TEST_DIR: mkdtempSync(join(tmpdir(), "nt-")) }
-      : {}),
+    ...(process.platform === "openharmony" ? { NODE_TEST_DIR: mkdtempSync(join(tmpdir(), "nt-")) } : {}),
     ...(ohosSysroot ? { OHOS_SYSROOT: ohosSysroot } : {}),
     ...(typeof remapPort == "number"
       ? { BUN_CRASH_REPORT_URL: `http://localhost:${remapPort}` }
