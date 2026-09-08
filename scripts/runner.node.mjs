@@ -51,7 +51,6 @@ import {
   getFileUrl,
   getHomedir,
   getHostname,
-  getUsername,
   getLoggedInUserCountOrDetails,
   getOs,
   getSecret,
