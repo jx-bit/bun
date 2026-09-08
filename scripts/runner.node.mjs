@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { availableParallelism, userInfo } from "node:os";
+import { availableParallelism } from "node:os";
 import { basename, dirname, extname, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
@@ -50,11 +50,11 @@ import {
   getFileUrl,
   getHomedir,
   getHostname,
-  getUsername,
   getLoggedInUserCountOrDetails,
   getOs,
   getSecret,
   getShell,
+  getUsername,
   getWindowsExitReason,
   isAndroid,
   isBuildkite,
