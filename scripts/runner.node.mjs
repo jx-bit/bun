@@ -48,7 +48,7 @@ import {
   getDistroVersion,
   getEnv,
   getFileUrl,
-  getHomedir,
+  homedir as getHomedir,
   getHostname,
   getLoggedInUserCountOrDetails,
   getOs,
