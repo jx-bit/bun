@@ -1197,7 +1197,24 @@ async function runTests() {
         timeout: 60_000,
       });
       if (!buildResult.ok) {
-        throw new Error(`Failed to build vendor: ${buildResult.error}`);
+        // A vendor build failure must not kill the whole run: throwing here
+        // aborts runTests before the results.json write, losing the results
+        // of every test file that already ran. Record the suite as failed
+        // and continue with the remaining vendors.
+        for (const testPath of testPaths) {
+          const title = join(relative(cwd, vendorPath), testPath).replace(/\\/g, "/");
+          failedResultsTitles.push(title);
+          failedResults.push({
+            testPath: title,
+            ok: false,
+            status: "fail",
+            tests: [],
+            errors: [],
+            stdout: "",
+            stdoutPreview: `vendor build failed: ${buildResult.error}`,
+          });
+        }
+        continue;
       }
 
       for (const testPath of testPaths) {
