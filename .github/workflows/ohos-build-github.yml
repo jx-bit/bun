@@ -155,11 +155,25 @@ jobs:
             echo "::warning::brew install attempt $i failed, retrying in 90s"
             sleep 90
           done
+          # cargo (OHOS-host rust nightly) links libz. The dependency tree
+          # drifts when `brew update` refreshes the index (09-07: the pour
+          # set flipped from libedit+libffi to bzip2+libxml2 and zlib
+          # dropped out) — install it explicitly; the rust install step's
+          # LD_LIBRARY_PATH already covers $BREW_PREFIX/opt/zlib/lib.
+          docker exec "$CONTAINER" bash -lc \
+            "$BREW_ENV brew install $TAP/zlib 2>/dev/null || $BREW_ENV brew install zlib" 2>&1 | tail -3 \
+            || echo "::warning::zlib install failed — cargo will hit missing deflate/inflate symbols"
+          # llvm@21 was split upstream in the tap (09-07): lld moved to its
+          # own lld@21 formula — without it the build's ld.lld probe only
+          # finds the ohos-sdk's 15.0.4 and dies.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install $TAP/lld@21" 2>&1 | tail -3 \
+            || echo "::warning::lld@21 install failed — ld.lld probe will reject 15.0.4"
           # Trust rejections are SILENT (exit 0) — verify key deps actually
           # installed, else the build fails cryptically downstream. (social4hyq
-          # build.sh lines 51-54.)
+          # build.sh lines 51-54.) zlib: cargo links it, and the pour set
+          # drifts with the formula index (see the install above).
           docker exec "$CONTAINER" bash -lc '
-            for f in llvm@21 ohos-sdk icu4c@78 bun-bootstrap openssl@3 cmake ninja; do
+            for f in llvm@21 ohos-sdk icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (silent trust rejection? check brew trust)"; exit 1; }
