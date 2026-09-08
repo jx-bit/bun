@@ -1310,7 +1310,12 @@ export function tmpdir() {
     }
   }
 
-  if (isMacOS || isLinux) {
+  if (isMacOS || isLinux || process.platform === "openharmony") {
+    // Check TMPDIR env var first (user override for read-only /tmp, e.g. OHOS)
+    const userTmp = process.env["TMPDIR"] || process.env["TEMP"] || process.env["TMP"];
+    if (userTmp) {
+      return userTmp;
+    }
     if (existsSync("/tmp")) {
       return "/tmp";
     }
@@ -1366,7 +1371,7 @@ export function parseOs(string) {
   if (/darwin|apple|mac/i.test(string)) {
     return "darwin";
   }
-  if (/linux|android/i.test(string)) {
+  if (/linux|openharmony|android/i.test(string)) {
     return "linux";
   }
   if (/freebsd/i.test(string)) {
@@ -1556,8 +1561,20 @@ export function getHostname() {
  * @returns {string}
  */
 export function getUsername() {
-  const { username } = userInfo();
-  return username;
+  try {
+    const { username } = userInfo();
+    return username;
+  } catch (error) {
+    // libuv's uv_os_get_passwd() throws ENOENT when the process uid has no
+    // /etc/passwd entry (e.g. some sandboxed execution contexts, including
+    // OHOS app-sandbox uids that are never registered there). Fall back to
+    // env vars, then the raw uid, instead of crashing before a single test
+    // has run.
+    if (error?.code === "ERR_SYSTEM_ERROR" && error?.info?.code === "ENOENT") {
+      return process.env.USER || process.env.LOGNAME || `uid${process.getuid?.() ?? "unknown"}`;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1587,6 +1604,10 @@ export function getUsernameForDistro(distro) {
  * @returns {string | undefined}
  */
 export function getDistro() {
+  if (process.platform === "openharmony") {
+    return "openharmony";
+  }
+
   if (isMacOS) {
     return "macOS";
   }

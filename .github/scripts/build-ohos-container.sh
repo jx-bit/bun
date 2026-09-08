@@ -52,7 +52,11 @@ export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/opt/libxml2/
 # llvm@21 only ships llvm-strip; bun's build script needs `strip` (bun.rb 201-202).
 mkdir -p .bin
 ln -sf "$LLVM_PREFIX/bin/llvm-strip" .bin/strip
-export PATH="$LLVM_PREFIX/bin:$RUST_HOME/bin:$BUN_BOOT_DIR:$BREW_PREFIX/bin:.bin:${PATH:-}"
+# llvm@21 was split upstream in the tap (09-07): lld now ships in the lld@21
+# formula — put its bin on PATH so the ld.lld probe (>=21.1.0) finds 21.1.8
+# before the ohos-sdk's 15.0.4.
+LLD_PREFIX=$(brew --prefix lld@21 2>/dev/null || true)
+export PATH="${LLD_PREFIX:+$LLD_PREFIX/bin:}$LLVM_PREFIX/bin:$RUST_HOME/bin:$BUN_BOOT_DIR:$BREW_PREFIX/bin:.bin:${PATH:-}"
 # CC/CXX: raw llvm@21 clang (no signing shims — device signs at install time).
 export CC="$LLVM_PREFIX/bin/clang"
 export CXX="$LLVM_PREFIX/bin/clang++"
