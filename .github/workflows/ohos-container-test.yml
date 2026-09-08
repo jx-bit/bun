@@ -154,6 +154,25 @@ jobs:
           name: container-test-binary
           path: .bin-ohos
 
+      # Free disk space on the github-hosted runner. The source tree +
+      # node_modules + the container's writable layer (every test's /tmp
+      # writes land in docker storage) together can exceed the runner's
+      # available space — run 34183365924 died with ENOSPC at ~2300/5969
+      # files. The reference OHOS CI workflow does the same cleanup.
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/powershell \
+                      /usr/local/.ghcup \
+                      /opt/swift \
+                      /usr/local/swift 2>/dev/null || true
+          echo "After cleanup:"
+          df -h / | tail -1
+
       - name: Pull and start ci-runner container
         run: |
           docker pull "$CONTAINER_IMAGE"
