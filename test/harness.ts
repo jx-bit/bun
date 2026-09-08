@@ -1886,8 +1886,19 @@ export function libcPathForDlopen() {
       switch (libcFamily) {
         case "glibc":
           return "libc.so.6";
-        case "musl":
+        case "musl": {
+          // OHOS: the musl loader IS libc and is dlopen-able from any
+          // domain — on device (/system/lib) and in the ci-runner container
+          // (via the /system/lib fixup symlink). /usr/lib/libc.so is
+          // Alpine-specific and missing in both.
+          if (existsSync("/system/lib/ld-musl-aarch64.so.1")) {
+            return "/system/lib/ld-musl-aarch64.so.1";
+          }
+          if (existsSync("/lib/ld-musl-aarch64.so.1")) {
+            return "/lib/ld-musl-aarch64.so.1";
+          }
           return "/usr/lib/libc.so";
+        }
       }
     case "openharmony":
       // Bare-name dlopen("libc.so") resolves to /usr/lib/libc.so on consumer
