@@ -28,6 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { availableParallelism } from "node:os";
 import { basename, dirname, extname, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
@@ -1795,6 +1796,45 @@ function getCombinedPath(execPath) {
   return _combinedPath;
 }
 
+// On OHOS devices the default tmpdir often resolves onto the user-storage
+// volume (hmdfs/FUSE): regular file I/O works, but AF_UNIX bind() returns
+// EPERM, so every test that listens on a unix socket fails no matter where
+// the test itself puts it. Probe candidate roots once with a real socket
+// bind and cache the first AF_UNIX-capable one; null falls back to
+// os.tmpdir() (previous behavior) when no candidate qualifies.
+let ohosTmpRootPromise;
+function ohosUnixCapableTmpRoot() {
+  return (ohosTmpRootPromise ??= (async () => {
+    const candidates = [...new Set([process.env.TMPDIR, "/data/local/tmp", tmpdir(), "/tmp"])].filter(Boolean);
+    for (const root of candidates) {
+      let dir;
+      try {
+        dir = mkdtempSync(join(root, "buntmp-probe-"));
+      } catch {
+        continue;
+      }
+      const probePath = join(dir, "afunix-probe.sock");
+      const capable = await new Promise(resolve => {
+        const server = createServer();
+        const settle = ok => {
+          server.close();
+          try {
+            unlinkSync(probePath);
+          } catch {}
+          resolve(ok);
+        };
+        server.once("error", () => settle(false));
+        server.listen(probePath, () => settle(true));
+      });
+      if (capable) return root;
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {}
+    }
+    return null;
+  })());
+}
+
 /**
  * @typedef {object} SpawnBunResult
  * @extends SpawnResult
@@ -1808,7 +1848,10 @@ function getCombinedPath(execPath) {
  */
 async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTimeout, env, stdout, stderr }) {
   const path = getCombinedPath(execPath);
-  const tmpdirPath = mkdtempSync(join(tmpdir(), "buntmp-"));
+  // OHOS: scratch dirs must live on an AF_UNIX-capable volume (see
+  // ohosUnixCapableTmpRoot) or every unix-socket test EPERMs on bind.
+  const tmpBase = process.platform === "openharmony" ? ((await ohosUnixCapableTmpRoot()) ?? tmpdir()) : tmpdir();
+  const tmpdirPath = mkdtempSync(join(tmpBase, "buntmp-"));
   const username = getUsername();
   const homedir = getHomedir();
   const shellPath = getShell();
@@ -1849,7 +1892,7 @@ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTim
     // tmpdir that does. common/index.js derives its AF_UNIX pipe path via
     // path.relative(cwd, NODE_TEST_DIR), and sockaddr_un.sun_path is capped
     // at 108 bytes, so keep the directory name as short as possible.
-    ...(process.platform === "openharmony" ? { NODE_TEST_DIR: mkdtempSync(join(tmpdir(), "nt-")) } : {}),
+    ...(process.platform === "openharmony" ? { NODE_TEST_DIR: mkdtempSync(join(tmpBase, "nt-")) } : {}),
     ...(ohosSysroot ? { OHOS_SYSROOT: ohosSysroot } : {}),
     ...(typeof remapPort == "number"
       ? { BUN_CRASH_REPORT_URL: `http://localhost:${remapPort}` }
