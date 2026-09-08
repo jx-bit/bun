@@ -1843,6 +1843,13 @@ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTim
     BUN_INSTALL_CACHE_DIR: tmpdirPath,
     SHELLOPTS: isWindows ? "igncr" : undefined, // ignore "\r" on Windows
     TEST_TMPDIR: tmpdirPath, // Used in Node.js tests.
+    // The vendored Node test suite's common/tmpdir.js defaults its scratch
+    // root to a directory relative to the test file itself, which on OHOS
+    // can't hold AF_UNIX socket files or hardlinks (EPERM). Point it at a
+    // tmpdir that does. common/index.js derives its AF_UNIX pipe path via
+    // path.relative(cwd, NODE_TEST_DIR), and sockaddr_un.sun_path is capped
+    // at 108 bytes, so keep the directory name as short as possible.
+    ...(process.platform === "openharmony" ? { NODE_TEST_DIR: mkdtempSync(join(tmpdir(), "nt-")) } : {}),
     ...(ohosSysroot ? { OHOS_SYSROOT: ohosSysroot } : {}),
     ...(typeof remapPort == "number"
       ? { BUN_CRASH_REPORT_URL: `http://localhost:${remapPort}` }
@@ -2071,7 +2078,13 @@ async function spawnBunTest(execPath, testPath, opts = { cwd }) {
     // setup (napi node-gyp compiles) or many subprocess spawns don't hit
     // the file wall before any individual test times out. Kept below the
     // per-test multiplier so the overall shard stays inside the job timeout.
-    timeout: isReallyTest ? Math.ceil(timeout * (isAsan ? 2 : 1)) : 30_000,
+    // OHOS: fork/spawn and fs syscalls run 2-3x slower than Linux, and this
+    // outer wall-clock kill ignores a file's own setDefaultTimeout() —
+    // install/migration-heavy files were getting killed here even after
+    // raising their internal timeout past the wall.
+    timeout: isReallyTest
+      ? Math.ceil(timeout * (isAsan ? 2 : 1) * (process.platform === "openharmony" ? 3 : 1))
+      : 30_000,
     env,
     stdout: options.stdout,
     stderr: options.stderr,
