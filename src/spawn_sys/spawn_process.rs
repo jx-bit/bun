@@ -1074,20 +1074,15 @@ fn set_spawned_stdio(spawned: &mut PosixSpawnResult, i: usize, fd: Fd) {
 // read. Parsing lives in shebang.rs (host-testable); this is the assembly.
 
 #[cfg(target_env = "ohos")]
-struct ShebangRewrite {
-    interp: std::ffi::CString,
-    // Keepalive: holds the argv CStrings whose raw pointers live in `ptrs`.
-    // Never read — the leading underscore marks it as intentionally unread.
-    _owned: Vec<std::ffi::CString>,
-    ptrs: Vec<*const c_char>,
-}
-
 /// Read the spawn target and, when it is a shebang script, rewrite the exec
 /// to target the interpreter: argv becomes
 /// `[interpreter, optional-arg, script, ...original args]`, mirroring
 /// binfmt_script. The interpreter must be an absolute path.
 #[cfg(target_env = "ohos")]
-fn ohos_expand_shebang(argv0_cstr: &CStr, argv: *const *const c_char) -> Option<ShebangRewrite> {
+fn ohos_expand_shebang(
+    argv0_cstr: &CStr,
+    argv: *const *const c_char,
+) -> Option<shebang::ShebangRewrite> {
     use std::io::Read as _;
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -1107,29 +1102,17 @@ fn ohos_expand_shebang(argv0_cstr: &CStr, argv: *const *const c_char) -> Option<
     let script = std::ffi::CString::new(argv0_cstr.to_bytes()).ok()?;
     let arg = arg.map(std::ffi::CString::new).transpose().ok()?;
 
-    let mut owned = Vec::with_capacity(2);
-    let mut ptrs: Vec<*const c_char> = Vec::with_capacity(8);
-    ptrs.push(interp.as_ptr());
-    if let Some(a) = &arg {
-        ptrs.push(a.as_ptr());
-    }
-    ptrs.push(script.as_ptr());
-    owned.push(script);
+    let mut tail = Vec::new();
     let mut k = 1usize;
     loop {
         let p = unsafe { *argv.add(k) };
         if p.is_null() {
             break;
         }
-        ptrs.push(p);
+        tail.push(p);
         k += 1;
     }
-    ptrs.push(std::ptr::null());
-    Some(ShebangRewrite {
-        interp,
-        _owned: owned,
-        ptrs,
-    })
+    Some(shebang::build_rewrite(interp, arg, script, &tail))
 }
 
 #[cfg(any(target_env = "ohos", test))]

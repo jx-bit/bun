@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { availableParallelism, userInfo } from "node:os";
+import { availableParallelism } from "node:os";
 import { basename, dirname, extname, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
@@ -48,11 +48,13 @@ import {
   getDistroVersion,
   getEnv,
   getFileUrl,
+  getHomedir,
   getHostname,
   getLoggedInUserCountOrDetails,
   getOs,
   getSecret,
   getShell,
+  getUsername,
   getWindowsExitReason,
   isAndroid,
   isBuildkite,
@@ -1755,7 +1757,23 @@ async function spawnSafe(options) {
 let _combinedPath = "";
 function getCombinedPath(execPath) {
   if (!_combinedPath) {
-    _combinedPath = addPath(realpathSync(dirname(execPath)), process.env.PATH);
+    const paths = [realpathSync(dirname(execPath))];
+    if (process.platform === "openharmony") {
+      // `~/.harmonybrew/bin/clang(++)` resolves to ohos-sdk's older bundled
+      // clang (15.0.4, no <source_location>/C++20 libc++), not llvm@21 —
+      // both formulae ship a binary of that name and ohos-sdk's is the one
+      // linked. node-gyp finds a compiler by searching PATH for clang/cc
+      // regardless of the CC/CXX env vars, so any test that builds a native
+      // addon (napi, v8 embedder tests) silently used the wrong one and
+      // failed on missing C++20 headers. Put llvm@21's own versioned keg
+      // bin dir first so `clang`/`clang++` resolve there unambiguously.
+      const brew = spawnSync("brew", ["--prefix", "llvm@21"], { encoding: "utf-8" });
+      if (!brew.error && brew.status === 0) {
+        paths.push(join(brew.stdout.trim(), "bin"));
+      }
+    }
+    paths.push(process.env.PATH);
+    _combinedPath = addPath(...paths);
     // If we're running bun-profile.exe, try to make a symlink to bun.exe so
     // that anything looking for "bun" will find it
     if (isCI && basename(execPath, extname(execPath)).toLowerCase() !== "bun") {
@@ -1791,8 +1809,21 @@ function getCombinedPath(execPath) {
 async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTimeout, env, stdout, stderr }) {
   const path = getCombinedPath(execPath);
   const tmpdirPath = mkdtempSync(join(tmpdir(), "buntmp-"));
-  const { username, homedir } = userInfo();
+  const username = getUsername();
+  const homedir = getHomedir();
   const shellPath = getShell();
+  // bun:ffi's TCC linker only adds the OHOS sysroot's libc/include paths
+  // (needed for headers as basic as <stdint.h>) when $OHOS_SYSROOT is set
+  // (see src/runtime/ffi/ffi_body.rs). CI sets this at job level already;
+  // fall back to `brew --prefix ohos-sdk` so ad-hoc local runs of this
+  // runner don't silently lose that include path.
+  let ohosSysroot;
+  if (process.platform === "openharmony" && !process.env.OHOS_SYSROOT) {
+    const brew = spawnSync("brew", ["--prefix", "ohos-sdk"], { encoding: "utf-8" });
+    if (!brew.error && brew.status === 0) {
+      ohosSysroot = join(brew.stdout.trim(), "native", "sysroot");
+    }
+  }
   const bunEnv = {
     ...process.env,
     PATH: path,
@@ -1812,6 +1843,7 @@ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTim
     BUN_INSTALL_CACHE_DIR: tmpdirPath,
     SHELLOPTS: isWindows ? "igncr" : undefined, // ignore "\r" on Windows
     TEST_TMPDIR: tmpdirPath, // Used in Node.js tests.
+    ...(ohosSysroot ? { OHOS_SYSROOT: ohosSysroot } : {}),
     ...(typeof remapPort == "number"
       ? { BUN_CRASH_REPORT_URL: `http://localhost:${remapPort}` }
       : { BUN_ENABLE_CRASH_REPORTING: "0" }),
