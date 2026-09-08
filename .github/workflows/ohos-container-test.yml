@@ -25,6 +25,11 @@ on:
       - ohos-aarch64
     paths:
       - '.github/workflows/ohos-container-test.yml'
+  pull_request:
+    branches:
+      - ohos-aarch64
+    paths:
+      - '.github/workflows/ohos-container-test.yml'
   workflow_dispatch:
     inputs:
       test-filter:
@@ -41,7 +46,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ohos-container-test-${{ github.event_name }}
+  group: ohos-container-test-${{ github.event_name }}-${{ github.event.number || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -133,9 +138,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     env:
-      CONTAINER_IMAGE: ghcr.io/social4hyq/ci-runner:latest
+      CONTAINER_IMAGE: ${{ vars.OHOS_CI_IMAGE }}
       CONTAINER: ohos-container-test
-      TAP: social4hyq/core
+      TAP: ${{ vars.OHOS_TAP }}
       BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
     steps:
       - name: Checkout Bun source
@@ -185,6 +190,19 @@ jobs:
             "git config --global --add safe.directory /storage/Users/currentUser/.harmonybrew/Library/Taps/$TAP 2>/dev/null || true"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew tap $TAP || true"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew trust $TAP"
+          # Surgical brew update: the image's baked default-tap index can
+          # reference node bottles the CDN has pruned (baked 26.4.0 vs live
+          # 26.5.0 → 404 → the runner falls back to the tested binary). A
+          # plain `brew update` refreshes the default tap's index before the
+          # node install — the reference OHOS CI lane does exactly this.
+          docker exec "$CONTAINER" bash -lc "brew update" 2>&1 | tail -2 || true
+          # llvm@21 bottle: the node-gyp tests (test/napi/*) need a C++
+          # toolchain whose libc++ has C++20 headers (node-26 headers include
+          # <source_location>) — without it the addon build dies and the napi
+          # family fails (31 files in run 34079587941). The keg ships the
+          # header and the arm64_ohos bottle pours in seconds.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install llvm@21" 2>&1 | tail -3 \
+            || echo "::warning::llvm@21 install failed — napi node-gyp tests will fail"
           # best-effort: the node bottle has 404'd on the CDN before; the
           # runner has a three-level fallback below
           # node comes from the DEFAULT core tap (its arm64_ohos bottle
@@ -243,6 +261,7 @@ jobs:
               '"$RUNNER"' scripts/runner.node.mjs \
                 --exec-path=/workspace/bun/bun-ohos \
                 --quiet \
+                --parallel \
                 --retries=1 \
                 --results-json=results.json \
                 --exclude=integration/bun-types \
