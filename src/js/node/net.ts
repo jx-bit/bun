@@ -665,7 +665,13 @@ function SocketEmitEndNT(self, _err?) {
         errno?: number;
         syscall?: string;
       };
-      er.errno = _err.errno ?? (process.platform === "win32" ? -4077 : process.platform === "linux" ? -104 : -54);
+      er.errno =
+        _err.errno ??
+        (process.platform === "win32"
+          ? -4077
+          : process.platform === "linux" || process.platform === "openharmony"
+            ? -104
+            : -54);
       er.syscall = "read";
       self.destroy(er);
     } else {
@@ -3708,7 +3714,8 @@ Server.prototype.listen = function listen(port, hostname, onListen) {
         port = 0;
       }
 
-      const isLinux = process.platform === "linux" || process.platform === "android";
+      const isLinux =
+        process.platform === "linux" || process.platform === "android" || process.platform === "openharmony";
 
       // Match Node's listen() option normalization + validation.
       // https://github.com/nodejs/node/blob/614050b657e9757c1097aa85f92f2cb51149dc0d/lib/net.js#L2145

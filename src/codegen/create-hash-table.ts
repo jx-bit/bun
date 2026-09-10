@@ -12,7 +12,9 @@ const create_hash_table = path.join(import.meta.dir, "./create_hash_table");
 const input_text = await Bun.file(input).text();
 const to_preprocess = [...input_text.matchAll(/@begin\s+.+?@end/gs)].map(m => m[0]).join("\n");
 
-const os = platform === "win32" ? "WINDOWS" : platform.toUpperCase();
+// WebKit has no OS(OPENHARMONY); OHOS is linux-kernel, so preprocess with
+// the LINUX guards kept. (TARGET_PLATFORM is "openharmony" for ohos builds.)
+const os = platform === "win32" ? "WINDOWS" : platform === "openharmony" ? "LINUX" : platform.toUpperCase();
 const other_oses = ["WINDOWS", "DARWIN", "LINUX"].filter(x => x !== os);
 const to_remove = new RegExp(`#if\\s+(!OS\\(${os}\\)|OS\\((${other_oses.join("|")})\\))\\n.*?#endif`, "gs");
 
