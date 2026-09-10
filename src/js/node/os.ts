@@ -121,7 +121,7 @@ function bound(binding) {
         ? "Windows_NT"
         : process.platform === "darwin"
           ? "Darwin"
-          : process.platform === "linux" || process.platform === "android"
+          : process.platform === "linux" || process.platform === "android" || process.platform === "openharmony"
             ? "Linux"
             : process.platform === "freebsd"
               ? "FreeBSD"
