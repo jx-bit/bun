@@ -204,6 +204,10 @@ static JSValue constructPlatform(VM& vm, JSObject* processObject)
 {
 #if defined(__APPLE__)
     return JSC::jsString(vm, makeAtomString("darwin"_s));
+#elif defined(__OHOS__)
+    // OHOS triples also define __linux__, so this must stay above the
+    // __linux__ branch.
+    return JSC::jsString(vm, makeAtomString("openharmony"_s));
 #elif defined(__ANDROID__)
     return JSC::jsString(vm, makeAtomString("android"_s));
 #elif defined(__linux__)
