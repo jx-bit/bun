@@ -89,8 +89,19 @@ impl PollOrFd {
                         close_async = false;
                     }
                 }
-                // Consumes the underlying allocation.
-                poll.deinit_force_unregister();
+                // Consumes the underlying allocation. When we're about to
+                // close(fd) right below anyway, skip the explicit CTL_DEL —
+                // close() already removes the epoll registration implicitly,
+                // and on OHOS the explicit DEL can corrupt a sibling
+                // registration sharing the same dup'd open file description
+                // (see `deinit_force_unregister_skip_ctl_del`'s doc comment).
+                // Only skip when we're also closing the fd: an unregister
+                // that leaves the fd open still needs the real DEL.
+                if close_fd {
+                    poll.deinit_force_unregister_skip_ctl_del();
+                } else {
+                    poll.deinit_force_unregister();
+                }
             }
         }
 
