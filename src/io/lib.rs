@@ -1831,6 +1831,10 @@ impl FilePollRef {
     pub(crate) fn deinit_force_unregister(self) {
         self.inner().deinit_force_unregister();
     }
+    #[inline]
+    pub(crate) fn deinit_force_unregister_skip_ctl_del(self) {
+        self.inner().deinit_force_unregister_skip_ctl_del();
+    }
     /// Single nonnull-asref accessor for the process-global uWS loop pointer.
     ///
     /// Type invariant (encapsulated `unsafe`): every caller of
