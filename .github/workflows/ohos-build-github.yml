@@ -32,7 +32,8 @@ on:
   push:
     branches:
       - ohos-aarch64
-      - claude/ohos-*
+    # No claude/* here: PR branches already build via the pull_request event,
+    # and listing them double-ran every PR (push + pull_request).
   pull_request:
     branches:
       - ohos-aarch64
