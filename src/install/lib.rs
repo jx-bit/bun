@@ -409,8 +409,9 @@ impl RunCommand {
     #[cfg(not(windows))]
     const SHELLS_TO_SEARCH: &'static [&'static [u8]] = &[b"bash", b"sh", b"zsh"];
 
-    /// `/tmp/bun-node-<sha>` (or debug variant). Windows builds compute the path
-    /// at runtime via GetTempPathW, so this constant is POSIX-only.
+    /// `/tmp/bun-node-<sha>` (or debug variant; under the app sandbox tmp on
+    /// OHOS). Windows builds compute the path at runtime via GetTempPathW, so
+    /// this constant is POSIX-only.
     ///
     /// NOTE: the SHA alone does not uniquely identify a binary — two local
     /// builds at the same commit share this dir. `create_fake_temporary_node_executable`
@@ -424,6 +425,10 @@ impl RunCommand {
             "/private/tmp"
         } else if cfg!(target_os = "android") {
             "/data/local/tmp"
+        } else if cfg!(target_env = "ohos") {
+            // The OHOS app sandbox cannot write to /tmp; the app-writable
+            // tmp dir is under the EL2 data directory.
+            "/data/storage/el2/base/tmp"
         } else {
             "/tmp"
         };
@@ -596,13 +601,22 @@ impl RunCommand {
             // already exists, refuse to use it unless it's a directory we own
             // with no group/other write bits.
             match bun_sys::mkdir(DIR_Z, 0o700) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // OHOS tmpfs forces setgid + group-write on new
+                    // directories; chmod back to 0700 so the EEXIST
+                    // permission check below passes on re-entry.
+                    #[cfg(target_env = "ohos")]
+                    {
+                        let _ = bun_sys::chmod(DIR_Z, 0o700);
+                    }
+                }
                 Err(e) if e.get_errno() == bun_sys::E::EEXIST => match bun_sys::lstat(DIR_Z) {
                     Ok(st)
                         if bun_sys::kind_from_mode(st.st_mode as bun_sys::Mode)
                             == bun_sys::FileKind::Directory
                             && st.st_uid == bun_sys::c::getuid()
-                            && (st.st_mode as bun_sys::Mode) & 0o022 == 0 => {}
+                            && ((st.st_mode as bun_sys::Mode) & 0o022 == 0
+                                || cfg!(target_env = "ohos")) => {}
                     _ => return Ok(()),
                 },
                 Err(_) => return Ok(()),
