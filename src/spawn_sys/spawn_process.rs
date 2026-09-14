@@ -741,7 +741,10 @@ pub unsafe fn spawn_process_posix(
 
     // The label is only referenced from the Linux memfd fast-path below.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android")),
+        not(all(
+            any(target_os = "linux", target_os = "android"),
+            not(target_env = "ohos")
+        )),
         allow(unused_labels)
     )]
     'stdio: for i in 0..3usize {
@@ -782,7 +785,13 @@ pub unsafe fn spawn_process_posix(
                 actions.open(fileno, path, flag | bun_sys::O::CREAT as u32, 0o664)?;
             }
             PosixStdio::Buffer => {
-                #[cfg(any(target_os = "linux", target_os = "android"))]
+                // OHOS: memfd writes not visible to fstat after child exits
+                // (verified 2026-06-11: dup2(memfd,1/2) → child writes → fstat size=0).
+                // Fall through to socketpair on OHOS.
+                #[cfg(all(
+                    any(target_os = "linux", target_os = "android"),
+                    not(target_env = "ohos")
+                ))]
                 'use_memfd: {
                     if !options.stream && i > 0 && bun_sys::can_use_memfd() {
                         // use memfd if we can

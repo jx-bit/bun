@@ -1042,6 +1042,52 @@ fn spawn_maybe_sync<const IS_SYNC: bool>(
         }
     }
 
+    // OHOS: chdir()-then-exec() into a different binary leaves that binary's
+    // own getcwd() syscall broken for EL2-sandbox paths (EACCES walking the
+    // parent chain) — this is a real-device-only kernel/sandbox limitation,
+    // not reproducible in the CI container, and not a bug in the chdir/exec
+    // sequence below. Shells never hit the broken syscall in the first place:
+    // they trust an inherited $PWD when `stat($PWD)` matches `stat(".")` and
+    // skip calling getcwd() entirely. Real Node.js on this device has the same
+    // gap (verified: `child_process.spawnSync(cmd, {cwd})` reproduces
+    // identically), so this isn't something upstream already solved — mirror
+    // what a real `cd` does and keep $PWD in sync with an explicit cwd,
+    // scoped to OHOS so no other platform's spawn behavior changes.
+    #[cfg(target_env = "ohos")]
+    if user_specified_cwd {
+        let is_pwd_key = |ptr: CStrPtr| -> bool {
+            if ptr.is_null() {
+                return false;
+            }
+            // SAFETY: every entry in `env_array` at this point is `\0`-terminated
+            // storage owned by `cstr_storage`/`inherited_env_storage` (both
+            // still alive here) or a `c"..."` literal.
+            let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
+            let key_end = strings::index_of_char_usize(bytes, b'=').unwrap_or(bytes.len());
+            &bytes[..key_end] == b"PWD"
+        };
+        // `env: {...}` explicitly given by the caller: a PWD key in there is
+        // their deliberate choice (e.g. testing a tool's behavior when $PWD
+        // lies about cwd) — leave it untouched, don't second-guess it.
+        let user_set_pwd_explicitly = override_env && env_array.iter().any(|&ptr| is_pwd_key(ptr));
+        if !user_set_pwd_explicitly {
+            // Inheriting the parent's environment: any PWD already in
+            // `env_array` came from the parent process, not this spawn call's
+            // intent, and is now stale (cwd changed). It must be dropped
+            // rather than merely appended after: musl/glibc `getenv()` scans
+            // `environ` front-to-back and returns the *first* match, so a
+            // corrected entry pushed at the end would silently lose to the
+            // stale one still sitting earlier in the array.
+            env_array.retain(|&ptr| !is_pwd_key(ptr));
+            let mut buf: Vec<u8> = Vec::with_capacity(cwd.len() + 4);
+            buf.extend_from_slice(b"PWD=");
+            buf.extend_from_slice(cwd);
+            let pwd_line = ZBox::from_vec(buf);
+            env_array.push(pwd_line.as_ptr());
+            cstr_storage.push(pwd_line);
+        }
+    }
+
     env_array.push(core::ptr::null());
     argv.push(core::ptr::null());
 
