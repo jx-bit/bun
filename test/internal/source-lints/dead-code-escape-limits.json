@@ -21,5 +21,6 @@
   "src/runtime/image/codecs.rs": 1,
   "src/runtime/node/node_fs.rs": 2,
   "src/runtime/shell/subproc.rs": 1,
+  "src/runtime/webcore/blob/read_file.rs": 1,
   "src/spawn_sys/posix_spawn.rs": 4
 }
