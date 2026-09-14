@@ -1279,6 +1279,18 @@ pub mod waiter_thread_posix {
             bun_spawn_sys::waiter_thread_flag::get()
         }
 
+        /// Creates the singleton's eventfd and starts the poll thread eagerly.
+        ///
+        /// OHOS keeps the waiter thread always-on, but `init()` runs lazily on
+        /// the first watched spawn — its eventfd then shows up mid-process as a
+        /// +1 fd, which reads as a leak to tests that snapshot the fd table
+        /// around a spawn (spawn-streaming-stdin). VM init calls this so the
+        /// fd exists before any baseline is taken.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        pub fn prewarm() {
+            let _ = init();
+        }
+
         pub(crate) fn append(process: *mut Process) {
             // `js_process.queue` is an MPSC lock-free queue; `append` is the
             // producer half and only touches `queue`, never `active`.
