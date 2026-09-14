@@ -133,6 +133,11 @@ jobs:
       - name: Install brew deps (bun formula deps only)
         run: |
           set -e
+          set -o pipefail
+          # pipefail above is load-bearing: the retry loop and the fallback
+          # warnings below judge `docker exec | tail` pipelines, and without
+          # it tail's exit 0 always wins — a failed pour is reported as
+          # success and the retry never fires (2026-09-14 finding).
           # Refresh the formula index first: the baked index can reference
           # bottles the CDN has pruned (stale 404 that fails identically on
           # every retry). (social4hyq build.sh line 39.)
@@ -157,6 +162,24 @@ jobs:
             echo "::warning::brew install attempt $i failed, retrying in 90s"
             sleep 90
           done
+          # 2026-09-12: upstream bun.rb dropped its direct ohos-sdk dependency
+          # (the sdk now hangs off llvm@21's deps, renamed with an @version
+          # suffix — bun.rb resolves it via
+          #   llvm.deps.find { |dep| dep.name.start_with?("ohos-sdk@") }
+          # ). --only-dependencies therefore no longer pours it, and the
+          # baked llvm@21 keg predates that transitive dep. Resolve the name
+          # from llvm@21's current formula and install it explicitly;
+          # build-ohos-container.sh resolves the same way.
+          SDK_FORMULA=$(docker exec "$CONTAINER" bash -lc "$BREW_ENV brew deps --include-build llvm@21 2>/dev/null | grep -E '^ohos-sdk' | head -1" || true)
+          SDK_FORMULA=${SDK_FORMULA:-ohos-sdk}
+          echo "sdk formula (from llvm@21 deps): $SDK_FORMULA"
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install $SDK_FORMULA" 2>&1 | tail -3 \
+            || echo "::warning::$SDK_FORMULA install failed — build script falls back to the legacy keg"
+          # bun-bootstrap also left bun.rb's direct deps on 2026-09-12 (the
+          # formula itself remains in the tap); our lane still drives bun
+          # install + the build scripts through it, so pour it explicitly.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install bun-bootstrap" 2>&1 | tail -3 \
+            || echo "::warning::bun-bootstrap install failed — build driver bun unavailable"
           # cargo (OHOS-host rust nightly) links libz. The dependency tree
           # drifts when `brew update` refreshes the index (09-07: the pour
           # set flipped from libedit+libffi to bzip2+libxml2 and zlib
@@ -165,20 +188,35 @@ jobs:
           docker exec "$CONTAINER" bash -lc \
             "$BREW_ENV brew install $TAP/zlib 2>/dev/null || $BREW_ENV brew install zlib" 2>&1 | tail -3 \
             || echo "::warning::zlib install failed — cargo will hit missing deflate/inflate symbols"
-          # llvm@21 was split upstream in the tap (09-07): lld moved to its
-          # own lld@21 formula — without it the build's ld.lld probe only
-          # finds the ohos-sdk's 15.0.4 and dies.
-          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install $TAP/lld@21" 2>&1 | tail -3 \
+          # lld@21 ships in harmonybrew/core, not $TAP (the 09-08 fork
+          # retirement moved it) — the old $TAP/lld@21 spelling warned "No
+          # available formula" on every run. With the 2026-09-12 bun.rb it is
+          # also a direct :build dep, so the pour above installs it; keep an
+          # unqualified fallback for older tap states.
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install lld@21" 2>&1 | tail -3 \
             || echo "::warning::lld@21 install failed — ld.lld probe will reject 15.0.4"
           # Trust rejections are SILENT (exit 0) — verify key deps actually
           # installed, else the build fails cryptically downstream. (social4hyq
           # build.sh lines 51-54.) zlib: cargo links it, and the pour set
-          # drifts with the formula index (see the install above).
-          docker exec "$CONTAINER" bash -lc '
-            for f in llvm@21 ohos-sdk icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
+          # drifts with the formula index (see the install above). The sdk
+          # name is resolved the same way as the install above — hardcoding
+          # "ohos-sdk" broke when upstream renamed it (2026-09-14 failure).
+          # Trust rejections are SILENT (exit 0) — verify key deps actually
+          # installed, else the build fails cryptically downstream. (social4hyq
+          # build.sh lines 51-54.) zlib: cargo links it, and the pour set
+          # drifts with the formula index (see the install above). The sdk
+          # name is resolved the same way as the install above — hardcoding
+          # "ohos-sdk" broke when upstream renamed it (2026-09-14 failure).
+          # The list is a representative subset, deliberately NOT bun.rb's
+          # full --include-build tree (that spans :build deps of transitive
+          # deps — autoconf for python/ruby… — which a bottle pour never
+          # installs) and NOT JSON-derived direct deps (the image ships no
+          # jq); rename tracking is the daily canary's job.
+          docker exec -e SDK_FORMULA="$SDK_FORMULA" "$CONTAINER" bash -lc '
+            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
-                || { echo "::error::$f NOT installed (silent trust rejection? check brew trust)"; exit 1; }
+                || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
             echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version

@@ -33,8 +33,27 @@ set -euo pipefail
 
 BREW_PREFIX=$(brew --prefix)
 LLVM_PREFIX=$(brew --prefix llvm@21)
-SDK_PREFIX=$(brew --prefix ohos-sdk)
+# 2026-09-12: upstream bun.rb dropped its direct ohos-sdk dependency — the sdk
+# now hangs off llvm@21's deps, renamed with an @version suffix (bun.rb resolves
+# it via llvm.deps.find { |dep| dep.name.start_with?("ohos-sdk@") }). Resolve
+# the name from llvm@21's current formula so this tracks the floating tap;
+# fall back to the legacy name for older tap states, and to the image's baked
+# keg when the new bottle cannot be poured (atomgit CDN).
+SDK_FORMULA=$(brew deps --include-build llvm@21 2>/dev/null | grep -E '^ohos-sdk' | head -1 || true)
+SDK_FORMULA=${SDK_FORMULA:-ohos-sdk}
+if [ ! -d "$(brew --prefix "$SDK_FORMULA" 2>/dev/null || true)" ]; then
+  echo "sdk keg '$SDK_FORMULA' missing; pouring"
+  brew install "$SDK_FORMULA" || echo "::warning::$SDK_FORMULA pour failed; trying the legacy keg path"
+fi
+SDK_PREFIX=$(brew --prefix "$SDK_FORMULA" 2>/dev/null || true)
+[ -d "$SDK_PREFIX" ] || SDK_PREFIX="$BREW_PREFIX/opt/ohos-sdk"
+[ -d "$SDK_PREFIX" ] || { echo "::error::no ohos-sdk keg (formula '$SDK_FORMULA' and legacy opt/ohos-sdk both absent)"; exit 1; }
 ICU_PREFIX=$(brew --prefix icu4c@78)
+# bun-bootstrap left bun.rb's direct deps on 2026-09-12 but our lane drives
+# bun install + the build scripts through it — pour it when the keg is absent.
+if [ ! -d "$(brew --prefix bun-bootstrap 2>/dev/null || true)" ]; then
+  brew install bun-bootstrap || echo "::warning::bun-bootstrap pour failed; build driver bun unavailable"
+fi
 BUN_BOOT_DIR=$(brew --prefix bun-bootstrap)/bin
 RUST_HOME="/data/storage/el2/base/tmp/rust-${RUST_TOOLCHAIN}"
 SRC=/workspace/bun

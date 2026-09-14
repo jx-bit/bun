@@ -1,0 +1,106 @@
+# Daily drift sentinel for the OHOS container lane's brew dependency
+# contract.
+#
+# The build lane (ohos-build-github.yml) consumes the tap at floating HEAD
+# (`brew update`), so a tap-side dependency restructure surfaces as a red
+# container job on the next PR — 2026-09-14: the sdk left bun.rb's direct
+# deps and every PR went red before compiling. This canary runs the same
+# install + verification steps on a schedule so drift surfaces within a
+# day, decoupled from PR gating. It pours only (no source build): a full
+# run costs a few minutes on a warm runner.
+#
+# Formula names are resolved dynamically — the sdk from llvm@21's deps,
+# the verified set from bun.rb's current resolved tree — so a rename alone
+# should not turn this red. Red means a real pour failure (atomgit CDN
+# 404s are retried once below) or a contract change the resolution cannot
+# track; either way, mirror the fix into ohos-build-github.yml, whose
+# install/verify steps must stay in sync with this file.
+
+name: OHOS brew-deps canary (container)
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ohos-brew-deps-canary
+  cancel-in-progress: false
+
+env:
+  OHOS_CI_IMAGE: ${{ vars.OHOS_CI_IMAGE }}
+  OHOS_TAP: ${{ vars.OHOS_TAP }}
+  BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+
+jobs:
+  brew-deps:
+    name: brew deps canary (container)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Pull and start OHOS container
+        run: |
+          docker pull "$OHOS_CI_IMAGE"
+          docker run -d --name ohos-canary --init \
+            --security-opt seccomp=unconfined \
+            "$OHOS_CI_IMAGE" sleep infinity
+
+      # Same ordering as the build lane: safe.directory BEFORE brew trust,
+      # and trust BEFORE any install — without trust, TRANSITIVE tap deps
+      # (loaded via depends_on, not named on the command line) silently
+      # refuse to load and the pour installs nothing while exiting 0.
+      - name: Configure container (tap trust)
+        run: |
+          TAP_IN_CONTAINER="${{ vars.OHOS_TAP_IN_CONTAINER }}"
+          docker exec ohos-canary bash -lc \
+            "git config --global --add safe.directory $TAP_IN_CONTAINER || true"
+          docker exec ohos-canary bash -lc "$BREW_ENV brew tap $OHOS_TAP || true"
+          docker exec ohos-canary bash -lc "$BREW_ENV brew trust $OHOS_TAP"
+
+      - name: Pour deps (bun formula deps only)
+        run: |
+          set -e
+          set -o pipefail
+          docker exec ohos-canary bash -lc "$BREW_ENV brew update --quiet" \
+            || echo "::warning::brew update failed; continuing with baked index"
+          for i in 1 2; do
+            if docker exec ohos-canary bash -lc \
+              "$BREW_ENV brew install --only-dependencies --build-bottle $OHOS_TAP/bun" 2>&1 | tail -40; then
+              break
+            fi
+            [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; exit 1; }
+            echo "::warning::brew install attempt $i failed, retrying in 90s"
+            sleep 90
+          done
+          # The sdk left bun.rb's direct deps (2026-09-12) and now hangs off
+          # llvm@21's deps under an @version-suffixed name — the pour skips
+          # the baked llvm@21 without re-resolving, so resolve the name from
+          # llvm@21's current formula and pour it explicitly. bun-bootstrap
+          # left the direct deps too and remains the build driver's bun.
+          SDK_FORMULA=$(docker exec ohos-canary bash -lc "$BREW_ENV brew deps --include-build llvm@21 2>/dev/null | grep -E '^ohos-sdk' | head -1" || true)
+          SDK_FORMULA=${SDK_FORMULA:-ohos-sdk}
+          echo "sdk formula (from llvm@21 deps): $SDK_FORMULA"
+          echo "SDK_FORMULA=$SDK_FORMULA" >> "$GITHUB_ENV"
+          docker exec ohos-canary bash -lc "$BREW_ENV brew install $SDK_FORMULA" 2>&1 | tail -3 \
+            || echo "::warning::$SDK_FORMULA install failed"
+          docker exec ohos-canary bash -lc "$BREW_ENV brew install bun-bootstrap" 2>&1 | tail -3 \
+            || echo "::warning::bun-bootstrap install failed"
+          docker exec ohos-canary bash -lc "$BREW_ENV brew install zlib" 2>&1 | tail -3 \
+            || echo "::warning::zlib install failed (cargo links it)"
+
+      - name: Verify kegs (representative set + dynamic sdk)
+        run: |
+          set -e
+          set -o pipefail
+          docker exec -e SDK_FORMULA="$SDK_FORMULA" ohos-canary bash -lc '
+            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
+              p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
+                && echo "OK  $f -> $p" \
+                || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
+            done
+            echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
+            echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
+          '
