@@ -1,5 +1,12 @@
 This is the Bun repository - an all-in-one JavaScript runtime & toolkit designed for speed, with a bundler, test runner, and Node.js-compatible package manager. It's written primarily in Rust with C++ for JavaScriptCore integration, powered by WebKit's JavaScriptCore engine.
 
+## OHOS adaptation line (this fork's delivery line)
+
+OHOS (OpenHarmony) aarch64 port, delivered via PRs to `ohos-aarch64`. All
+OHOS work — the per-PR ledger, working rules, and failure attribution —
+lives in the local, untracked `ohos/` directory (absent on a fresh clone):
+start at [ohos/README.md](ohos/README.md).
+
 ## Building and Running Bun
 
 ### Build Commands
