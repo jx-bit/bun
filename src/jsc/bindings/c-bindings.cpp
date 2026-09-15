@@ -53,21 +53,35 @@ extern "C" int32_t set_process_priority(int32_t pid, int32_t priority)
 #if !OS(WINDOWS)
 extern "C" bool is_executable_file(const char* path)
 {
-#if defined(O_EXEC)
-    // O_EXEC is macOS specific
+#if defined(__OHOS__)
+    // OHOS kernel bug: open(O_EXEC) doesn't check file x permission bit,
+    // so a 0660 file incorrectly succeeds. Use access(X_OK) instead.
+    // But access(X_OK) returns true for directories (x bit = traversal),
+    // so we must also verify it is a regular file, not a directory.
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+    if (!S_ISREG(st.st_mode))
+        return false;
+    return access(path, X_OK) == 0;
+#elif defined(O_EXEC)
+    // macOS: O_EXEC correctly checks x permission.
     int fd = open(path, O_EXEC | O_CLOEXEC | O_NONBLOCK | O_NOCTTY, 0);
     if (fd < 0)
         return false;
     close(fd);
     return true;
-#endif // defined(O_EXEC)
-
+#else
+    // Linux (no O_EXEC): use stat to check x bit. Directories also carry an
+    // x bit (traversal permission), so this must also reject non-regular
+    // files the same way the OHOS branch above does.
     struct stat st;
     if (stat(path, &st) != 0)
         return false;
-
-    // regular file and user can execute
-    return S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR);
+    if (!S_ISREG(st.st_mode))
+        return false;
+    return (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+#endif
 }
 #endif
 
@@ -308,9 +322,7 @@ extern "C" void on_before_reload_process_posix()
     // close all file descriptors except stdin, stdout, stderr and possibly IPC.
     // if you're passing additional file descriptors to Bun, you're probably not passing more than 8.
     // If this fails, it's ultimately okay, we're just trying our best to avoid leaking file descriptors.
-#if !defined(__OHOS__)
     bun_close_range(3, ~0U, CLOSE_RANGE_CLOEXEC);
-#endif
 #endif
 
     // Preserve the IPC channel to the parent across the execve: NODE_CHANNEL_FD survives in
@@ -626,9 +638,7 @@ extern "C" void bun_initialize_process()
     // This is less of an issue for macOS due to posix_spawn
     // This is best effort, not all linux kernels support close_range or CLOSE_RANGE_CLOEXEC
     // To avoid breaking --watch, we skip stdin, stdout, stderr and IPC.
-#if !OS(WINDOWS) && !defined(__OHOS__)
     bun_close_range(4, ~0U, CLOSE_RANGE_CLOEXEC);
-#endif
 #endif
 
 #if OS(LINUX) || OS(DARWIN) || OS(FREEBSD)
@@ -1050,7 +1060,11 @@ extern "C" void Bun__unregisterSignalsForForwarding()
 #if OS(LINUX) || OS(DARWIN) || OS(FREEBSD)
 #include <paths.h>
 
+#if defined(__OHOS__)
+extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = "/usr/bin:/bin:/system/bin";
+#else
 extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = _PATH_DEFPATH;
+#endif
 #elif OS(WINDOWS)
 extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = "C:\\Windows\\System32;C:\\Windows;";
 #else
