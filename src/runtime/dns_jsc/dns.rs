@@ -5154,7 +5154,10 @@ impl Resolver {
     fn has_global_ipv6() -> bool {
         const PATH: &[u8] = b"/proc/net/if_inet6\0";
         let fd = unsafe {
-            libc::open(PATH.as_ptr().cast::<core::ffi::c_char>(), libc::O_RDONLY | libc::O_CLOEXEC)
+            libc::open(
+                PATH.as_ptr().cast::<core::ffi::c_char>(),
+                libc::O_RDONLY | libc::O_CLOEXEC,
+            )
         };
         if fd < 0 {
             return false;
@@ -5177,7 +5180,6 @@ impl Resolver {
             matches!(line[0], b'2' | b'3')
         })
     }
-
 
     pub(crate) fn do_lookup(
         &self,
