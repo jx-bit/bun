@@ -1759,8 +1759,12 @@ pub mod fs {
                         // SAFETY: candidate is a valid C string for libc::access
                         if unsafe { libc::access(cstr.as_ptr(), libc::W_OK) } == 0 {
                             // Return the static literal directly (no allocation needed)
-                            if candidate == b"/tmp" { return b"/tmp"; }
-                            if candidate == b"/data/local/tmp" { return b"/data/local/tmp"; }
+                            if candidate == b"/tmp" {
+                                return b"/tmp";
+                            }
+                            if candidate == b"/data/local/tmp" {
+                                return b"/data/local/tmp";
+                            }
                             return Box::leak(candidate.to_vec().into_boxed_slice());
                         }
                     }
@@ -1776,7 +1780,12 @@ pub mod fs {
                     b"/tmp"
                 });
             }
-            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "android", target_env = "ohos")))]
+            #[cfg(not(any(
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "android",
+                target_env = "ohos"
+            )))]
             {
                 b"/tmp"
             }
