@@ -826,7 +826,11 @@ impl OperatingSystem {
         | Self::ANDROID
         | Self::OPENHARMONY;
 
-    #[cfg(all(target_os = "linux", not(target_os = "android"), not(target_env = "ohos")))]
+    #[cfg(all(
+        target_os = "linux",
+        not(target_os = "android"),
+        not(target_env = "ohos")
+    ))]
     pub const CURRENT: Self = Self(Self::LINUX);
     #[cfg(target_env = "ohos")]
     pub const CURRENT: Self = Self(Self::OPENHARMONY);
