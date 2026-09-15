@@ -89,47 +89,61 @@ pub(crate) fn openat(dir: Fd, path: &ZStr, flags: i32, mode: Mode) -> Result<Fd,
     retry(|| rustix::fs::openat(dir, path.as_cstr(), oflags, mode)).map(own_fd)
 }
 
-#[cfg(not(target_env = "ohos"))]
+// OHOS seccomp blocks openat2 (syscall 437) with uncatchable SIGSYS.
+// Return ENOSYS on OHOS so the sys/lib.rs wrapper caches the
+// unavailability and falls back to plain openat.
 #[inline]
 pub(crate) fn openat2_beneath(dir: Fd, path: &ZStr, flags: i32, mode: Mode) -> Result<Fd, i32> {
-    let oflags = rustix::fs::OFlags::from_bits_retain(flags as u32);
-    let mode = rustix::fs::Mode::from_raw_mode(mode);
-    let dir = dir.as_borrowed_fd();
-    retry(|| {
-        rustix::fs::openat2(
-            dir,
-            path.as_cstr(),
-            oflags,
-            mode,
-            rustix::fs::ResolveFlags::BENEATH,
-        )
-    })
-    .map(own_fd)
-}
-
-// OHOS seccomp blocks openat2 (syscall 437) with SIGSYS.
-// Fall back to regular openat so bun install doesn't crash.
-#[cfg(target_env = "ohos")]
-#[inline]
-pub(crate) fn openat2_beneath(dir: Fd, path: &ZStr, flags: i32, mode: Mode) -> Result<Fd, i32> {
-    openat(dir, path, flags, mode)
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = (dir, path, flags, mode);
+        return Err(libc::ENOSYS);
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let oflags = rustix::fs::OFlags::from_bits_retain(flags as u32);
+        let mode = rustix::fs::Mode::from_raw_mode(mode);
+        let dir = dir.as_borrowed_fd();
+        retry(|| {
+            rustix::fs::openat2(
+                dir,
+                path.as_cstr(),
+                oflags,
+                mode,
+                rustix::fs::ResolveFlags::BENEATH,
+            )
+        })
+        .map(own_fd)
+    }
 }
 
 #[inline]
 pub(crate) fn openat2_in_root(dir: Fd, path: &ZStr, flags: i32, mode: Mode) -> Result<Fd, i32> {
-    let oflags = rustix::fs::OFlags::from_bits_retain(flags as u32);
-    let mode = rustix::fs::Mode::from_raw_mode(mode);
-    let dir = dir.as_borrowed_fd();
-    retry(|| {
-        rustix::fs::openat2(
-            dir,
-            path.as_cstr(),
-            oflags,
-            mode,
-            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
-        )
-    })
-    .map(own_fd)
+    // Same OHOS guard as openat2_beneath above. HongMeng accepts the openat2
+    // syscall itself but fails RESOLVE_IN_ROOT with EINVAL, so the wrapper's
+    // probe must not be trusted to catch this per-path — synthesize ENOSYS
+    // unconditionally and let the wrapper cache + fall back to plain openat.
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = (dir, path, flags, mode);
+        return Err(libc::ENOSYS);
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        let oflags = rustix::fs::OFlags::from_bits_retain(flags as u32);
+        let mode = rustix::fs::Mode::from_raw_mode(mode);
+        let dir = dir.as_borrowed_fd();
+        retry(|| {
+            rustix::fs::openat2(
+                dir,
+                path.as_cstr(),
+                oflags,
+                mode,
+                rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+            )
+        })
+        .map(own_fd)
+    }
 }
 
 #[inline]
