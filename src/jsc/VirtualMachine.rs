@@ -3618,6 +3618,12 @@ impl VirtualMachine {
                 }
             }
         }
+
+        // OHOS keeps the waiter thread always-on (see spawn_sys/lib.rs);
+        // start it here so its eventfd exists before anything snapshots
+        // the fd table.
+        #[cfg(target_env = "ohos")]
+        bun_spawn::process::WaiterThread::prewarm();
     }
 
     /// Routes an unhandled promise rejection to the configured handler, bumping the unhandled-error counter.
