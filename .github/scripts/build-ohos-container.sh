@@ -48,6 +48,29 @@ fi
 SDK_PREFIX=$(brew --prefix "$SDK_FORMULA" 2>/dev/null || true)
 [ -d "$SDK_PREFIX" ] || SDK_PREFIX="$BREW_PREFIX/opt/ohos-sdk"
 [ -d "$SDK_PREFIX" ] || { echo "::error::no ohos-sdk keg (formula '$SDK_FORMULA' and legacy opt/ohos-sdk both absent)"; exit 1; }
+
+# ── sysroot layout probe (2026-09-17) ─────────────────────────────────
+# The renamed ohos-sdk-native keg (26.0.0.18) does not carry native/sysroot —
+# the layout changed when the tap renamed the formula. Probe the known
+# layouts and fall back to the image's baked legacy versioned keg
+# (opt/ohos-sdk@<ver>, guaranteed present in the pinned image).
+SDK_SYSROOT=""
+for cand in \
+    "$SDK_PREFIX/native/sysroot" \
+    "$SDK_PREFIX/sysroot" \
+    "$BREW_PREFIX"/opt/ohos-sdk@*/native/sysroot \
+    "$BREW_PREFIX/opt/ohos-sdk/native/sysroot"; do
+    [ -d "$cand" ] && { SDK_SYSROOT="$cand"; break; }
+done
+if [ -z "$SDK_SYSROOT" ]; then
+    echo "::error::no OHOS sysroot under any known layout (formula '$SDK_FORMULA'); ohos-sdk* keg tops:"
+    for d in "$BREW_PREFIX"/opt/ohos-sdk*; do
+        [ -d "$d" ] && { echo "  $d:"; ls "$d" 2>/dev/null | sed 's/^/    /' | head -8; }
+    done
+    exit 1
+fi
+echo "OHOS sysroot: $SDK_SYSROOT"
+SDK_ROOT_DIR=$(dirname "$SDK_SYSROOT")
 ICU_PREFIX=$(brew --prefix icu4c@78)
 # bun-bootstrap left bun.rb's direct deps on 2026-09-12 but our lane drives
 # bun install + the build scripts through it — pour it when the keg is absent.
@@ -82,8 +105,8 @@ export CXX="$LLVM_PREFIX/bin/clang++"
 export CARGO_HOME=/root/.cargo
 export RUSTUP_HOME="$RUST_HOME"
 export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
-export OHOS_SDK_ROOT="$SDK_PREFIX"
-export OHOS_SYSROOT="$SDK_PREFIX/native/sysroot"
+export OHOS_SDK_ROOT="$SDK_ROOT_DIR"
+export OHOS_SYSROOT="$SDK_SYSROOT"
 export OHOS_LLVM_PREFIX="$LLVM_PREFIX"      # bun.rb 235
 export BUN_INSTALL_IGNORE_SCRIPTS=1
 export TMPDIR="/data/storage/el2/base/tmp"  # bun.rb 247 (EL2 tmp, musl tmpfile path)
