@@ -1,13 +1,16 @@
 # Daily drift sentinel for the OHOS container lane's brew dependency
 # contract.
 #
-# The build lane (ohos-build-github.yml) consumes the tap at floating HEAD
-# (`brew update`), so a tap-side dependency restructure surfaces as a red
-# container job on the next PR — 2026-09-14: the sdk left bun.rb's direct
-# deps and every PR went red before compiling. This canary runs the same
-# install + verification steps on a schedule so drift surfaces within a
-# day, decoupled from PR gating. It pours only (no source build): a full
-# run costs a few minutes on a warm runner.
+# The build lane (ohos-build-github.yml) pins harmonybrew/core to
+# OHOS_CORE_PIN (2026-09-16: floating core switched llvm@21 to the
+# sysroot-less ohos-sdk-native and every PR went red in configure), so
+# tap-side restructures no longer reach PR gating. This canary therefore
+# floats ON PURPOSE: it consumes core at origin/main and runs the same
+# install + verification steps on a schedule, so a newer core tip gets a
+# daily validation decoupled from PR gating. Green on a newer tip = bump
+# OHOS_CORE_PIN; the Pour step prints the exact tip SHA for copy-paste.
+# It pours only (no source build): a full run costs a few minutes on a
+# warm runner.
 #
 # Formula names are resolved dynamically — the sdk from llvm@21's deps,
 # the verified set from bun.rb's current resolved tree — so a rename alone
@@ -90,6 +93,12 @@ jobs:
             || echo "::warning::bun-bootstrap install failed"
           docker exec ohos-canary bash -lc "$BREW_ENV brew install zlib" 2>&1 | tail -3 \
             || echo "::warning::zlib install failed (cargo links it)"
+          # The build lane pins this tap (OHOS_CORE_PIN in
+          # ohos-build-github.yml); a green canary on a newer tip is the
+          # signal to bump it — print the exact SHA so the bump is one paste.
+          CORE_SHA=$(docker exec ohos-canary bash -lc \
+            'git -C "$(brew --repo harmonybrew/core)" rev-parse HEAD' || true)
+          echo "harmonybrew/core tip validated: ${CORE_SHA:-<unavailable>}"
 
       - name: Verify kegs (representative set + dynamic sdk)
         run: |
@@ -101,6 +110,15 @@ jobs:
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
+            # Same sysroot contract as the build lane verify step: a renamed
+            # sdk keg without native/sysroot pours fine and kills configure.
+            sysroot=""
+            for d in "$(brew --prefix)"/opt/ohos-sdk*/; do
+              [ -d "${d}native/sysroot" ] && { sysroot="${d}native/sysroot"; break; }
+            done
+            [ -n "$sysroot" ] \
+              || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
+            echo "OK  sysroot -> $sysroot"
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
             echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
           '

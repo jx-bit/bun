@@ -57,6 +57,14 @@ env:
   # :latest is an untracked drift channel). Bump deliberately after
   # validating a new image against the smoke checks.
   OHOS_CI_IMAGE: ${{ vars.OHOS_CI_IMAGE }}
+  # Pin harmonybrew/core — the tap that owns llvm@21/ohos-sdk — to a
+  # validated commit. Floating core renamed the sysroot-bearing
+  # ohos-sdk@26.0.0.18 to the sysroot-less ohos-sdk-native on 2026-09-16
+  # (core commit 39a060948 "llvm@21: use ohos-sdk-native") and every PR
+  # went red in configure the next morning. The canary
+  # (ohos-brew-deps-canary.yml) keeps floating and validates newer core
+  # tips daily; bump this SHA only after a green canary on the new tip.
+  OHOS_CORE_PIN: 5380be4e3284cb409f6b17ba560570b217cf2707
   CONTAINER: ohos
   TAP: ${{ vars.OHOS_TAP }}
   # In-container tap path (baked into the ci-runner image). Used for the
@@ -143,6 +151,21 @@ jobs:
           # every retry). (social4hyq build.sh line 39.)
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew update --quiet" \
             || echo "::warning::brew update failed; continuing with baked index"
+          # brew update fast-forwards the baked harmonybrew/core tap to
+          # origin/main — re-pin it AFTER the update, BEFORE the pour, or the
+          # pinned SHA is silently overwritten by the update and never applies.
+          if [ -n "$OHOS_CORE_PIN" ]; then
+            docker exec -e OHOS_CORE_PIN="$OHOS_CORE_PIN" "$CONTAINER" bash -lc '
+              CORE_TAP="$(brew --repo harmonybrew/core)"
+              git -C "$CORE_TAP" fetch origin main \
+                || { echo "::error::harmonybrew/core fetch failed"; exit 1; }
+              git -C "$CORE_TAP" checkout --detach "$OHOS_CORE_PIN" \
+                || { echo "::error::harmonybrew/core pin $OHOS_CORE_PIN not fetchable (rewritten upstream?)"; exit 1; }
+              echo "=== harmonybrew/core pinned to $OHOS_CORE_PIN ==="
+            '
+          else
+            echo "::warning::OHOS_CORE_PIN unset — harmonybrew/core floats to origin/main"
+          fi
           # Retry once after 90s for transient atomgit CDN 404s (social4hyq
           # build.sh lines 41-48 — brew reuses partial work).
           # --build-bottle (not --include-build: Harmonybrew's brew fork does
@@ -218,6 +241,16 @@ jobs:
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
+            # Keg existence is not enough: a renamed sdk keg without
+            # native/sysroot passes the loop above and dies 6 minutes later in
+            # configure (2026-09-17). Assert the sysroot layout itself.
+            sysroot=""
+            for d in "$(brew --prefix)"/opt/ohos-sdk*/; do
+              [ -d "${d}native/sysroot" ] && { sysroot="${d}native/sysroot"; break; }
+            done
+            [ -n "$sysroot" ] \
+              || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
+            echo "OK  sysroot -> $sysroot"
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
             echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
             echo "=== openssl@3 lib ==="; ls "$(brew --prefix openssl@3)/lib"/libssl* 2>/dev/null | head -3
