@@ -188,6 +188,8 @@ The code review rules — what blocks merges, distilled from ~2,500 merged PRs �
 
 Several situational sections live in `.claude/docs/landing-prs.md` — read the relevant one before the work it covers: **Node/Web compat** (touching `node:*` modules, Web APIs, or `src/runtime/node/`), **API design** (adding or changing user-facing API surface), **Performance** (optimizing, touching hot paths, or making perf claims), **Cross-platform** (platform-gated code, FFI/ABI, or platform-sensitive tests), **Dependencies & vendoring** (bumping deps or touching `vendor/`), **Docs, types, and comments** (docs, `.d.ts`, JSDoc), and **PR process** (opening or responding to a PR).
 
+**Fork-specific PR specs and process live in `ohos/README.md`** (OHOS delivery line, target branch `ohos-aarch64`) — read it before opening or reworking any PR here.
+
 ## Important Development Notes
 
 1. **Never use `bun test` or `bun <file>` directly** - always use `bun bd test` or `bun bd <command>`. `bun bd` compiles & runs the debug build.
