@@ -37,7 +37,9 @@ impl Default for CompileTarget {
                 tag: Default::default(),
                 _tag_padding: Default::default(),
             },
-            libc: if Environment::IS_MUSL {
+            libc: if Environment::IS_OHOS {
+                Libc::Ohos
+            } else if Environment::IS_MUSL {
                 Libc::Musl
             } else if Environment::IS_ANDROID {
                 Libc::Android
@@ -58,6 +60,8 @@ pub enum Libc {
     Musl,
     /// bionic (Android)
     Android,
+    /// HarmonyOS (OHOS) — musl-based, distinct npm package
+    Ohos,
 }
 
 impl Libc {
@@ -67,6 +71,7 @@ impl Libc {
             Libc::Default => "",
             Libc::Musl => "-musl",
             Libc::Android => "-android",
+            Libc::Ohos => "-ohos",
         }
     }
 }
@@ -305,6 +310,10 @@ impl CompileTarget {
                 this.libc = Libc::Android;
                 found_libc = true;
                 continue;
+            } else if token == b"ohos" {
+                this.libc = Libc::Ohos;
+                found_libc = true;
+                continue;
             } else {
                 return Err(ParseError::UnsupportedTarget);
             }
@@ -356,6 +365,7 @@ impl CompileTarget {
                         && token != b"baseline"
                         && token != b"musl"
                         && token != b"android"
+                        && token != b"ohos"
                         && !(strings::has_prefix(token, b"v1.")
                             || strings::has_prefix(token, b"v0."))
                     {
@@ -415,8 +425,9 @@ impl CompileTarget {
         // `OperatingSystem` / `Architecture` / `Libc` is a compile error here,
         // not a runtime panic behind a wildcard arm.
         let platform: &'static [u8] = match self.libc {
-            // process.platform: Node reports "android" on Android, not "linux".
+            // process.platform: Node reports "android" on Android, "openharmony" on OHOS.
             Libc::Android => b"\"android\"",
+            Libc::Ohos => b"\"openharmony\"",
             Libc::Default | Libc::Musl => match self.os {
                 OperatingSystem::Mac => b"\"darwin\"",
                 OperatingSystem::Linux => b"\"linux\"",
