@@ -121,6 +121,15 @@ pub struct Terminal {
     /// Duplicated master fd for writing (POSIX) / overlapped write pipe end (Windows)
     write_fd: Cell<Fd>,
 
+    /// Exit notification that fired before the JS wrapper / callbacks existed.
+    /// `on_reader_finished` is one-shot (guarded by `READER_DONE`), and both
+    /// `writer.start()` and `reader.start()` can drive it synchronously during
+    /// `init_terminal` — long before `this_value` is set or the `exit` callback
+    /// is registered. Without this the single notification is silently dropped
+    /// and the user's `exit` callback never fires at all. Recorded here and
+    /// replayed at the end of `init_terminal`. See OHOS_TEST_TODO.md T03.
+    deferred_exit: Cell<Option<i32>>,
+
     /// The slave side of the PTY (used by child processes). Unused on Windows.
     slave_fd: Cell<Fd>,
 
@@ -451,6 +460,7 @@ impl Terminal {
             read_fd: Cell::new(pty_result.read_fd),
             write_fd: Cell::new(pty_result.write_fd),
             slave_fd: Cell::new(pty_result.slave),
+            deferred_exit: Cell::new(None),
             #[cfg(windows)]
             hpcon: Cell::new(Some(pty_result.hpcon)),
             cols: Cell::new(if cfg!(windows) {
@@ -543,16 +553,16 @@ impl Terminal {
                                 .insert(PosixFlags::NONBLOCKING | PosixFlags::POLLABLE);
                             poll.set_flag(bun_io::FilePollFlag::Nonblocking);
                         }
+                        // Enroll in epoll_rearm_watchdog: this fd class hit a
+                        // confirmed real-device OHOS kernel epoll defect
+                        // (registration reports success, kernel never
+                        // delivers) -- see OHOS_TEST_STATUS.md 2026-08-20.
+                        r.flags.insert(PosixFlags::EPOLL_REARM_WATCH);
                     });
                 }
                 terminal.update_flags(|f| f.insert(Flags::READER_STARTED));
             }
         }
-
-        // Start reading data
-        // SAFETY: the reader cell is live for the terminal's lifetime; `read`
-        // is the raw re-entrancy-safe entry (its dispatch runs user JS).
-        unsafe { IOReader::read(terminal.reader.as_ptr()) };
 
         // Get or create the JS wrapper
         let this_value = existing_js_value.unwrap_or_else(|| js::to_js(parent_ptr, global_object));
@@ -574,6 +584,41 @@ impl Terminal {
         }
         if let Some(cb) = options.drain_callback {
             js::gc::set(js::GcValue::Drain, this_value, global_object, cb);
+        }
+
+        // Start reading data LAST — after the JS wrapper exists and the
+        // callbacks are registered.
+        //
+        // `read()` can complete synchronously: a PTY whose slave end is
+        // already closed (or a read that errors) drives
+        // on_reader_done/on_reader_error -> on_reader_finished right here,
+        // inline. That path sets READER_DONE, which is a one-shot: every
+        // later call, including the one from the user's own `close()`, hits
+        // the `if READER_DONE { return }` guard at the top and returns
+        // without dispatching.
+        //
+        // With `read()` above the wrapper/callback setup, that inline
+        // completion consumed the single exit notification while
+        // `this_value` was still `JsRef::empty()` and no Exit callback was
+        // registered yet, so it silently dropped at `try_get` /
+        // `gc::get(Exit)` and the user's `exit` callback then never fired at
+        // all. Observed intermittently (~50% under
+        // BUN_JSC_randomIntegrityAuditRate=1.0 after ~30 prior terminals);
+        // instrumentation showed the final terminal entering close_internal
+        // with READER_DONE already true and zero dispatches for the whole
+        // run. See OHOS_TEST_TODO.md T03.
+        // SAFETY: the reader cell is live for the terminal's lifetime; `read`
+        // is the raw re-entrancy-safe entry (its dispatch runs user JS).
+        unsafe { IOReader::read(terminal.reader.as_ptr()) };
+
+        // Replay an exit notification that fired during startup, before the
+        // wrapper and callbacks above existed. `writer.start()`,
+        // `reader.start()` and `read()` can all drive `on_reader_finished`
+        // synchronously; that path is one-shot, so without this replay the
+        // user's `exit` callback would never fire at all.
+        if let Some(code) = terminal.deferred_exit.take() {
+            terminal.this_value.with_mut(|v| v.downgrade());
+            terminal.call_exit_callback(code, None);
         }
 
         Ok(CreateResult {
@@ -875,7 +920,9 @@ pub type OpenPtyFn = unsafe extern "C" fn(
     winp: *const Winsize,
 ) -> c_int;
 
-/// Dynamic loading of openpty on Linux (it's in libutil which may not be linked)
+/// Dynamic loading of openpty on Linux (it's in libutil which may not be linked).
+/// OHOS: openpty lives in libc.so; the libc.so entry below + RTLD_DEFAULT
+/// fallback covers it (verified by ohos-preflight i17_openpty_libc 2026-06-15).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod lib_util {
     use super::*;
@@ -896,11 +943,13 @@ mod lib_util {
         }
         LOADED.store(true, Relaxed);
 
-        // Try libutil.so first (most common), then libutil.so.1
-        const LIB_NAMES: [&ZStr; 3] = [
+        // Try libutil.so first (most common), then libutil.so.1,
+        // libc.so.6 (glibc), then libc.so (musl/ohos).
+        const LIB_NAMES: [&ZStr; 4] = [
             bun_core::zstr!("libutil.so"),
             bun_core::zstr!("libutil.so.1"),
             bun_core::zstr!("libc.so.6"),
+            bun_core::zstr!("libc.so"),
         ];
         for lib_name in LIB_NAMES {
             if let Some(h) = sys::dlopen(lib_name, sys::RTLD::LAZY) {
@@ -912,7 +961,26 @@ mod lib_util {
     }
 
     pub(super) fn get_open_pty() -> Option<OpenPtyFn> {
-        sys::dlsym_with_handle!(OpenPtyFn, "openpty", get_handle())
+        // First try the handle from dlopen (specific library)
+        if let Some(f) = sys::dlsym_with_handle!(OpenPtyFn, "openpty", get_handle()) {
+            return Some(f);
+        }
+        // Fallback: RTLD_DEFAULT — covers musl/OHOS where openpty is in libc
+        // but some runtimes may not expose it through a dlopen'd handle.
+        let name = c"openpty";
+        // SAFETY: `dlsym` reads only the handle and the NUL-terminated
+        // literal; a null return (not found) is checked below.
+        let p = unsafe { libc::dlsym(core::ptr::null_mut(), name.as_ptr()) };
+        if p.is_null() {
+            None
+        } else {
+            // SAFETY: irreducible — `OpenPtyFn` is a fn-pointer type; fn
+            // pointers are not `bytemuck::Pod`, so the `*mut c_void` →
+            // `OpenPtyFn` reinterpretation cannot be expressed safely. `p` is
+            // non-null (checked above) and was obtained from `dlsym`, so it is
+            // a valid code address. Mirrors `dlsym_with_handle!`.
+            Some(unsafe { core::mem::transmute_copy::<*mut c_void, OpenPtyFn>(&p) })
+        }
     }
 }
 
@@ -939,8 +1007,8 @@ fn get_open_pty_fn() -> Option<OpenPtyFn> {
         return Some(openpty);
     }
 
-    // On Linux, openpty is in libutil, which may not be linked
-    // Load it dynamically via dlopen
+    // On Linux/Android/OHOS, openpty is in libutil (glibc) or libc (musl/OHOS).
+    // Load it dynamically via dlopen.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         return lib_util::get_open_pty();
@@ -1866,8 +1934,17 @@ impl Terminal {
         // EOF from master - downgrade to weak ref to allow GC.
         // Skip JS interactions if already finalized (happens when close() is called during finalize)
         if !self.flags.get().contains(Flags::FINALIZED) {
-            self.maybe_downgrade_after_eof();
-            self.call_exit_callback(exit_code, None);
+            if self.this_value.get().is_empty() {
+                // Fired from inside `init_terminal`, before the JS wrapper
+                // exists. Dispatching now would drop the notification (there
+                // is nothing to call), and `READER_DONE` is already set above
+                // so nothing will ever retry. Stash it; `init_terminal`
+                // replays it once the callbacks are registered.
+                self.deferred_exit.set(Some(exit_code));
+            } else {
+                self.maybe_downgrade_after_eof();
+                self.call_exit_callback(exit_code, None);
+            }
         }
         self.deref_();
     }
