@@ -29,6 +29,11 @@ on:
       - "test/tsconfig.json"
       - "test/_util/**"
       - "test/internal/source-lints/**"
+      - "test/js/**"
+      - "test/cli/**"
+      - "test/bundler/**"
+      - "test/integration/**"
+      - "test/regression/**"
       - ".github/workflows/source-lints.yml"
       - ".github/actions/setup-bun/**"
   pull_request:
@@ -50,6 +55,11 @@ on:
       - "test/tsconfig.json"
       - "test/_util/**"
       - "test/internal/source-lints/**"
+      - "test/js/**"
+      - "test/cli/**"
+      - "test/bundler/**"
+      - "test/integration/**"
+      - "test/regression/**"
       - ".github/workflows/source-lints.yml"
       - ".github/actions/setup-bun/**"
   merge_group:
