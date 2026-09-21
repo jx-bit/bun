@@ -135,7 +135,7 @@ function bound(binding) {
       // separate PR to avoid behavior change in the Android port.
       // FreeBSD: uname -m returns MACHINE ("arm64"/"amd64"), not MACHINE_ARCH.
       return process.arch === "arm64"
-        ? process.platform === "android"
+        ? process.platform === "android" || process.platform === "openharmony"
           ? "aarch64"
           : "arm64"
         : process.arch === "x64"
