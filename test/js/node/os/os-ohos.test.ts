@@ -1,6 +1,6 @@
-import os from "node:os";
 import { describe, expect, test } from "bun:test";
 import { isOHOS } from "harness";
+import os from "node:os";
 
 // Exact-value platform semantics for OHOS -- guards the problems the loose
 // upstream assertions cannot catch:
