@@ -900,7 +900,6 @@ name = "bun_install"
 version = "0.0.0"
 dependencies = [
  "bitflags",
- "ohos_sign",
  "bstr",
  "bun_alloc",
  "bun_analytics",
@@ -949,6 +948,7 @@ dependencies = [
  "enum-map",
  "enumset",
  "libc",
+ "ohos_sign",
  "scopeguard",
  "strum",
  "thiserror",
@@ -1577,7 +1577,6 @@ name = "bun_runtime"
 version = "0.0.0"
 dependencies = [
  "bcrypt",
- "ohos_sign",
  "bitflags",
  "blake2",
  "bstr",
@@ -1667,6 +1666,7 @@ dependencies = [
  "getrandom",
  "libc",
  "lol_html",
+ "ohos_sign",
  "rust-argon2",
  "scopeguard",
  "sha3",
@@ -1880,8 +1880,8 @@ dependencies = [
  "bun_windows_sys",
  "enumset",
  "libc",
- "scopeguard",
  "ohos_sign",
+ "scopeguard",
  "strum",
  "thiserror",
 ]
@@ -1973,8 +1973,8 @@ dependencies = [
  "enum-map",
  "enumset",
  "libc",
- "scopeguard",
  "ohos_sign",
+ "scopeguard",
  "strum",
  "thiserror",
 ]
@@ -1999,8 +1999,8 @@ dependencies = [
  "enum-map",
  "enumset",
  "libc",
- "rustix",
  "ohos_sign",
+ "rustix",
  "scopeguard",
  "strum",
  "thiserror",
@@ -2904,6 +2904,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohos_sign"
+version = "0.0.0"
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3726,7 +3730,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "ohos_sign"
-version = "0.0.0"
