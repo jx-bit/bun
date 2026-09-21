@@ -728,6 +728,31 @@ impl ShellSubprocess {
         // function never needs to borrow the `Cmd` arena slot.
         debug_assert!(matches!(spawn_args.argv.last(), Some(p) if p.is_null()));
 
+        // OHOS: same node-userinfo env fixup as Bun.spawn's (js_bun_spawn_bindings.rs) — `Bun.$`/`bun run <script>` land here instead, so a shell-spawned `node` needs its own copy. argv[0] is the resolved absolute path (set by `Cmd::transition_to_exec`); env lines are bump-allocated in `spawn_args.arena` like `SpawnArgs::fill_env` above.
+        #[cfg(target_env = "ohos")]
+        if let Some(&a0) = spawn_args.argv.first() {
+            if !a0.is_null() {
+                // SAFETY: `a0` is `Cmd.args[0]`, NUL-terminated by
+                // `Cmd::transition_to_exec` (states/Cmd.rs) and owned by the
+                // same `Cmd` arena slot that outlives this spawn call.
+                let a0_bytes = unsafe { core::ffi::CStr::from_ptr(a0) }.to_bytes();
+                if let Some(inj) =
+                    crate::api::ohos_node_userinfo::compute(a0_bytes, &spawn_args.env_array)
+                {
+                    spawn_args
+                        .env_array
+                        .retain(|&ptr| !crate::api::ohos_node_userinfo::is_managed_key(ptr));
+                    let arena: &Arena = spawn_args.arena;
+                    for line in [Some(inj.node_options), inj.username].into_iter().flatten() {
+                        let buf = arena.alloc_slice_fill_default(line.len() + 1);
+                        buf[..line.len()].copy_from_slice(&line);
+                        buf[line.len()] = 0;
+                        spawn_args.env_array.push(buf.as_ptr().cast::<c_char>());
+                    }
+                }
+            }
+        }
+
         spawn_args.env_array.push(core::ptr::null());
 
         // SAFETY: `spawn_args.argv` / `env_array` are local null-terminated
