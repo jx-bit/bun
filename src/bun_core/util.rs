@@ -4166,15 +4166,26 @@ fn cwd_is_deleted_ohos() -> bool {
             proc_buf.len() - 1,
         )
     };
+    // `readlink` does not NUL-terminate when the target fills the buffer.
+    // A truncated path would stat() as ENOENT and be mistaken for a
+    // deleted cwd (the bunfig-errors >PATH_MAX cwd case), so a full buffer
+    // is inconclusive and reported as "not deleted".
+    if n < 0 {
+        return crate::ffi::errno() == libc::ENOENT;
+    }
+    let n = n as usize;
+    if n >= proc_buf.len() - 1 {
+        return false;
+    }
     if n > 0 {
-        proc_buf[n as usize] = 0;
+        proc_buf[n] = 0;
         // SAFETY: an all-zero `libc::stat` is a valid POD bit pattern.
         let mut st: libc::stat = unsafe { core::mem::zeroed() };
         // SAFETY: proc_buf is NUL-terminated by the assignment above.
         return unsafe { libc::stat(proc_buf.as_ptr().cast(), &raw mut st) } < 0
             && crate::ffi::errno() == libc::ENOENT;
     }
-    n < 0 && crate::ffi::errno() == libc::ENOENT
+    false
 }
 
 /// Length-returning core of [`getcwd`]; `buf` holds the NUL-terminated path.
