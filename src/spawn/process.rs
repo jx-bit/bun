@@ -3281,6 +3281,9 @@ mod spawn_process_body {
                     if ppid_from_watchdog > 1 {
                         // Clear PDEATHSIG — SIGKILL is uncatchable and would prevent
                         // our cleanup defer from running.  See wait_linux_signalfd:3697.
+                        // SAFETY: prctl(PR_SET_PDEATHSIG) takes no pointers and
+                        // cannot violate memory safety; it only clears this
+                        // process's parent-death signal.
                         let _ = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, 0) };
                         let fd = bun_sys::pidfd_open(ppid_from_watchdog, 0)
                             .map(AutoCloseFd::new)

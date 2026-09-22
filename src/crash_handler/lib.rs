@@ -1599,7 +1599,11 @@ mod draft {
         // being killed with SIGSYS. This mirrors what Android's bionic libc
         // does internally.
         const ENOSYS: i64 = 38;
-        let uc = ctx as *mut libc::ucontext_t;
+        let uc = ctx.cast::<libc::ucontext_t>();
+        // SAFETY: the kernel hands the signal handler a valid `ucontext_t`
+        // through `ctx`; rewriting pc and x0 is exactly the seccomp-skip
+        // mechanism (mirroring what bionic does internally for blocked
+        // syscalls).
         unsafe {
             // Advance PC past the SVC #0 instruction (4 bytes on aarch64)
             // so execution continues after the blocked syscall.
