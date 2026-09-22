@@ -227,8 +227,8 @@ pub(crate) fn build_rewrite(
     tail: &[*const c_char],
 ) -> ShebangRewrite {
     let mut owned = Vec::with_capacity(2);
-    if let Some(a) = &arg {
-        owned.push(a.clone());
+    if let Some(a) = arg {
+        owned.push(a);
     }
     owned.push(script);
 

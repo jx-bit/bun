@@ -1001,6 +1001,7 @@ pub unsafe fn spawn_process_posix(
 
     #[cfg(target_env = "ohos")]
     {
+        use std::os::unix::ffi::OsStrExt as _;
         // OHOS kernel validates the .codesign section at exec and refuses
         // with EACCES (unsigned/stale ELF) or EPERM (script shebang
         // expansion). Repair lazily here and retry once instead of checking
@@ -1008,12 +1009,13 @@ pub unsafe fn spawn_process_posix(
         // running binary each time, doubling fulltest wall time.
         if let Err(err) = &spawn_result {
             if matches!(err.get_errno(), bun_sys::E::EACCES | bun_sys::E::EPERM) {
-                let argv0_str = unsafe { core::str::from_utf8_unchecked(argv0_cstr.to_bytes()) };
-                if ohos_sign::repair_codesign_if_needed(std::path::Path::new(argv0_str)) {
+                let argv0_path =
+                    std::path::Path::new(std::ffi::OsStr::from_bytes(argv0_cstr.to_bytes()));
+                if ohos_sign::repair_codesign_if_needed(argv0_path) {
                     bun_core::scoped_log!(
                         OhosSignRepair,
                         "re-signed {} after spawn refusal",
-                        argv0_str
+                        argv0_cstr.to_string_lossy()
                     );
                     spawn_result =
                         posix_spawn::spawn_z(argv0_cstr, Some(&actions), Some(&attr), argv, envp);
@@ -1092,10 +1094,6 @@ fn ohos_expand_shebang(
     argv0_cstr: &CStr,
     argv: *const *const c_char,
 ) -> Option<shebang::ShebangRewrite> {
-    use std::io::Read as _;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(argv0_cstr.to_bytes()));
     // binfmt_script historically reads only the first 128 bytes of the file.
     // This sandbox's TMPDIR routinely produces 150+ byte interpreter paths,
     // and the kernel truncates them mid-string — the remainder can still look
@@ -1103,9 +1101,23 @@ fn ohos_expand_shebang(
     // confusing EACCES instead of the real problem. 4096 gives PATH_MAX
     // headroom.
     let mut buf = [0u8; 4096];
-    let n = std::fs::File::open(path)
-        .and_then(|mut f| f.read(&mut buf))
-        .ok()?;
+    // Single read on purpose: the shebang line lives at the head of the
+    // file, and `n < buf.len()` below doubles as the short-file signal.
+    // Explicit close on both paths -- `Fd` has no Drop.
+    let opened = bun_sys::openat_a(
+        bun_sys::Fd::cwd(),
+        argv0_cstr.to_bytes(),
+        bun_sys::O::RDONLY,
+        0,
+    );
+    let n = match opened {
+        Ok(fd) => {
+            let n = bun_sys::read(fd, &mut buf);
+            let _ = bun_sys::close(fd);
+            n.ok()?
+        }
+        Err(_) => return None,
+    };
     let (interp, arg) = shebang::parse_shebang(&buf[..n], n < buf.len())?;
     let interp = std::ffi::CString::new(interp).ok()?;
     let script = std::ffi::CString::new(argv0_cstr.to_bytes()).ok()?;
@@ -1114,6 +1126,9 @@ fn ohos_expand_shebang(
     let mut tail = Vec::new();
     let mut k = 1usize;
     loop {
+        // SAFETY: `argv` is the spawn call's argv array, which is
+        // NUL-terminated by the caller; the loop stops at that sentinel, so
+        // `argv.add(k)` never runs past the end.
         let p = unsafe { *argv.add(k) };
         if p.is_null() {
             break;

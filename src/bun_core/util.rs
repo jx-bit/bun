@@ -4161,7 +4161,7 @@ fn cwd_is_deleted_ohos() -> bool {
     // proc_buf provides 4095 writable bytes + one reserved NUL slot.
     let n = unsafe {
         libc::readlink(
-            b"/proc/self/cwd\0".as_ptr().cast(),
+            c"/proc/self/cwd".as_ptr(),
             proc_buf.as_mut_ptr().cast(),
             proc_buf.len() - 1,
         )
@@ -4171,7 +4171,7 @@ fn cwd_is_deleted_ohos() -> bool {
         // SAFETY: an all-zero `libc::stat` is a valid POD bit pattern.
         let mut st: libc::stat = unsafe { core::mem::zeroed() };
         // SAFETY: proc_buf is NUL-terminated by the assignment above.
-        return unsafe { libc::stat(proc_buf.as_ptr().cast(), &mut st) } < 0
+        return unsafe { libc::stat(proc_buf.as_ptr().cast(), &raw mut st) } < 0
             && crate::ffi::errno() == libc::ENOENT;
     }
     n < 0 && crate::ffi::errno() == libc::ENOENT

@@ -2812,6 +2812,10 @@ mod posix_impl {
             // OHOS seccomp blocks fchmodat2 (syscall 452) which newer glibc
             // uses internally for fchmodat(). Call SYS_fchmodat (53 on aarch64)
             // directly so seccomp doesn't SIGSYS us.
+            // SAFETY: all arguments are valid for SYS_fchmodat: `dir` is an
+            // open descriptor, `path.as_ptr()` a NUL-terminated path, and
+            // mode/flags pass through unchanged; the raw syscall has the same
+            // contract as fchmodat(2).
             let rc = unsafe {
                 libc::syscall(
                     libc::SYS_fchmodat as libc::c_long,
@@ -6098,6 +6102,7 @@ pub fn dlopen(filename: &ZStr, flags: i32) -> Option<*mut c_void> {
         // lazily on refusal and retry once: the eager check this replaces read
         // the full file on every dlopen, and its presence-only check let stale
         // sections through to the kernel's rejection with no recovery.
+        // SAFETY: filename is NUL-terminated.
         let handle = unsafe { libc::dlopen(filename.as_ptr(), flags) };
         if !handle.is_null() {
             return Some(handle);
