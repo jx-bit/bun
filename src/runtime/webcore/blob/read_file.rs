@@ -297,6 +297,7 @@ pub struct ReadFile {
     pub(crate) close_after_io: bool,
     pub(crate) state: AtomicU8, // ClosingState
     /// Serializes `do_read_loop` runs for this instance — see `read_loop_state`.
+    #[cfg(not(windows))]
     pub(crate) read_loop_state: AtomicU8,
 }
 
