@@ -5313,6 +5313,7 @@ pub mod linux {
         pub const INVAL: E = E(libc::EINVAL as u16);
         pub const NOSYS: E = E(libc::ENOSYS as u16);
         pub const TIMEDOUT: E = E(libc::ETIMEDOUT as u16);
+        pub const EXIST: E = E(libc::EEXIST as u16);
         /// Decode a raw Linux syscall return (`-errno` on failure, ≥0 on success).
         #[inline]
         pub fn init(rc: isize) -> E {

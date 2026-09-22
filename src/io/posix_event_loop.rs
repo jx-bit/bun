@@ -707,8 +707,24 @@ impl FilePoll {
             };
 
             // SAFETY: FFI syscall; `event` is a stack-local valid for the call.
-            let ctl = unsafe { linux::epoll_ctl(watcher_fd, op, fd.native(), &raw mut event) };
+            #[cfg_attr(not(target_env = "ohos"), allow(unused_mut))]
+            let mut ctl = unsafe { linux::epoll_ctl(watcher_fd, op, fd.native(), &raw mut event) };
             self.flags.insert(Flags::WasEverRegistered);
+            #[cfg(target_env = "ohos")]
+            if op == EPOLL::CTL_ADD && sys::get_errno(ctl) == sys::E::EEXIST {
+                // OHOS: a closed fd's kernel registration can outlive the close
+                // (the DEL lands on whichever fd reused the number), so a fresh
+                // fd that reuses it fails ADD with EEXIST and then never
+                // receives events. Re-issue as MOD so the kernel entry is
+                // repointed at this poll; MOD is safe when the entry belongs to
+                // this same poll too, and unlike DEL+ADD it cannot drop a live
+                // registration.
+                // SAFETY: FFI syscall; same invariants as the ADD above (the
+                // event is still the stack-local, `fd` still live).
+                ctl = unsafe {
+                    linux::epoll_ctl(watcher_fd, EPOLL::CTL_MOD, fd.native(), &raw mut event)
+                };
+            }
             if let Some(errno) = errno_sys(ctl, sys::Tag::epoll_ctl) {
                 self.deactivate(loop_);
                 return errno;
