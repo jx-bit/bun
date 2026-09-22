@@ -500,21 +500,44 @@ mod elf {
 
     #[cfg(target_env = "ohos")]
     fn ohos_pie_load_base() -> Option<usize> {
-        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-        for line in maps.lines() {
-            let mut c = line.split_whitespace();
-            let addr_range = c.next()?;
-            c.next(); // perms
-            let file_off = c.next()?;
-            c.next(); // dev
-            let inode = c.next().unwrap_or("0");
-            let path = c.next().unwrap_or("");
-            if file_off == "00000000" && inode != "0" && !path.is_empty() && !path.starts_with('[')
+        // /proc/self/maps parsed at the byte level: mapped paths can contain
+        // non-UTF-8 bytes (which would fail the previous read_to_string), and
+        // the workspace disallows str::lines/str::split.
+        let fd = bun_sys::openat_a(
+            bun_sys::Fd::cwd(),
+            b"/proc/self/maps",
+            bun_sys::O::RDONLY,
+            0,
+        )
+        .ok()?;
+        let _file = bun_sys::File::from_fd(fd);
+        let mut maps = Vec::new();
+        loop {
+            let mut chunk = [0u8; 8192];
+            let n = bun_sys::read(fd, &mut chunk).ok()?;
+            if n == 0 {
+                break;
+            }
+            maps.extend_from_slice(&chunk[..n]);
+        }
+        drop(_file);
+        for line in bun_core::strings::split(&maps, b"\n") {
+            let mut fields = bun_core::strings::split(line, b" ").filter(|f| !f.is_empty());
+            let addr_range = fields.next()?;
+            fields.next()?; // perms
+            let file_off = fields.next()?;
+            fields.next()?; // dev
+            let inode = fields.next().unwrap_or(b"0");
+            let path = fields.next().unwrap_or(b"");
+            if file_off == b"00000000"
+                && inode != b"0"
+                && !path.is_empty()
+                && path.first() != Some(&b'[')
             {
-                if let Some(start) = addr_range.split('-').next() {
-                    if let Ok(base) = usize::from_str_radix(start, 16) {
-                        return Some(base);
-                    }
+                let start = bun_core::strings::split(addr_range, b"-").next()?;
+                let start = core::str::from_utf8(start).ok()?;
+                if let Ok(base) = usize::from_str_radix(start, 16) {
+                    return Some(base);
                 }
             }
         }
@@ -523,37 +546,45 @@ mod elf {
 
     #[cfg(target_env = "ohos")]
     fn ohos_primary_get_data() -> Option<(*mut u8, usize)> {
-        use std::fs::File;
-        use std::os::fd::AsRawFd;
         use std::ptr;
-        let file = File::open("/proc/self/exe").ok()?;
-        let (sh_offset, sh_size) = locate_bun_section(&file)?;
+        let fd =
+            bun_sys::openat_a(bun_sys::Fd::cwd(), b"/proc/self/exe", bun_sys::O::RDONLY, 0).ok()?;
+        let _file = bun_sys::File::from_fd(fd);
+        let (sh_offset, sh_size) = locate_bun_section(fd)?;
         let mut hdr = [0u8; 8];
-        read_at(&file, sh_offset, &mut hdr)?;
+        read_at(fd, sh_offset, &mut hdr)?;
         let byte_count = u64::from_le_bytes(hdr) as usize;
         if byte_count.checked_add(8)? != sh_size as usize {
             return None;
         }
+        // SAFETY: `fd` is a live read-only descriptor for /proc/self/exe and
+        // [sh_offset, sh_offset + sh_size) lies within the file (the section
+        // header bounds were validated by locate_bun_section); mapping a
+        // regular-file range MAP_PRIVATE cannot violate memory safety.
         let mapping = unsafe {
             libc::mmap(
                 ptr::null_mut(),
                 sh_size as usize,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE,
-                file.as_raw_fd(),
+                fd.native(),
                 sh_offset as i64,
             )
         };
         if mapping == libc::MAP_FAILED {
             return None;
         }
-        Some((unsafe { (mapping as *mut u8).add(8) }, byte_count))
+        // SAFETY: the mapping covers `sh_size` bytes and the length check
+        // above guarantees `byte_count + 8 == sh_size`, so skipping the
+        // 8-byte count header stays within the mapping.
+        let data = unsafe { mapping.cast::<u8>().add(8) };
+        Some((data, byte_count))
     }
 
     #[cfg(target_env = "ohos")]
-    fn locate_bun_section(file: &std::fs::File) -> Option<(u64, u64)> {
+    fn locate_bun_section(fd: bun_sys::Fd) -> Option<(u64, u64)> {
         let mut ehdr = [0u8; 64];
-        read_at(file, 0, &mut ehdr)?;
+        read_at(fd, 0, &mut ehdr)?;
         if ehdr[0..4] != ELF_MAGIC {
             return None;
         }
@@ -571,7 +602,7 @@ mod elf {
         }
         let shstrtab_shoff = shoff + (shstrndx as u64) * SHDR_SIZE as u64;
         let mut shstrtab_shdr = [0u8; 64];
-        read_at(file, shstrtab_shoff, &mut shstrtab_shdr)?;
+        read_at(fd, shstrtab_shoff, &mut shstrtab_shdr)?;
         let shstrtab_offset = u64::from_le_bytes(
             shstrtab_shdr[SHDR_SH_OFFSET..SHDR_SH_OFFSET + 8]
                 .try_into()
@@ -584,11 +615,11 @@ mod elf {
         );
         let shstrtab_size_usize = shstrtab_size as usize;
         let mut shstrtab = vec![0u8; shstrtab_size_usize];
-        read_at(file, shstrtab_offset, &mut shstrtab)?;
+        read_at(fd, shstrtab_offset, &mut shstrtab)?;
         for i in 0..shnum {
             let shdr_off = shoff + (i as u64) * SHDR_SIZE as u64;
             let mut shdr = [0u8; 64];
-            read_at(file, shdr_off, &mut shdr)?;
+            read_at(fd, shdr_off, &mut shdr)?;
             let name_off =
                 u32::from_le_bytes(shdr[SHDR_SH_NAME..SHDR_SH_NAME + 4].try_into().ok()?) as usize;
             if name_off + 5 <= shstrtab_size_usize
@@ -605,17 +636,9 @@ mod elf {
     }
 
     #[cfg(target_env = "ohos")]
-    fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> Option<()> {
-        use std::os::fd::AsRawFd;
-        let n = unsafe {
-            libc::pread64(
-                file.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                offset as i64,
-            )
-        };
-        if n < 0 || n as usize != buf.len() {
+    fn read_at(fd: bun_sys::Fd, offset: u64, buf: &mut [u8]) -> Option<()> {
+        let n = bun_sys::pread(fd, buf, offset as i64).ok()?;
+        if n != buf.len() {
             return None;
         }
         Some(())
