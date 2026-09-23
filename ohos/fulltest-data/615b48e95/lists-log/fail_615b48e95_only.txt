@@ -1,0 +1,8 @@
+test/cli/install/bun-add-catalog.test.ts
+test/cli/install/bun-audit.test.ts
+test/cli/install/bun-update.test.ts
+test/cli/install/frozen-lockfile-pruned.test.ts
+test/regression/issue/26286.test.ts
+test/js/bun/io/bun-write.test.js
+test/js/node/child_process/child-process-exec.test.ts
+test/integration/expo-app/expo.test.ts

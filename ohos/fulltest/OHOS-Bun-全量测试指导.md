@@ -209,6 +209,23 @@ hdc shell "cd $DEVROOT && \
 期望:①记录数字(随树 commit 微变,历史参考 1729~1872);②isOHOS=1、OPENHARMONY=46、esbuild+verdaccio 都 ok。
 **任何一项 MISSING,先修复再继续。**
 
+### 4.5 官方树部署:先打 openharmony harness patch(A/B 对比轮必做)
+
+A/B 对比轮(官方树口径,设备目录形如 `bun-official-v140`)部署的是**官方 v1.4.0
+测试树**,其 harness.ts 的 `libcPathForDlopen()` 没有 `case "openharmony"` →
+default throw `unsupported platform openharmony`,mkfifo/raise FFI 族
+7 个文件必挂。fork 树已由 PR #15 修复(musl loader 显式路径),官方树需在
+**打包前**注入同一修复:
+
+```bash
+# 官方 clone 的 test/ 目录(§4.1 打包用的那个),打包前执行:
+bash ohos/fulltest/patch-official-harness.sh /path/to/official-v140/test
+# 幂等:重复执行自动跳过;非官方形态的树会拒绝。
+# 打完再走 §4.1 打包(§4.1 的 isOHOS 校验对官方树仍适用——patch 不动该行)。
+```
+
+已部署过才想起打 patch:重打 tar → 重新 §4.2 部署(node_modules 会被保留)。
+
 ---
 
 ## 5. 部署启动器与 runner

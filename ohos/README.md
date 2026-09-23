@@ -34,16 +34,17 @@
 |---|---|
 | 修一个失败用例/文件 | `analys/`（README 索引取最新归因文档）→ 规则 4 排除法 → 规则 2 立档 → port/修 → PR |
 | 看某个 PR 的来龙去脉 | `issues/`（README 索引行 → 对应 pr 文档） |
-| 设备复跑数据回来了 | 解包到 `analys/test-reports/` → 更新归因文档数字与簇归属 → 重算剩余清单 |
+| 设备复跑数据回来了 | 解包到 `fulltest-data/` → 更新归因文档数字与簇归属 → 重算剩余清单 |
 | OHOS 内核/沙箱怪行为 | `knowledge/`（README 有索引：codesign/spawn primer、测试台账、CI 对比） |
 | 工作流步骤细节 | `skills/`（16 步：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析） |
-| 对外使用者说明 | `OpenHarmony-Bun-已知限制与规避指南.md`（功能级限制 × 影响 × 规避，无内部信息） |
+| 对外使用者说明 | `ohos-bun-已知限制与规避指南.md`（功能级限制 × 影响 × 规避，无内部信息） |
 
 ## 目录
 
 | 目录 | 内容 |
 |---|---|
 | `issues/` | PR 台账（每 PR 一档 + 索引 + 规程），**主索引入口** |
+| `test-tree/` | 测试树承载类问题档案：修复面在我们 test/ 树、不动 runtime 的独立机制案例（如 harness libcPath） |
 | `knowledge/` | 长期知识：测试树改动台账、设备 STATUS、codesign/spawn primer、修复指南 |
 | `analys/` | 归因/取证/验收 + 轮次数据集（archive 存历史轮） |
 | `skills/` | 工作流手册（16 步 + 索引）：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析 |

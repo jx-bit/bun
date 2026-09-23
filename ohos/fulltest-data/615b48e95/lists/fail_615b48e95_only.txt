@@ -1,0 +1,10 @@
+test/cli/install/bun-add-catalog.test.ts
+test/cli/install/bun-audit.test.ts
+test/cli/install/bun-update.test.ts
+test/cli/install/frozen-lockfile-pruned.test.ts
+test/integration/expo-app/expo.test.ts
+test/js/bun/io/bun-write.test.js
+test/js/bun/plugin/plugins.test.ts
+test/js/bun/sqlite/sqlite.test.js
+test/js/node/child_process/child-process-exec.test.ts
+test/js/node/http/node-http-connect.node.mts

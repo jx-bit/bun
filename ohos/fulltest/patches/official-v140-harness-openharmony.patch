@@ -1,0 +1,17 @@
+diff --git a/harness.ts b/harness.ts
+index b316791..649691e 100644
+--- a/harness.ts
++++ b/harness.ts
+@@ -1843,6 +1843,12 @@ export function libcPathForDlopen() {
+         case "musl":
+           return "/usr/lib/libc.so";
+       }
++    case "openharmony":
++      // Bare-name dlopen("libc.so") resolves to /usr/lib/libc.so on consumer
++      // HarmonyOS PCs - a broken/dangling path (ENOENT at load). The musl
++      // loader itself IS libc (exports all libc symbols), exists on every
++      // device, and is dlopen-able from any domain.
++      return "/system/lib/ld-musl-aarch64.so.1";
+     case "darwin":
+       return "libc.dylib";
+     case "android":
