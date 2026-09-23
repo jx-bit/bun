@@ -68,9 +68,15 @@ name: Cross-compile Bun (aarch64 host)
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      sha:
+        description: 'Commit to build (defaults to the triggering ref)'
+        required: false
+        type: string
 
 concurrency:
-  group: cross-x86-${{ github.ref }}
+  group: cross-x86-${{ inputs.sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -99,6 +105,16 @@ jobs:
             exe: bun
             build-dir: build/cross-linux-x64
             rust-target: x86_64-unknown-linux-gnu
+          # linux-arm64 on the aarch64 host is a native build (host == target):
+          # no sysroot, no cross flags — included for release parity with the
+          # reference delivery line's five-product rolling release.
+          - label: linux-arm64
+            os: linux
+            arch: arm64
+            abi: gnu
+            exe: bun
+            build-dir: build/cross-linux-arm64
+            rust-target: aarch64-unknown-linux-gnu
           - label: windows-x64
             os: windows
             arch: x64
@@ -125,7 +141,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ inputs.sha || github.event.pull_request.head.sha || github.ref }}
 
       # ── Host toolchain: LLVM 21 + build tools ──────────────────────────
       # ubuntu-24.04-arm ships an older clang; tools.ts enforces

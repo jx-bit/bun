@@ -1,0 +1,128 @@
+# Bun OHOS Latest Assemble
+#
+# ljy-style multi-product rolling release: after the OHOS container build
+# succeeds on ohos-aarch64, run the cross-compile legs against the SAME
+# commit, then publish every product to one rolling `latest` release whose
+# body names the baseline commit.
+#
+# Products:
+#   bun-ohos-aarch64    (OHOS container lane artifact, this workflow_run)
+#   bun-linux-x64       (cross-x86 leg)
+#   bun-windows-x64.exe (cross-x86 leg)
+#   bun-darwin-arm64    (cross-x86 leg)
+#
+# The `latest` bundle is separate from the OHOS-only `ohos-latest` release
+# that ohos-build-github.yml keeps publishing — same model as the reference
+# delivery line (their `ohos-latest` + `latest` pair).
+
+name: OHOS Latest Assemble
+
+on:
+  workflow_run:
+    workflows: ["OHOS Build (GitHub-hosted, social4hyq container)"]
+    types: [completed]
+    branches: [ohos-aarch64]
+
+concurrency:
+  group: ohos-latest-assemble
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  start:
+    # Record the assembly start time: the cross run started by `cross` is
+    # located later by created-at >= this timestamp (workflow_call runs
+    # inherit the caller's head_sha, which is the default branch — not the
+    # delivery commit — so head_sha filtering cannot find it).
+    runs-on: ubuntu-latest
+    outputs:
+      since: ${{ steps.t.outputs.since }}
+    steps:
+      - id: t
+        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  cross:
+    needs: [start]
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    uses: ./.github/workflows/cross-x86.yml
+    with:
+      sha: ${{ github.event.workflow_run.head_sha }}
+
+  publish:
+    needs: [start, cross]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Resolve source runs
+        id: runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA='${{ github.event.workflow_run.head_sha }}'
+          OHOS_RUN='${{ github.event.workflow_run.id }}'
+          SINCE='${{ needs.start.outputs.since }}'
+          CROSS_RUN=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/cross-x86.yml/runs?created=%3E%3D$SINCE&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id')
+          if [ -z "$CROSS_RUN" ] || [ "$CROSS_RUN" = "null" ]; then
+            echo "no successful cross-x86 run since $SINCE" >&2
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "ohos_run=$OHOS_RUN" >> "$GITHUB_OUTPUT"
+          echo "cross_run=$CROSS_RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Download OHOS binary (from the container-lane run)
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-ohos-aarch64-github
+          run-id: ${{ steps.runs.outputs.ohos_run }}
+          github-token: ${{ github.token }}
+          path: dist-ohos
+
+      - name: Download cross binaries (from the cross run)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bun-cross-*
+          run-id: ${{ steps.runs.outputs.cross_run }}
+          github-token: ${{ github.token }}
+          path: dist-cross
+          merge-multiple: true
+
+      - name: Stage products
+        run: |
+          mkdir -p dist
+          cp dist-ohos/build/release-ohos/bun                         dist/bun-ohos-aarch64
+          cp dist-cross/build/cross-linux-x64/bun                    dist/bun-linux-x64
+          cp dist-cross/build/cross-linux-arm64/bun                  dist/bun-linux-arm64
+          cp dist-cross/build/cross-windows-x64/bun.exe              dist/bun-windows-x64.exe
+          cp dist-cross/build/cross-darwin-arm64/bun                 dist/bun-darwin-arm64
+          ls -la dist/
+
+      - name: Publish rolling latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA='${{ steps.runs.outputs.sha }}'
+          BODY=$(cat <<EOT
+          Products built from the same baseline commit \`$SHA\` (ohos-aarch64).
+
+          | File | Target |
+          |---|---|
+          | bun-ohos-aarch64 | OHOS (HarmonyOS) aarch64 — container lane |
+          | bun-linux-x64 | Linux x86_64 (glibc) — cross |
+          | bun-linux-arm64 | Linux arm64 (glibc) — native on the arm64 host |
+          | bun-windows-x64.exe | Windows x86_64 — cross |
+          | bun-darwin-arm64 | macOS arm64 — cross |
+          EOT
+          )
+          if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release upload latest dist/* --repo "${{ github.repository }}" --clobber
+            gh release edit latest --repo "${{ github.repository }}" --notes "$BODY" --title "Bun OHOS (Latest)"
+          else
+            gh release create latest dist/* --repo "${{ github.repository }}" \
+              --title "Bun OHOS (Latest)" --notes "$BODY"
+          fi
