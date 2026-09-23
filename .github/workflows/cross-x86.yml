@@ -110,7 +110,7 @@ jobs:
           # reference delivery line's five-product rolling release.
           - label: linux-arm64
             os: linux
-            arch: arm64
+            arch: aarch64
             abi: gnu
             exe: bun
             build-dir: build/cross-linux-arm64
