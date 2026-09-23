@@ -3,23 +3,23 @@
 #
 # Usage:
 #   # Default: self-hosted build (Harmonybrew cross-libs, musl Rust host)
-#   curl -fsSL https://ghfast.top/https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
+#   curl -fsSL https://ghfast.top/https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
 #
 #   # github-hosted build (self-built __n1 libcxx+compiler-rt+ICU, glibc Rust host)
-#   curl -fsSL https://ghfast.top/https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
+#   curl -fsSL https://ghfast.top/https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
 #
 # Or without proxy:
-#   curl -fsSL https://github.com/ljy9812/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
+#   curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
 #
-# Args:  self (default) | github
-#   self   → downloads bun-ohos-aarch64       → installs ~/usr/bin/bun
+# Args:  github (default) | self
 #   github → downloads bun-ohos-aarch64-github → installs ~/usr/bin/bun-github
+#   self   → downloads bun-ohos-aarch64       → installs ~/usr/bin/bun
 # Both can coexist for A/B comparison.
 #
 set -eu
 
 # --- Parse args ---
-BUILD="self"   # default: self-hosted build
+BUILD="github" # default: github-hosted build (the lane that publishes every merge)
 for arg in "$@"; do
   case "$arg" in
     github|--github) BUILD="github" ;;
@@ -27,14 +27,14 @@ for arg in "$@"; do
     --build=*)       BUILD="${arg#--build=}" ;;
     -h|--help)
       echo "Usage: sh install-bun-ohos.sh [self|github]"
-      echo "  self   (default) self-hosted build → bun-ohos-aarch64 → ~/usr/bin/bun"
-      echo "  github           github-hosted build → bun-ohos-aarch64-github → ~/usr/bin/bun-github"
+      echo "  github           (default) github-hosted build → bun-ohos-aarch64-github → ~/usr/bin/bun-github"
+      echo "  self             self-hosted build → bun-ohos-aarch64 → ~/usr/bin/bun"
       exit 0 ;;
     *) echo "Unknown arg: $arg (use self|github)" >&2; exit 1 ;;
   esac
 done
 
-REPO="ljy9812/bun"
+REPO="${BUN_INSTALL_REPO:-jx-bit/bun}"
 RELEASE_TAG="ohos-latest"
 INSTALL_DIR="$HOME/usr/bin"
 PROXY="${BUN_INSTALL_PROXY:-https://ghfast.top/}"

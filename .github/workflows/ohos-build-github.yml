@@ -412,9 +412,13 @@ jobs:
           VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
           COMMIT=$(git rev-parse --short HEAD)
           cp "$BIN" /tmp/bun-ohos-aarch64-github
-          echo "asset_path=/tmp/bun-ohos-aarch64-github" >> "$GITHUB_OUTPUT"
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "✅ Release asset: bun-ohos-aarch64-github (v$VERSION @ $COMMIT)"
+          cp ohos/fulltest/install-bun-ohos.sh /tmp/install-bun-ohos.sh
+          {
+            echo "asset_path=/tmp/bun-ohos-aarch64-github"
+            echo "script_path=/tmp/install-bun-ohos.sh"
+            echo "commit=$COMMIT"
+          } >> "$GITHUB_OUTPUT"
+          echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
 
       - name: Upload binary artifact
         if: success()
@@ -425,11 +429,15 @@ jobs:
           retention-days: 90
 
       - name: Upload github-hosted binary to ohos-latest release
-        if: success()
+        # Only the delivery branch publishes the rolling release — PR gates
+        # must not overwrite ohos-latest.
+        if: success() && github.ref == 'refs/heads/ohos-aarch64'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ohos-latest
-          files: ${{ steps.gh_release.outputs.asset_path }}
+          files: |
+            ${{ steps.gh_release.outputs.asset_path }}
+            ${{ steps.gh_release.outputs.script_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
