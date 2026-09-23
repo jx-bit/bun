@@ -107,46 +107,58 @@ else
 fi
 ok "Downloader: $DOWNLOADER"
 
-# --- Download ---
+# --- Source binary: archive sibling first (version-paired), then download ---
 
-DOWNLOAD_URL="${PROXY}https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+# A script packaged inside a versioned archive ships next to its own bun.
+# Installing that sibling guarantees the script/binary pair; the rolling
+# ohos-latest copy and the standalone script asset download from $RELEASE_TAG.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")
 
-# Create install directory first, download directly to target
 mkdir -p "$INSTALL_DIR"
-rm -f "$INSTALL_BIN"
 
-info "Downloading bun from:"
-info "  $DOWNLOAD_URL"
-
-if [ "$DOWNLOADER" = "curl" ]; then
-  curl -fsSL -o "$INSTALL_BIN" "$DOWNLOAD_URL" 2>/dev/null || {
-    warn "Proxy download failed, trying direct..."
-    curl -fsSL -o "$INSTALL_BIN" \
-      "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
-      error "Download failed. Check your network."
-  }
+if [ -n "$SCRIPT_DIR" ] && [ -s "$SCRIPT_DIR/bun" ]; then
+  info "Installing the archive's own bun (version-paired, no download):"
+  info "  $SCRIPT_DIR/bun"
+  rm -f "$INSTALL_BIN"
+  cp "$SCRIPT_DIR/bun" "$INSTALL_BIN"
 else
-  wget -q -O "$INSTALL_BIN" "$DOWNLOAD_URL" 2>/dev/null || {
-    warn "Proxy download failed, trying direct..."
-    wget -q -O "$INSTALL_BIN" \
-      "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
-      error "Download failed. Check your network."
-  }
-fi
+  DOWNLOAD_URL="${PROXY}https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 
-# Verify download
-if [ ! -s "$INSTALL_BIN" ]; then
   rm -f "$INSTALL_BIN"
-  error "Downloaded file is empty"
-fi
 
-FILE_SIZE=$(wc -c < "$INSTALL_BIN" | tr -d ' ')
-if [ "$FILE_SIZE" -lt 1000000 ]; then
-  rm -f "$INSTALL_BIN"
-  error "Downloaded file too small (${FILE_SIZE} bytes), likely corrupted"
-fi
+  info "Downloading bun from:"
+  info "  $DOWNLOAD_URL"
 
-ok "Downloaded $((FILE_SIZE / 1048576)) MB"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL -o "$INSTALL_BIN" "$DOWNLOAD_URL" 2>/dev/null || {
+      warn "Proxy download failed, trying direct..."
+      curl -fsSL -o "$INSTALL_BIN" \
+        "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
+        error "Download failed. Check your network."
+    }
+  else
+    wget -q -O "$INSTALL_BIN" "$DOWNLOAD_URL" 2>/dev/null || {
+      warn "Proxy download failed, trying direct..."
+      wget -q -O "$INSTALL_BIN" \
+        "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
+        error "Download failed. Check your network."
+    }
+  fi
+
+  # Verify download
+  if [ ! -s "$INSTALL_BIN" ]; then
+    rm -f "$INSTALL_BIN"
+    error "Downloaded file is empty"
+  fi
+
+  FILE_SIZE=$(wc -c < "$INSTALL_BIN" | tr -d ' ')
+  if [ "$FILE_SIZE" -lt 1000000 ]; then
+    rm -f "$INSTALL_BIN"
+    error "Downloaded file too small (${FILE_SIZE} bytes), likely corrupted"
+  fi
+
+  ok "Downloaded $((FILE_SIZE / 1048576)) MB"
+fi
 
 # --- Install ---
 

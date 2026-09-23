@@ -263,16 +263,26 @@ jobs:
           ARCHIVE_NAME="bun-ohos-aarch64-${VERSION}-${COMMIT}"
           mkdir -p $RELEASE_DIR/$ARCHIVE_NAME
           cp $BIN $RELEASE_DIR/$ARCHIVE_NAME/bun
-          cp ohos/fulltest/install-bun-ohos.sh $RELEASE_DIR/$ARCHIVE_NAME/install-bun-ohos.sh 2>/dev/null || true
+          # Tag-inject the install script: its RELEASE_TAG must point at THIS
+          # tag's assets, not the rolling ohos-latest — script/binary pairing.
+          sed "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
+            ohos/fulltest/install-bun-ohos.sh > $RELEASE_DIR/$ARCHIVE_NAME/install-bun-ohos.sh
           cat > $RELEASE_DIR/$ARCHIVE_NAME/README.md << 'EOF'
           # Bun for HarmonyOS (OHOS) aarch64
-          Install: curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
+
+          Unpack and run the bundled installer — it installs the bun shipped
+          in this archive (no download) and self-signs it on device:
+
+              tar xzf bun-ohos-aarch64-*.tar.gz
+              sh bun-ohos-aarch64-*/install-bun-ohos.sh
           EOF
           cd $RELEASE_DIR
           tar czf ${ARCHIVE_NAME}.tar.gz $ARCHIVE_NAME/
 
-          # 3. Standalone install script
-          cp ${{ github.workspace }}/bun/ohos/fulltest/install-bun-ohos.sh $RELEASE_DIR/install-bun-ohos.sh 2>/dev/null || true
+          # 3. Standalone install script — tag-injected so it downloads the
+          # binary from THIS release, not the rolling ohos-latest.
+          sed "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
+            ${{ github.workspace }}/bun/ohos/fulltest/install-bun-ohos.sh > $RELEASE_DIR/install-bun-ohos.sh 2>/dev/null || true
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
