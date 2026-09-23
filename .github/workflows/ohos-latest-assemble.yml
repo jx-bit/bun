@@ -107,22 +107,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHA='${{ steps.runs.outputs.sha }}'
-          BODY=$(cat <<EOT
-          Products built from the same baseline commit \`$SHA\` (ohos-aarch64).
-
-          | File | Target |
-          |---|---|
-          | bun-ohos-aarch64 | OHOS (HarmonyOS) aarch64 — container lane |
-          | bun-linux-x64 | Linux x86_64 (glibc) — cross |
-          | bun-linux-arm64 | Linux arm64 (glibc) — native on the arm64 host |
-          | bun-windows-x64.exe | Windows x86_64 — cross |
-          | bun-darwin-arm64 | macOS arm64 — cross |
-          EOT
-          )
+          BODY=/tmp/latest-body.md
+          {
+            printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
+            echo '## Products'
+            echo ''
+            echo '| File | Target | Build | Size |'
+            echo '|---|---|---|---|'
+            for f in dist/*; do
+              name=$(basename "$f")
+              size=$(du -h "$f" | cut -f1)
+              case "$name" in
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane' ;;
+                bun-linux-x64)       target='Linux x86_64 (glibc)';    build='cross (aarch64 host)' ;;
+                bun-linux-arm64)     target='Linux arm64 (glibc)';     build='native (arm64 host)' ;;
+                bun-windows-x64.exe) target='Windows x86_64';          build='cross' ;;
+                bun-darwin-arm64)    target='macOS arm64';             build='cross' ;;
+                *)                   target='?';                       build='?' ;;
+              esac
+              printf '| %s | %s | %s | %s |\n' "$name" "$target" "$build" "$size"
+            done
+            echo ''
+            echo '## Quick Install (OHOS device)'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo '```'
+          } > "$BODY"
           if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
             gh release upload latest dist/* --repo "${{ github.repository }}" --clobber
-            gh release edit latest --repo "${{ github.repository }}" --notes "$BODY" --title "Bun OHOS Cross-Build (latest)"
+            gh release edit latest --repo "${{ github.repository }}" --notes-file "$BODY" --title "Bun OHOS Cross-Build (latest)"
           else
             gh release create latest dist/* --repo "${{ github.repository }}" \
-              --title "Bun OHOS Cross-Build (latest)" --notes "$BODY"
+              --title "Bun OHOS Cross-Build (latest)" --notes-file "$BODY"
           fi
