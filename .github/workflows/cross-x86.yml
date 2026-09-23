@@ -365,7 +365,14 @@ jobs:
           ls -lh "$OUT"
           file "$OUT" || true
           if [ "${{ matrix.os }}" = "linux" ]; then
-            file "$OUT" | grep -iqE "ELF.*x86-64" || { echo "ERROR: not an ELF x86-64"; exit 1; }
+            # Expected ELF machine follows the leg's arch token — the shared
+            # verify step serves both linux legs (x64 and the native arm64).
+            case "${{ matrix.arch }}" in
+              x64)    elf_re="ELF.*x86-64" ;;
+              aarch64) elf_re="ELF.*(aarch64|ARM aarch64)" ;;
+              *)      elf_re="ELF" ;;
+            esac
+            file "$OUT" | grep -iqE "$elf_re" || { echo "ERROR: not the expected ELF ($elf_re)"; exit 1; }
             echo "=== ELF header (readelf -h) ==="
             readelf -h "$OUT" 2>/dev/null | head -20 || true
             echo "=== Machine ==="
