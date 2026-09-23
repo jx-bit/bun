@@ -158,6 +158,33 @@ else
   fi
 
   ok "Downloaded $((FILE_SIZE / 1048576)) MB"
+
+  # Integrity check against the release checksum manifest (upstream release
+  # convention). Tolerant: releases older than the convention may not ship one.
+  SHASUMS_TMP="$(dirname "$INSTALL_BIN")/.bun-install-SHASUMS256.txt"
+  SUMS_URL="${PROXY}https://github.com/${REPO}/releases/download/${RELEASE_TAG}/SHASUMS256.txt"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL -o "$SHASUMS_TMP" "$SUMS_URL" 2>/dev/null || \
+      curl -fsSL -o "$SHASUMS_TMP" \
+        "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/SHASUMS256.txt" 2>/dev/null || true
+  else
+    wget -q -O "$SHASUMS_TMP" "$SUMS_URL" 2>/dev/null || \
+      wget -q -O "$SHASUMS_TMP" \
+        "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/SHASUMS256.txt" 2>/dev/null || true
+  fi
+  if [ -s "$SHASUMS_TMP" ] && grep -q "  ${BINARY_NAME}\$" "$SHASUMS_TMP" 2>/dev/null; then
+    info "Verifying SHA256 against SHASUMS256.txt..."
+    if ( cd "$(dirname "$INSTALL_BIN")" && \
+         grep "  ${BINARY_NAME}\$" "$SHASUMS_TMP" | sha256sum -c - > /dev/null 2>&1 ); then
+      ok "SHA256 verified"
+    else
+      rm -f "$INSTALL_BIN" "$SHASUMS_TMP"
+      error "SHA256 MISMATCH for $BINARY_NAME — download corrupt. Removed."
+    fi
+  else
+    warn "SHASUMS256.txt unavailable for $RELEASE_TAG — skipping integrity check"
+  fi
+  rm -f "$SHASUMS_TMP"
 fi
 
 # --- Install ---

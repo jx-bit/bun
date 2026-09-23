@@ -416,6 +416,7 @@ jobs:
           {
             echo "asset_path=/tmp/bun-ohos-aarch64-github"
             echo "script_path=/tmp/install-bun-ohos.sh"
+            echo "sums_path=/tmp/SHASUMS256.txt"
             echo "body_path=/tmp/release-body.md"
             echo "commit=$COMMIT"
           } >> "$GITHUB_OUTPUT"
@@ -436,7 +437,9 @@ jobs:
             echo ''
             echo "Built from: v$VERSION @$COMMIT (ohos-aarch64)"
           } > /tmp/release-body.md
-          echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
+          # Upstream release convention: checksum manifest for every asset.
+          ( cd /tmp && sha256sum bun-ohos-aarch64-github install-bun-ohos.sh > SHASUMS256.txt )
+          echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh + SHASUMS256.txt (v$VERSION @ $COMMIT)"
 
       - name: Upload binary artifact
         if: success()
@@ -458,6 +461,7 @@ jobs:
           files: |
             ${{ steps.gh_release.outputs.asset_path }}
             ${{ steps.gh_release.outputs.script_path }}
+            ${{ steps.gh_release.outputs.sums_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -531,7 +535,7 @@ jobs:
           cp dist-cross/bun-cross-darwin-arm64/bun      products/bun-darwin-arm64
           ls -la products/
 
-      - name: Generate release body
+      - name: Generate release body and checksums
         run: |
           SHA='${{ github.sha }}'
           BODY=/tmp/latest-body.md
@@ -555,22 +559,28 @@ jobs:
               printf '| %s | %s | %s | %s |\n' "$name" "$target" "$build" "$size"
             done
             echo ''
+            echo 'Verify integrity: download [SHASUMS256.txt](https://github.com/jx-bit/bun/releases/download/ohos-latest/SHASUMS256.txt) and `sha256sum -c --ignore-missing SHASUMS256.txt`'
+            echo ''
             echo '## Quick Install (OHOS device)'
             echo ''
             echo '```bash'
             echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
             echo '```'
           } > "$BODY"
+          # Upstream release convention (bun-v1.4.0): one checksum manifest for
+          # every shipped asset.
+          ( cd products && sha256sum * > SHASUMS256.txt )
+          mv products/SHASUMS256.txt /tmp/SHASUMS256.txt
 
       - name: Publish rolling latest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            gh release upload latest products/* --repo "${{ github.repository }}" --clobber
+            gh release upload latest products/* /tmp/SHASUMS256.txt --repo "${{ github.repository }}" --clobber
             gh release edit latest --repo "${{ github.repository }}" \
               --notes-file /tmp/latest-body.md --title "Bun OHOS Cross-Build (latest)"
           else
-            gh release create latest products/* --repo "${{ github.repository }}" \
+            gh release create latest products/* /tmp/SHASUMS256.txt --repo "${{ github.repository }}" \
               --title "Bun OHOS Cross-Build (latest)" --notes-file /tmp/latest-body.md
           fi

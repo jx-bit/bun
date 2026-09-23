@@ -279,6 +279,9 @@ jobs:
           cd $RELEASE_DIR
           tar czf ${ARCHIVE_NAME}.tar.gz $ARCHIVE_NAME/
 
+          # Upstream release convention: checksum manifest for every asset.
+          sha256sum bun-ohos-aarch64 ${ARCHIVE_NAME}.tar.gz install-bun-ohos.sh > SHASUMS256.txt
+
           # 3. Standalone install script — tag-injected so it downloads the
           # binary from THIS release, not the rolling ohos-latest.
           sed "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
@@ -289,6 +292,7 @@ jobs:
           echo "binary_path=$RELEASE_DIR/bun-ohos-aarch64" >> $GITHUB_OUTPUT
           echo "archive_path=$RELEASE_DIR/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
           echo "script_path=$RELEASE_DIR/install-bun-ohos.sh" >> $GITHUB_OUTPUT
+          echo "sums_path=$RELEASE_DIR/SHASUMS256.txt" >> $GITHUB_OUTPUT
           echo "✅ Packaged: bun-ohos-aarch64 + ${ARCHIVE_NAME}.tar.gz + install-bun-ohos.sh"
 
       - name: Create versioned release
@@ -298,6 +302,7 @@ jobs:
             ${{ steps.package.outputs.binary_path }}
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.script_path }}
+            ${{ steps.package.outputs.sums_path }}
           generate_release_notes: true
           name: "Bun OHOS ${{ github.ref_name }}"
           body: |
@@ -326,6 +331,7 @@ jobs:
             ${{ steps.package.outputs.binary_path }}
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.script_path }}
+            ${{ steps.package.outputs.sums_path }}
           body: |
             ## Latest Bun for HarmonyOS (OHOS) aarch64
 
