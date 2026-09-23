@@ -277,8 +277,14 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   const cFlagsFull = [...flags.cflags, ...includeFlags, ...defineFlags];
 
   // ─── Step 4: PCH ───
-  // CI full mode (unused by the pipeline) skips the PCH; cpp-only/archive-link use it.
-  const usePch = !cfg.ci || cfg.mode !== "full";
+  // The PCH force-includes root-pch.h, and TUs rely on its JSC declarations —
+  // e.g. BunStreamSource.cpp includes BunClientData.h (which has no includes of
+  // its own) before any JSC header. The old `!cfg.ci || cfg.mode !== "full"`
+  // skip assumed CI full mode was unused by the pipeline; the cross-compile
+  // lanes run exactly that combination, so their TUs lost the JSC declarations
+  // and failed to compile. The PCH is now unconditional; per-TU opt-outs live
+  // in noPchSources below.
+  const usePch = true;
   let pchOut: { pch: string; wrapperHeader: string } | undefined;
 
   if (usePch) {
