@@ -416,8 +416,26 @@ jobs:
           {
             echo "asset_path=/tmp/bun-ohos-aarch64-github"
             echo "script_path=/tmp/install-bun-ohos.sh"
+            echo "body_path=/tmp/release-body.md"
             echo "commit=$COMMIT"
           } >> "$GITHUB_OUTPUT"
+          # Release body: install one-liner + build provenance (reference
+          # release-page convention).
+          {
+            echo '## Latest Bun for HarmonyOS (OHOS) aarch64'
+            echo ''
+            echo 'This release is automatically updated with the latest build.'
+            echo ''
+            echo '### Quick Install'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo '```'
+            echo ''
+            echo '### Version'
+            echo ''
+            echo "Built from: v$VERSION @$COMMIT (ohos-aarch64)"
+          } > /tmp/release-body.md
           echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
 
       - name: Upload binary artifact
@@ -436,6 +454,7 @@ jobs:
         with:
           tag_name: ohos-latest
           name: "Bun OHOS (Latest)"
+          body_path: /tmp/release-body.md
           files: |
             ${{ steps.gh_release.outputs.asset_path }}
             ${{ steps.gh_release.outputs.script_path }}
