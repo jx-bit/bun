@@ -691,14 +691,10 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
             Some(info) => info,
             None => {
                 root_dir_info_is_fallback = true;
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = bun_core::env_var::HOME::get().unwrap_or(b"");
                 let info = this_transpiler
                     .resolver
-                    .read_dir_info_ignore_error(if home.is_empty() {
-                        b"/"
-                    } else {
-                        home.as_bytes()
-                    })
+                    .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home })
                     .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
                     .ok_or(crate::Error::InstallFailed)?;
                 if opts.log_errors {

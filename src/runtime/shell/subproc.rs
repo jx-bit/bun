@@ -739,9 +739,10 @@ impl ShellSubprocess {
                 if let Some(inj) =
                     crate::api::ohos_node_userinfo::compute(a0_bytes, &spawn_args.env_array)
                 {
-                    spawn_args
-                        .env_array
-                        .retain(|&ptr| !crate::api::ohos_node_userinfo::is_managed_key(ptr));
+                    // SAFETY: `spawn_args.env_array` entries are NUL-terminated arena storage that outlives this call (is_managed_key's stated contract).
+                    spawn_args.env_array.retain(|&ptr| !unsafe {
+                        crate::api::ohos_node_userinfo::is_managed_key(ptr)
+                    });
                     let arena: &Arena = spawn_args.arena;
                     for line in [Some(inj.node_options), inj.username].into_iter().flatten() {
                         let buf = arena.alloc_slice_fill_default(line.len() + 1);
