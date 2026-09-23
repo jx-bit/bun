@@ -2483,14 +2483,20 @@ fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
         full.extend_from_slice(pkg_dir);
         full.push(b'/');
         full.extend_from_slice(name);
-        let full_str = unsafe { core::str::from_utf8_unchecked(&full) };
-        let p = std::path::Path::new(full_str);
+        // Package directories are not guaranteed UTF-8; `OsStr::from_bytes`
+        // accepts arbitrary path bytes.
+        let os: &std::ffi::OsStr = std::os::unix::ffi::OsStrExt::from_bytes(&full);
+        let p = std::path::Path::new(os);
         // repair_codesign_if_needed: sign when a section is missing, and
         // strip + re-sign when one is stale (e.g. a patched native module) —
         // a presence-only check would leave the kernel to reject it at
         // dlopen with no recovery.
         if ohos_sign::repair_codesign_if_needed(p) {
-            bun_output::scoped_log!(OhosSignRepair, "re-signed {} during install", full_str);
+            bun_output::scoped_log!(
+                OhosSignRepair,
+                "re-signed {} during install",
+                bstr::BStr::new(&full)
+            );
         }
     }
 }

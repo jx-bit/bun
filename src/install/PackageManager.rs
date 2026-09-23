@@ -1105,21 +1105,22 @@ fn configure_env_for_scripts_run(
         // else fall back to PATH clang. Set on the GLOBAL install env so all
         // install modes (hoisted + isolated) inherit it into lifecycle scripts.
         let env = this.env_mut();
-        if let Ok(cc) = std::env::var("OHOS_CC") {
-            let _ = env.map.put(b"CC", cc.as_bytes());
+        if let Some(cc) = bun_core::getenv_z(bun_core::zstr!("OHOS_CC")) {
+            let _ = env.map.put(b"CC", cc);
         } else if env.get(b"CC").is_none() {
             let _ = env.map.put(b"CC", b"clang");
         }
-        if let Ok(cxx) = std::env::var("OHOS_CXX") {
-            let _ = env.map.put(b"CXX", cxx.as_bytes());
+        if let Some(cxx) = bun_core::getenv_z(bun_core::zstr!("OHOS_CXX")) {
+            let _ = env.map.put(b"CXX", cxx);
         } else if env.get(b"CXX").is_none() {
             let _ = env.map.put(b"CXX", b"clang++");
         }
-        if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
-            let flag = format!("--sysroot={}", sysroot);
-            let _ = env.map.put(b"CFLAGS", flag.as_bytes());
-            let _ = env.map.put(b"CXXFLAGS", flag.as_bytes());
-            let _ = env.map.put(b"LDFLAGS", flag.as_bytes());
+        if let Some(sysroot) = bun_core::getenv_z(bun_core::zstr!("OHOS_SYSROOT")) {
+            let mut sysroot_flags = b"--sysroot=".to_vec();
+            sysroot_flags.extend_from_slice(sysroot);
+            let _ = env.map.put(b"CFLAGS", &sysroot_flags);
+            let _ = env.map.put(b"CXXFLAGS", &sysroot_flags);
+            let _ = env.map.put(b"LDFLAGS", &sysroot_flags);
         }
     }
 
