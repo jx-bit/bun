@@ -435,6 +435,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ohos-latest
+          name: "Bun OHOS (Latest)"
           files: |
             ${{ steps.gh_release.outputs.asset_path }}
             ${{ steps.gh_release.outputs.script_path }}

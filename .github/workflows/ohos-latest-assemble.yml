@@ -121,8 +121,8 @@ jobs:
           )
           if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
             gh release upload latest dist/* --repo "${{ github.repository }}" --clobber
-            gh release edit latest --repo "${{ github.repository }}" --notes "$BODY" --title "Bun OHOS (Latest)"
+            gh release edit latest --repo "${{ github.repository }}" --notes "$BODY" --title "Bun OHOS Cross-Build (latest)"
           else
             gh release create latest dist/* --repo "${{ github.repository }}" \
-              --title "Bun OHOS (Latest)" --notes "$BODY"
+              --title "Bun OHOS Cross-Build (latest)" --notes "$BODY"
           fi
