@@ -66,15 +66,18 @@ homebrew 分发机器（我们不运营）、zip-only（curl|sh 需要裸下载�
 
 ## 7. §后续：#77 发布配对门禁——双向错配修复 + 发布后验证（2026-09-23）
 
-用户提出发布契约升级：**不同 tag/release 各自对应的脚本必须存在且不出问题**。
-审计 #68 配对机制发现两处残留错配 + 一处机制空洞（均为审计发现而非线上事故——
-ohos-v* 通道至今未发布过）：
+用户提出发布契约升级：**不同 tag/release 各自对应的脚本必须存在且不出问题**，后升格为
+普适契约：**任何名字的 tag 发布的 release，页面归档自己的安装脚本、脚本下载自己的
+二进制**。审计 #68 配对机制发现两处残留错配 + 三处机制空洞（1/2 为潜伏——ohos-v* 通道
+至今未发布；4 于当日删除事故实际暴露；5 为覆盖缺口）：
 
 | # | 缺陷 | 后果 |
 |---|---|---|
 | 1 | 版本化 release 只带 self 变体二进制，但其 tag 注入脚本默认构建仍是 `github` | tag release 上执行 body 一行命令 → 下载 `bun-ohos-aarch64-github` → **404**（默认即错） |
 | 2 | tag 工作流更新 ohos-latest 时把滚动脚本也覆盖成 tag 注入版 | 滚动入口默认与 `-- github` 模式全 404，仅 `-- self` 幸存；窗口持续到下一次交付分支 push 覆盖回原样脚本 |
 | 3 | 发布后零验证：脚本资产缺失/配对断裂静默通过 CI | 只有设备上安装失败才暴露——当日 ohos-latest 被手动删除（09:52）后数小时无人发现即实例 |
+| 4 | `latest` 的安装入口跨 release 依赖：body 命令指向 ohos-latest 的脚本 | 目标缺失时 latest 页面命令同样死——当日事故中 latest 自带 bun 却装不了 |
+| 5 | tag 触发器只认 `ohos-v*` 前缀 | 其他名字的 tag 推上去无任何反应，"任意 tag = 自包含 release"契约无从成立 |
 
 **用户影响速览**：
 
@@ -83,6 +86,8 @@ ohos-v* 通道至今未发布过）：
 | 1 | 从版本化 release 页复制 Quick Install 一行命令到设备执行 | "Download failed. Check your network."——网络正常仍失败，无从排查 | 用 tag release 即必现 | 高（该通道一行命令完全不可用） |
 | 2 | tag 发布后照常使用滚动一行命令（默认或显式 github） | 同上 404 伪装成网络错误；以为滚动入口坏了 | tag 发布 → 下次交付 push 的窗口内必现 | 高（主入口失效） |
 | 3 | 正常安装（任意通道），资产因误删/发布故障缺失 | 安装失败，发布方无任何告警，需人工排查 | 资产缺失时必现 | 中（可恢复但发现滞后） |
+| 4 | 从 latest 页面复制 Quick Install 命令到设备 | 目标 release 缺失期间 404（尽管 latest 自身就有 bun） | ohos-latest 缺失期间必现 | 中 |
+| 5 | push 任意非 `ohos-v*` 名字的 tag 期望发布 | 毫无反应，须查工作流源码才知道前缀限制 | 每次用自定义 tag 名 | 低（摩擦而非故障） |
 
 **#77 修复**（[pr77](https://github.com/jx-bit/bun/pull/77)，claude/ohos-release-script-pairing）：
 1. 脚本：默认构建改 `BUILD="${BUN_INSTALL_BUILD:-github}"`——env 可覆盖、release 打包
@@ -98,13 +103,26 @@ ohos-v* 通道至今未发布过）：
    字节 grep：tag 版 `RELEASE_TAG=<tag>`+`:-self`，rolling 版原样 + `:-github`）；build job
    另断言 ohos-latest 两资产、publish job 断言 latest 五产品齐全。配对断裂直接红，不再等
    设备端发现。
+4. latest 自包含：publish job 增 checkout（与构建产品同 commit 取脚本），脚本随产品入列
+   （注入 `RELEASE_TAG="latest"` + 默认 self → 下载本 release 的 `bun-ohos-aarch64`），
+   body 命令自指，验证步骤扩为 6 资产 + 脚本锚点。
+5. 任意 tag 泛化：ohos-release.yml 触发器 `ohos-v*` → `*`（排除 CI 自管滚动 tag
+   `ohos-latest`/`latest` 与共享目录构建 `ohos-full-v*`）——任何 tag push 即产自包含
+   release。注：CI 以 GITHUB_TOKEN 发布，产生的事件不触发上游 release.yml（`on: release
+   published`），无递归双跑（当日 release.yml 仅 schedule run 且全 skipped 佐证）。
 
-验证：`sh -n` + sed 注入模拟（两锚点各唯一命中 1 次；tagged 副本 `RELEASE_TAG=<tag>` +
-`self` 默认、rolling 副本原样）；两 workflow YAML 解析 + 全部 run 块 `bash -n` 通过；验证
+验证：`sh -n` + sed 注入模拟（两锚点各唯一命中 1 次；任意 tag、`latest`、rolling 原样
+三种副本均按预期改写/不改写）；两 workflow YAML 解析（含新触发器形态核对）+ 全部 run 块
+`bash -n` 通过；验证
 python 从工作流 heredoc 原样提取后实弹测试——已删除 release（HTTP 404）与资产缺失 release
 两场景均干净报错 exit 1，恰好复现当日 ohos-latest 被删事故类。验证步骤门禁在交付分支
 push 才执行（PR run 不得发布），合并后首跑生效；check-pr.sh 全项 PASS（单 commit、
 message/body 无违禁引用、diff 白名单、基线新鲜）。
+
+**修后契约**：任何 tag push（除排除项）即产自包含 release——页面命令自指、脚本下载本
+release 资产、tar.gz 归档零下载；ohos-latest / latest / 任意 tag 三类入口全部满足，发布后
+统一门禁验收。发 release 的方式统一为 `git push origin <tag>`（网页 UI 手动建的
+release/tag 不触发工作流）。
 
 ## 8. 关联
 
