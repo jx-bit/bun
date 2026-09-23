@@ -479,3 +479,87 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # ─── Cross-compile legs: linux-x64 / linux-arm64 / windows-x64 / darwin-arm64 ───
+  # Runs in PARALLEL with `build` — the five targets are independent builds of
+  # the same commit; the cross legs need no container and no sysroot download
+  # (linux-arm64 is native on the arm64 host). Reusable-workflow call keeps
+  # cross-x86.yml dispatchable standalone.
+  cross:
+    name: Cross-compile (4 targets)
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/cross-x86.yml
+    with:
+      sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ─── Multi-product rolling latest ───
+  # Collects the five products from this run and publishes them to one
+  # rolling `latest` release whose body names the baseline commit. Separate
+  # from the OHOS-only `ohos-latest` release published by the `build` job.
+  publish:
+    name: Publish multi-product latest
+    needs: [build, cross]
+    if: github.ref == 'refs/heads/ohos-aarch64' && github.event_name == 'push'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Download products (same run)
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Stage products
+        run: |
+          mkdir -p products
+          cp dist/build/release-ohos/bun             products/bun-ohos-aarch64
+          cp dist/build/cross-linux-x64/bun          products/bun-linux-x64
+          cp dist/build/cross-linux-arm64/bun        products/bun-linux-arm64
+          cp dist/build/cross-windows-x64/bun.exe    products/bun-windows-x64.exe
+          cp dist/build/cross-darwin-arm64/bun       products/bun-darwin-arm64
+          ls -la products/
+
+      - name: Generate release body
+        run: |
+          SHA='${{ github.sha }}'
+          BODY=/tmp/latest-body.md
+          {
+            printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
+            echo '## Products'
+            echo ''
+            echo '| File | Target | Build | Size |'
+            echo '|---|---|---|---|'
+            for f in products/*; do
+              name=$(basename "$f")
+              size=$(du -h "$f" | cut -f1)
+              case "$name" in
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane' ;;
+                bun-linux-x64)       target='Linux x86_64 (glibc)';    build='cross (aarch64 host)' ;;
+                bun-linux-arm64)     target='Linux arm64 (glibc)';     build='native (arm64 host)' ;;
+                bun-windows-x64.exe) target='Windows x86_64';          build='cross' ;;
+                bun-darwin-arm64)    target='macOS arm64';             build='cross' ;;
+                *)                   target='?';                       build='?' ;;
+              esac
+              printf '| %s | %s | %s | %s |\n' "$name" "$target" "$build" "$size"
+            done
+            echo ''
+            echo '## Quick Install (OHOS device)'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo '```'
+          } > "$BODY"
+
+      - name: Publish rolling latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release upload latest products/* --repo "${{ github.repository }}" --clobber
+            gh release edit latest --repo "${{ github.repository }}" \
+              --notes-file /tmp/latest-body.md --title "Bun OHOS Cross-Build (latest)"
+          else
+            gh release create latest products/* --repo "${{ github.repository }}" \
+              --title "Bun OHOS Cross-Build (latest)" --notes-file /tmp/latest-body.md
+          fi
