@@ -461,6 +461,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify ohos-latest release assets
+        # Publish gate: the one-liner target must exist — script anchors
+        # unchanged (verbatim repo copy) and both assets uploaded.
+        if: success() && github.ref == 'refs/heads/ohos-aarch64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -qF 'RELEASE_TAG="ohos-latest"' /tmp/install-bun-ohos.sh || { echo "❌ rolling script RELEASE_TAG drifted"; exit 1; }
+          grep -qF 'BUN_INSTALL_BUILD:-github' /tmp/install-bun-ohos.sh || { echo "❌ rolling script default build drifted"; exit 1; }
+          for asset in bun-ohos-aarch64-github install-bun-ohos.sh; do
+            gh release view ohos-latest --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name' | grep -qx -F "$asset" || {
+              echo "❌ asset '$asset' missing from ohos-latest"; exit 1; }
+          done
+          echo "✅ ohos-latest verified: install one-liner target present"
+
       - name: Dump failure diagnostics
         if: failure()
         run: |
@@ -504,6 +520,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
+      - name: Checkout Bun source
+        # Stage the installer from the same commit as the built products —
+        # script/binary pairing for THIS release.
+        uses: actions/checkout@v4
+
       - name: Download products (same run, one directory per artifact)
         # upload-artifact@v4 stores a single-file `path` at the artifact ROOT
         # (build/release-ohos/bun → artifact root `bun`), so every linux/darwin
@@ -529,6 +550,12 @@ jobs:
           cp dist-cross/bun-cross-linux-arm64/bun       products/bun-linux-arm64
           cp dist-cross/bun-cross-windows-x64/bun.exe   products/bun-windows-x64.exe
           cp dist-cross/bun-cross-darwin-arm64/bun      products/bun-darwin-arm64
+          # Self-contained installer: RELEASE_TAG + default build injected so
+          # this release's one-liner downloads THIS release's OHOS product
+          # (bun-ohos-aarch64), not another release's assets.
+          sed -e 's|RELEASE_TAG="ohos-latest"|RELEASE_TAG="latest"|' \
+              -e 's|BUN_INSTALL_BUILD:-github|BUN_INSTALL_BUILD:-self|' \
+            ohos/fulltest/install-bun-ohos.sh > products/install-bun-ohos.sh
           ls -la products/
 
       - name: Generate release body
@@ -546,6 +573,7 @@ jobs:
               size=$(du -h "$f" | cut -f1)
               case "$name" in
                 bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane' ;;
+                install-bun-ohos.sh) target='OHOS installer';            build='paired to this release' ;;
                 bun-linux-x64)       target='Linux x86_64 (glibc)';    build='cross (aarch64 host)' ;;
                 bun-linux-arm64)     target='Linux arm64 (glibc)';     build='native (arm64 host)' ;;
                 bun-windows-x64.exe) target='Windows x86_64';          build='cross' ;;
@@ -558,7 +586,7 @@ jobs:
             echo '## Quick Install (OHOS device)'
             echo ''
             echo '```bash'
-            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/latest/install-bun-ohos.sh | sh'
             echo '```'
           } > "$BODY"
 
@@ -574,3 +602,17 @@ jobs:
             gh release create latest products/* --repo "${{ github.repository }}" \
               --title "Bun OHOS Cross-Build (latest)" --notes-file /tmp/latest-body.md
           fi
+
+      - name: Verify latest release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Staged-script pairing (the exact bytes uploaded above).
+          grep -qF 'RELEASE_TAG="latest"' products/install-bun-ohos.sh || { echo "❌ latest script RELEASE_TAG not latest"; exit 1; }
+          grep -qF 'BUN_INSTALL_BUILD:-self' products/install-bun-ohos.sh || { echo "❌ latest script default build not self"; exit 1; }
+          for product in bun-ohos-aarch64 bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64 install-bun-ohos.sh; do
+            gh release view latest --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name' | grep -qx -F "$product" || {
+              echo "❌ product '$product' missing from latest"; exit 1; }
+          done
+          echo "✅ latest release: 5 products + paired installer verified"

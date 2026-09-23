@@ -2,24 +2,29 @@
 # Bun for HarmonyOS (OHOS) — Quick Install Script
 #
 # Usage:
-#   # Default: self-hosted build (Harmonybrew cross-libs, musl Rust host)
+#   # Default: github-hosted build (the lane that publishes every merge)
 #   curl -fsSL https://ghfast.top/https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
 #
-#   # github-hosted build (self-built __n1 libcxx+compiler-rt+ICU, glibc Rust host)
-#   curl -fsSL https://ghfast.top/https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
+#   # self-hosted build (the self-hosted-runner lane, published by tag releases)
+#   curl -fsSL https://ghfast.top/https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- self
 #
 # Or without proxy:
-#   curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- github
+#   curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh -s -- self
 #
 # Args:  github (default) | self
 #   github → downloads bun-ohos-aarch64-github → installs ~/usr/bin/bun-github
 #   self   → downloads bun-ohos-aarch64       → installs ~/usr/bin/bun
 # Both can coexist for A/B comparison.
 #
+# Env:   BUN_INSTALL_REPO / BUN_INSTALL_PROXY / BUN_INSTALL_BUILD override
+#        the repo, download proxy, and default build (github).
+#
 set -eu
 
 # --- Parse args ---
-BUILD="github" # default: github-hosted build (the lane that publishes every merge)
+# BUN_INSTALL_BUILD env-overrides the default; tag releases sed-inject the
+# fallback default to "self" (they ship only the self-hosted binary).
+BUILD="${BUN_INSTALL_BUILD:-github}"
 for arg in "$@"; do
   case "$arg" in
     github|--github) BUILD="github" ;;
@@ -134,14 +139,14 @@ else
       warn "Proxy download failed, trying direct..."
       curl -fsSL -o "$INSTALL_BIN" \
         "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
-        error "Download failed. Check your network."
+        error "Download failed (proxy + direct): ${BINARY_NAME} not reachable in release '${RELEASE_TAG}' — check https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
     }
   else
     wget -q -O "$INSTALL_BIN" "$DOWNLOAD_URL" 2>/dev/null || {
       warn "Proxy download failed, trying direct..."
       wget -q -O "$INSTALL_BIN" \
         "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}" 2>/dev/null || \
-        error "Download failed. Check your network."
+        error "Download failed (proxy + direct): ${BINARY_NAME} not reachable in release '${RELEASE_TAG}' — check https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
     }
   fi
 

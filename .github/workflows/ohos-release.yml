@@ -7,7 +7,7 @@
 #   - install-bun-ohos.sh       (curl install script)
 #
 # Triggers:
-#   - Tag push: ohos-v*
+#   - Tag push: ANY tag (rolling ohos-latest/latest and ohos-full-v* excluded)
 #   - Manual: workflow_dispatch
 #
 # Signing (optional):
@@ -19,7 +19,14 @@ name: OHOS Release
 on:
   push:
     tags:
-      - 'ohos-v*'
+      # Any pushed tag cuts a self-contained release: script + binary +
+      # archive paired to THIS tag. Excluded: the CI-managed rolling tags
+      # (owned by ohos-build-github.yml) and the shared-dir build tags
+      # (owned by ohos-full-release.yml, no GitHub release).
+      - '*'
+      - '!ohos-latest'
+      - '!latest'
+      - '!ohos-full-v*'
   workflow_dispatch:
     inputs:
       webkit_ref:
@@ -263,9 +270,11 @@ jobs:
           ARCHIVE_NAME="bun-ohos-aarch64-${VERSION}-${COMMIT}"
           mkdir -p $RELEASE_DIR/$ARCHIVE_NAME
           cp $BIN $RELEASE_DIR/$ARCHIVE_NAME/bun
-          # Tag-inject the install script: its RELEASE_TAG must point at THIS
-          # tag's assets, not the rolling ohos-latest — script/binary pairing.
-          sed "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
+          # Tag-inject the install script: RELEASE_TAG points at THIS tag's
+          # assets and the default build becomes "self" — this release ships
+          # only the self-hosted binary, the rolling "github" default 404s here.
+          sed -e "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
+              -e "s|BUN_INSTALL_BUILD:-github|BUN_INSTALL_BUILD:-self|" \
             ohos/fulltest/install-bun-ohos.sh > $RELEASE_DIR/$ARCHIVE_NAME/install-bun-ohos.sh
           cat > $RELEASE_DIR/$ARCHIVE_NAME/README.md << 'EOF'
           # Bun for HarmonyOS (OHOS) aarch64
@@ -279,16 +288,23 @@ jobs:
           cd $RELEASE_DIR
           tar czf ${ARCHIVE_NAME}.tar.gz $ARCHIVE_NAME/
 
-          # 3. Standalone install script — tag-injected so it downloads the
-          # binary from THIS release, not the rolling ohos-latest.
-          sed "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
-            ${{ github.workspace }}/bun/ohos/fulltest/install-bun-ohos.sh > $RELEASE_DIR/install-bun-ohos.sh 2>/dev/null || true
+          # 3. Standalone install scripts — one tag-injected for THIS release
+          # (downloads from here, default build "self"), one verbatim for the
+          # rolling ohos-latest release (keeps its "github" default so the
+          # rolling one-liner stays self-consistent). No `|| true`: a failed
+          # injection must fail the release, not ship a broken script.
+          sed -e "s|RELEASE_TAG=\"ohos-latest\"|RELEASE_TAG=\"$TAG\"|" \
+              -e "s|BUN_INSTALL_BUILD:-github|BUN_INSTALL_BUILD:-self|" \
+            ${{ github.workspace }}/bun/ohos/fulltest/install-bun-ohos.sh > $RELEASE_DIR/install-bun-ohos.sh
+          mkdir -p $RELEASE_DIR/rolling
+          cp ${{ github.workspace }}/bun/ohos/fulltest/install-bun-ohos.sh $RELEASE_DIR/rolling/install-bun-ohos.sh
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
           echo "binary_path=$RELEASE_DIR/bun-ohos-aarch64" >> $GITHUB_OUTPUT
           echo "archive_path=$RELEASE_DIR/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
           echo "script_path=$RELEASE_DIR/install-bun-ohos.sh" >> $GITHUB_OUTPUT
+          echo "rolling_script_path=$RELEASE_DIR/rolling/install-bun-ohos.sh" >> $GITHUB_OUTPUT
           echo "✅ Packaged: bun-ohos-aarch64 + ${ARCHIVE_NAME}.tar.gz + install-bun-ohos.sh"
 
       - name: Create versioned release
@@ -309,7 +325,7 @@ jobs:
             ### Quick Install
 
             ```bash
-            curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
+            curl -fsSL https://github.com/jx-bit/bun/releases/download/${{ github.ref_name }}/install-bun-ohos.sh | sh
             ```
 
             ### Manual Download
@@ -325,7 +341,7 @@ jobs:
           files: |
             ${{ steps.package.outputs.binary_path }}
             ${{ steps.package.outputs.archive_path }}
-            ${{ steps.package.outputs.script_path }}
+            ${{ steps.package.outputs.rolling_script_path }}
           body: |
             ## Latest Bun for HarmonyOS (OHOS) aarch64
 
@@ -340,6 +356,41 @@ jobs:
             ### Version
 
             Built from: ${{ github.ref_name }} (${{ github.sha }})
+
+      - name: Verify published releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          # Staged-script pairing — the exact bytes packaged above.
+          grep -qF "RELEASE_TAG=\"$TAG\"" /tmp/bun-release/install-bun-ohos.sh || { echo "❌ tag script RELEASE_TAG not $TAG"; exit 1; }
+          grep -qF "BUN_INSTALL_BUILD:-self" /tmp/bun-release/install-bun-ohos.sh || { echo "❌ tag script default build not self"; exit 1; }
+          grep -qF "RELEASE_TAG=\"$TAG\"" "/tmp/bun-release/${{ steps.package.outputs.archive_name }}/install-bun-ohos.sh" || { echo "❌ archive script RELEASE_TAG not $TAG"; exit 1; }
+          grep -qF 'RELEASE_TAG="ohos-latest"' /tmp/bun-release/rolling/install-bun-ohos.sh || { echo "❌ rolling script RELEASE_TAG not verbatim"; exit 1; }
+          grep -qF 'BUN_INSTALL_BUILD:-github' /tmp/bun-release/rolling/install-bun-ohos.sh || { echo "❌ rolling script default build drifted"; exit 1; }
+          # Published-asset presence via API (self-hosted runner has no gh).
+          python3 - "$TAG" "${{ github.repository }}" "${{ steps.package.outputs.archive_name }}" <<'PYEOF'
+          import json, os, sys, urllib.error, urllib.request
+          tag, repo, archive = sys.argv[1], sys.argv[2], sys.argv[3]
+          token = os.environ["GITHUB_TOKEN"]
+          def release_assets(rel):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/releases/tags/{rel}",
+                  headers={"Authorization": f"Bearer {token}"})
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return {a["name"] for a in json.load(resp)["assets"]}
+              except urllib.error.HTTPError as e:
+                  print(f"❌ release {rel} not readable (HTTP {e.code})")
+                  sys.exit(1)
+          need = {"bun-ohos-aarch64", f"{archive}.tar.gz", "install-bun-ohos.sh"}
+          for rel in (tag, "ohos-latest"):
+              missing = need - release_assets(rel)
+              if missing:
+                  print(f"❌ release {rel} missing assets: {sorted(missing)}")
+                  sys.exit(1)
+          print(f"✅ releases verified: {tag} and ohos-latest carry all paired assets")
+          PYEOF
 
       - name: Copy to shared directory
         working-directory: bun
