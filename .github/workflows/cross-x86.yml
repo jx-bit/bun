@@ -239,7 +239,11 @@ jobs:
       # on this aarch64 host (--override-arch amd64). The --wrap list in
       # flags.ts (1237-1296) covers 2.31 -> 2.17 so the binary stays portable.
       - name: Install linux-x64 sysroot
-        if: matrix.os == 'linux'
+        # x64 leg only: the provisioned rootfs is amd64. The linux-arm64 leg
+        # is a native build (host == target) and compiles against the host's
+        # own aarch64 glibc — pointing it at this sysroot fails with
+        # "bits/libc-header-start.h file not found".
+        if: matrix.os == 'linux' && matrix.arch == 'x64'
         run: |
           set -eo pipefail
           SYSROOT="/opt/linux-sysroot-glibc"
