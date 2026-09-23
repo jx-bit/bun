@@ -1094,7 +1094,9 @@ fn spawn_maybe_sync<const IS_SYNC: bool>(
         // SAFETY: `a0` at this point always points at NUL-terminated storage owned by `cstr_storage` (get_argv's `argv0_result.argv0`) that outlives this call -- same invariant `is_pwd_key` relies on.
         let a0_bytes = unsafe { CStr::from_ptr(a0) }.to_bytes();
         if let Some(inj) = crate::api::ohos_node_userinfo::compute(a0_bytes, &env_array) {
-            env_array.retain(|&ptr| !crate::api::ohos_node_userinfo::is_managed_key(ptr));
+            // SAFETY: `env_array` entries are NUL-terminated storage owned by `cstr_storage` (is_managed_key's stated contract).
+            env_array
+                .retain(|&ptr| !unsafe { crate::api::ohos_node_userinfo::is_managed_key(ptr) });
             let node_options = ZBox::from_vec(inj.node_options);
             env_array.push(node_options.as_ptr());
             cstr_storage.push(node_options);

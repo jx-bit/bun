@@ -146,6 +146,9 @@ fn shim_identity() -> &'static ShimIdentity {
 
         let ret: core::ffi::c_int = loop {
             // NOTE: must be `getuid()`, not `geteuid()` -- the shim's interposer only takes the OS-account fast path when `uid == getuid()`.
+            // SAFETY: `pw` and `result` are valid writable locations for the
+            // call, `buf` is valid for `buf.len()` bytes, and getpwuid_r
+            // writes only within them (ERANGE growth handled below).
             let ret = unsafe {
                 libc::getpwuid_r(
                     sys::c::getuid(),
@@ -382,7 +385,11 @@ pub fn compute(argv0: &[u8], env_array: &[*const c_char]) -> Option<Injection> {
 }
 
 /// Keys an [`Injection`] owns; callers must `retain` these out of `env_array` before pushing -- musl/glibc getenv() returns the *first* match, so appended-only entries would silently lose to stale ones earlier in the array.
-pub fn is_managed_key(ptr: *const c_char) -> bool {
+///
+/// # Safety
+/// `ptr` must be NUL-terminated storage that outlives the call (the same
+/// invariant every `env_array` entry carries -- see `find_env_value`).
+pub unsafe fn is_managed_key(ptr: *const c_char) -> bool {
     if ptr.is_null() {
         return false;
     }
@@ -430,7 +437,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|w| w == needle)
+    strings::index_of(haystack, needle).is_some()
 }
 
 #[cfg(test)]

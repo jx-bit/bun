@@ -5153,6 +5153,8 @@ impl Resolver {
     #[cfg(target_env = "ohos")]
     fn has_global_ipv6() -> bool {
         const PATH: &[u8] = b"/proc/net/if_inet6\0";
+        // SAFETY: `PATH` is a NUL-terminated literal and the flags are valid
+        // for open(2); the descriptor is closed on every path below.
         let fd = unsafe {
             libc::open(
                 PATH.as_ptr().cast::<core::ffi::c_char>(),
@@ -5163,7 +5165,11 @@ impl Resolver {
             return false;
         }
         let mut buf = [0u8; 4096];
+        // SAFETY: `fd` is the live descriptor from the successful open and
+        // `buf` is valid for `buf.len()` bytes.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<core::ffi::c_void>(), buf.len()) };
+        // SAFETY: `fd` is the descriptor opened above; closing it here is the
+        // single-owner cleanup for this function-scoped resource.
         unsafe { libc::close(fd) };
         if n <= 0 {
             return false;
