@@ -66,6 +66,43 @@ jobs:
           BUN_CODEGEN_DIR: ${{ github.workspace }}/build/debug/codegen
         run: bun run rust:clippy
 
+  clippy-ohos-target:
+    name: cargo clippy (ohos target)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup
+        uses: ./.github/actions/rust-lint-setup
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+          llvm-version: ${{ env.LLVM_VERSION_MAJOR }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          components: clippy
+          ninja-targets: codegen clone-lolhtml clone-rust-argon2
+
+      - name: Add the ohos target (Tier 2 prebuilt std)
+        run: rustup target add aarch64-unknown-linux-ohos
+
+      - name: cargo clippy (ohos target)
+        # The OHOS-gated code (cfg(target_env = "ohos")) is invisible to the
+        # host lane above; this job is its only lint gate. Workspace lints
+        # (disallowed-methods, undocumented-unsafe-blocks, ...) are deny-level
+        # via Cargo.toml, so no -D warnings needed here. Scope: -p bun_runtime
+        # covers the whole dependency chain where all OHOS-gated code lives.
+        #
+        # missing-const-for-thread-local is scoped out: it misfires on the
+        # ohos target for already-`const {}` initializers (verified:
+        # bun_alloc/ast_alloc.rs AST_ALLOC_SPARE is already `const {}` and is
+        # still flagged on the ohos target but not on host) — the host lane
+        # keeps the lint active for the same file.
+        run: |
+          cargo clippy -p bun_runtime --lib --target=aarch64-unknown-linux-ohos -- \
+            -A clippy::missing-const-for-thread-local
+
   miri:
     name: cargo miri test
     runs-on: ubuntu-latest
