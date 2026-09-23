@@ -504,20 +504,31 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
-      - name: Download products (same run)
+      - name: Download products (same run, one directory per artifact)
+        # upload-artifact@v4 stores a single-file `path` at the artifact ROOT
+        # (build/release-ohos/bun → artifact root `bun`), so every linux/darwin
+        # artifact is a file literally named `bun`. merge-multiple would extract
+        # them all into one directory and each artifact would overwrite the
+        # previous — download each into its own subdirectory instead.
         uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          name: bun-ohos-aarch64-github
+          path: dist/ohos
+
+      - name: Download cross products (same run, one directory per artifact)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bun-cross-*
+          path: dist-cross
 
       - name: Stage products
         run: |
           mkdir -p products
-          cp dist/build/release-ohos/bun             products/bun-ohos-aarch64
-          cp dist/build/cross-linux-x64/bun          products/bun-linux-x64
-          cp dist/build/cross-linux-arm64/bun        products/bun-linux-arm64
-          cp dist/build/cross-windows-x64/bun.exe    products/bun-windows-x64.exe
-          cp dist/build/cross-darwin-arm64/bun       products/bun-darwin-arm64
+          cp dist/ohos/bun                              products/bun-ohos-aarch64
+          cp dist-cross/bun-cross-linux-x64/bun         products/bun-linux-x64
+          cp dist-cross/bun-cross-linux-arm64/bun       products/bun-linux-arm64
+          cp dist-cross/bun-cross-windows-x64/bun.exe   products/bun-windows-x64.exe
+          cp dist-cross/bun-cross-darwin-arm64/bun      products/bun-darwin-arm64
           ls -la products/
 
       - name: Generate release body
