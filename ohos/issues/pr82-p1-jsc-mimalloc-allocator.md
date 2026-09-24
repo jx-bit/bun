@@ -38,6 +38,19 @@
 非 OHOS 平台（linux/windows/darwin 产物）走 prebuilt 下载路径，按 `webkit.ts`
 版本号拉取，上游 `6119947592b6` 预编译包本身即带 mimalloc，随 pin 自动覆盖。
 
+### 3.0 流程教训：amend 时 stale index 意外回退队友工作（已修复）
+
+base 从 `97472e7369` 前进到 `a09fe1f10a`（#83/#84：retire install script、发布页
+调整）后，amend 用 `git reset --soft origin/ohos-aarch64` 只移 HEAD 不动 index，
+index 里残留 4 个文件的旧版本，commit 意外回退了 #83/#84 对
+`.github/scripts/build-ohos-container.sh`、`.github/workflows/README.md`、
+`ohos/fulltest/install-bun-ohos.sh`（该文件 #83 已删除，我们残留旧副本=变相复活）、
+`ohos/fulltest/OHOS-Bun-全量测试指导.md` 的改动——即"PR 里的多余文件"。
+修复：恢复 base 版本 ×3 + `git rm` ×1；此后每次 amend 前先核对
+`git diff --name-only <base> HEAD`。ohos-release.yml 随 #86（retire self-hosted
+release lane）整个删除，runner 本地 webkit 回退风险随之消失，release 改由
+container 通道产出（其 WEBKIT_REF 已 bump）。
+
 ### 3.1 第二轮：CI 实测暴露的引擎 API 失配（已全部修复，commit 4807e5484f → bae897b237）
 
 首轮 CI（`4807e5484f`）在 C++ 编译期失败，暴露两处引擎 API 失配 + 一处门禁构建雷
