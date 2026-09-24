@@ -35,6 +35,14 @@ on:
   push:
     branches:
       - ohos-aarch64
+    # Tag pushes cut versioned releases from this same container lane
+    # (same build, versioned packaging — no self-hosted runner involved).
+    # Exclusions: the CI-managed rolling tags and the shared-dir build tags.
+    tags:
+      - '**'
+      - '!ohos-latest'
+      - '!latest'
+      - '!ohos-full-v*'
     # No claude/* here: PR branches already build via the pull_request event,
     # and listing them double-ran every PR (push + pull_request).
   pull_request:
@@ -632,11 +640,16 @@ jobs:
   # rolling `latest` release whose body names the baseline commit. Separate
   # from the OHOS-only `ohos-latest` release published by the `build` job.
   publish:
-    name: Publish multi-product latest
+    name: Publish multi-product release
     needs: [build, cross]
-    if: github.ref == 'refs/heads/ohos-aarch64' && github.event_name == 'push'
+    # Branch pushes to the delivery line publish the rolling `latest`;
+    # tag pushes publish a versioned release with the identical product
+    # set. Same build, same packaging — only the release target differs.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/ohos-aarch64' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
+    env:
+      RELEASE_TARGET: ${{ github.ref == 'refs/heads/ohos-aarch64' && 'latest' || github.ref_name }}
     steps:
       - name: Checkout Bun source
         # Stage the installer from the same commit as the built products —
@@ -702,7 +715,7 @@ jobs:
         # Release Notes (the release-docs placeholder is seeded below).
         run: |
           SHA='${{ github.sha }}'
-          BODY=/tmp/latest-body.md
+          BODY=/tmp/release-body.md
           # Tarball name from the staged file (not recomputed) so the body
           # command always matches the uploaded asset.
           TARBALL_NAME=$(basename products/bun-ohos-aarch64-*.tar.gz .tar.gz)
@@ -722,7 +735,7 @@ jobs:
             echo 'Pre-signed tarball — extract and run, no signing needed:'
             echo ''
             echo '```bash'
-            echo "curl -fsSL -o bun.tar.gz https://github.com/jx-bit/bun/releases/download/latest/$TARBALL_NAME.tar.gz"
+            echo "curl -fsSL -o bun.tar.gz https://github.com/jx-bit/bun/releases/download/$RELEASE_TARGET/$TARBALL_NAME.tar.gz"
             echo "tar xzf bun.tar.gz && ./$TARBALL_NAME/bun --version"
             echo '```'
             echo ''
@@ -748,19 +761,20 @@ jobs:
             echo ''
             echo '### Release Notes'
             echo ''
-            echo '[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/latest/README.md)'
+            echo "[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/$RELEASE_TARGET/README.md)"
             echo ''
           } > "$BODY"
 
       - name: Seed release-docs placeholder
         # Same contract as the other flows: the latest body links to
-        # releases/latest/README.md on release-docs — seed a rolling
+        # releases/$RELEASE_TARGET/README.md on release-docs — seed the rolling
+        # (latest) or versioned (tag) placeholder, idempotent —
         # placeholder once (idempotent; developer edits afterwards).
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          DOC="releases/latest/README.md"
-          PLACEHOLDER='# latest（五平台滚动发布线）
+          DOC="releases/$RELEASE_TARGET/README.md"
+          PLACEHOLDER="# $RELEASE_TARGET（OHOS 发布线）
 
           > 占位文档 —— 发布流水线自动生成，等待开发者补充。
           > 此文档描述滚动线的当前状态（在途变更、已知问题等），
@@ -776,7 +790,7 @@ jobs:
               exit 0
             fi
             if gh api --method PUT "repos/${{ github.repository }}/contents/${DOC}" \
-                -f message="docs: seed placeholder for latest" \
+                -f message="docs: seed placeholder for $RELEASE_TARGET" \
                 -f branch=release-docs \
                 -f content="$(printf '%s\n' "$PLACEHOLDER" | base64 -w0)" >/dev/null 2>&1; then
               echo "✅ seeded ${DOC}"
@@ -788,17 +802,25 @@ jobs:
           echo "❌ could not seed ${DOC} after 3 attempts"
           exit 1
 
-      - name: Publish rolling latest
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          BODY: /tmp/latest-body.md
         run: |
-          if gh release view latest --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            gh release upload latest products/* --repo "${{ github.repository }}" --clobber
-            gh release edit latest --repo "${{ github.repository }}" \
-              --notes-file /tmp/latest-body.md --title "Bun OHOS Cross-Build (latest)"
+          TITLE="Bun OHOS Cross-Build (latest)"
+          [ "$RELEASE_TARGET" = "latest" ] || TITLE="Bun OHOS $RELEASE_TARGET"
+          if [ "$RELEASE_TARGET" = "latest" ]; then
+            if gh release view "$RELEASE_TARGET" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+              gh release upload latest products/* --repo "${{ github.repository }}" --clobber
+              gh release edit latest --repo "${{ github.repository }}" \
+                --notes-file "$BODY" --title "$TITLE"
+            else
+              gh release create latest products/* --repo "${{ github.repository }}" \
+                --title "$TITLE" --notes-file "$BODY"
+            fi
           else
-            gh release create latest products/* --repo "${{ github.repository }}" \
-              --title "Bun OHOS Cross-Build (latest)" --notes-file /tmp/latest-body.md
+            gh release create "$RELEASE_TARGET" products/* --repo "${{ github.repository }}" \
+              --title "$TITLE" --notes-file "$BODY"
           fi
 
       - name: Verify latest release assets
@@ -807,10 +829,10 @@ jobs:
         run: |
           TAR_NAME=$(basename products/bun-ohos-aarch64-*.tar.gz)
           for product in bun-ohos-aarch64-unsigned "$TAR_NAME" bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64; do
-            gh release view latest --repo "${{ github.repository }}" \
+            gh release view "$RELEASE_TARGET" --repo "${{ github.repository }}" \
               --json assets --jq '.assets[].name' | grep -qx -F "$product" || {
               echo "❌ product '$product' missing from latest"; exit 1; }
           done
-          gh api "repos/${{ github.repository }}/contents/releases/latest/README.md?ref=release-docs" >/dev/null 2>&1 \
-            || { echo "❌ release-docs placeholder missing for latest"; exit 1; }
-          echo "✅ latest release: 4 platform products + OHOS unsigned variant + pre-signed tarball + release-docs placeholder verified"
+          gh api "repos/${{ github.repository }}/contents/releases/$RELEASE_TARGET/README.md?ref=release-docs" >/dev/null 2>&1 \
+            || { echo "❌ release-docs placeholder missing for $RELEASE_TARGET"; exit 1; }
+          echo "✅ $RELEASE_TARGET: 4 platform products + OHOS unsigned variant + pre-signed tarball + release-docs placeholder verified"
