@@ -72,6 +72,25 @@ Permission denied = 损坏重下。
 （代理/PATH/自签/损坏四条提示由 tar.gz README 与资产名承载）。纯文本变更，
 资产/门禁不动，无"未修复即红"门禁（body 文本不承重）。 页面布局微调本身在 [#84](https://github.com/jx-bit/bun/pull/84) 合并（a09fe1f10a），但免责声明精简与其合并竞态未赶上——由 [#85](https://github.com/jx-bit/bun/pull/85) 以纯 body 文本补送（中英双语短句：非官方社区项目、社区开发者维护），替换原英文长段。
 
+## §后续：#86 打包契约被 jsc 合并冲掉 + 版本发布通道改走容器 lane（2026-09-24）
+
+jsc 分配器工作（#82 线）rebase 到交付线时，冲突解决把 #83 的打包契约冲掉了
+大块：`install-bun-ohos.sh` 复活（重新打包上传 + 锚点门禁回归）、裸签名二进制
+回归、build 通道 tar.gz 打包丢失、"Update ohos-latest release" 步骤回归（跨通道
+资产堆积复发）。用户随即打 tag `1.4.0_1`，而 tag 通道（ohos-release.yml）跑在
+**不存在的自托管设备**上——run 永远排队，release 根本产不出来。
+
+[#86](https://github.com/jx-bit/bun/pull/86) 两件事：
+1. **恢复打包契约**：三通道重建"签名 tar.gz + unsigned 裸"两件套 + 单 Quick
+   Install + 中英免责声明前置；并行会话的 WEBKIT_REF pin（6119947592b6）与
+   allocator 工作全部保留，零回退；
+2. **版本发布通道改走容器 lane**：ohos-release.yml 退役（无设备即无通道），
+   `ohos-build-github.yml` 增加 tag 触发（排除滚动 tag），publish 作业按
+   RELEASE_TARGET 参数化——tag push 产出与 latest 同构的 6 件产物 + 自动页面。
+
+门禁：发布门禁要求每通道 tar.gz + unsigned 两件，此类回归今后直接红。
+
+
 ---
 ---
 *立档：2026-09-24 | 分析者：Sisyphus | 依据：两 workflow 实读 + 本地 tar roundtrip + 用户拍板记录*
