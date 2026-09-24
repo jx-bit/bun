@@ -205,7 +205,16 @@ export PATH="$BIN_DIR_ABS:$PATH"
 # --- Verify & Sign ---
 
 info "Verifying installation..."
-if [ -x "$INSTALL_BIN" ]; then
+if [ ! -x "$INSTALL_BIN" ]; then
+  error "Installation failed: binary not found at $INSTALL_BIN"
+fi
+
+# Pre-signed release binaries run as-is — the kernel's exec-time check is the
+# authority. Only when it rejects the exec (unsigned legacy asset or corrupted
+# download) fall back to on-device signing.
+if VERSION=$("$INSTALL_BIN" --version 2>/dev/null); then
+  ok "Binary pre-signed — runs without on-device signing"
+else
   # Try to auto-sign if binary-sign-tool is available (OHOS device only)
   SIGN_TOOL=""
   for p in \
@@ -235,10 +244,9 @@ if [ -x "$INSTALL_BIN" ]; then
   fi
 
   VERSION=$("$INSTALL_BIN" --version 2>/dev/null || echo "unknown (may need signing)")
-  ok "bun $VERSION installed successfully! ($BUILD build → $(basename "$INSTALL_BIN"))"
-else
-  error "Installation failed: binary not found at $INSTALL_BIN"
 fi
+
+ok "bun $VERSION installed successfully! ($BUILD build → $(basename "$INSTALL_BIN"))"
 
 echo ""
 echo "  Installed: $INSTALL_BIN  ($BUILD build)"
