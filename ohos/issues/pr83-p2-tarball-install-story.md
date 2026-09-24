@@ -70,7 +70,7 @@ Permission denied = 损坏重下。
 合并）。[#84](https://github.com/jx-bit/bun/pull/84) 以纯 body 文本重构送达
 终态：Disclaimer + Known Limitations 前置，Quick Install 只留 tar 两行命令
 （代理/PATH/自签/损坏四条提示由 tar.gz README 与资产名承载）。纯文本变更，
-资产/门禁不动，无"未修复即红"门禁（body 文本不承重）。 免责声明同步精简为中英双语短句（非官方社区项目、社区开发者维护），替换原英文长段。
+资产/门禁不动，无"未修复即红"门禁（body 文本不承重）。 页面布局微调本身在 [#84](https://github.com/jx-bit/bun/pull/84) 合并（a09fe1f10a），但免责声明精简与其合并竞态未赶上——由 [#85](https://github.com/jx-bit/bun/pull/85) 以纯 body 文本补送（中英双语短句：非官方社区项目、社区开发者维护），替换原英文长段。
 
 ---
 ---
