@@ -485,6 +485,14 @@ jobs:
             echo ''
             echo 'This release is automatically updated with the latest build.'
             echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
+          echo ''
             echo '### Quick Install (OHOS device)'
             echo ''
             echo 'Pre-signed tarball — extract and run, no signing needed:'
@@ -494,10 +502,6 @@ jobs:
             echo "tar xzf bun.tar.gz && ./$TARBALL_NAME/bun --version"
             echo '```'
             echo ''
-            echo '- GitHub unreachable from your network? Prefix the URL with `https://ghfast.top/`.'
-            echo '- Add to PATH: `export PATH="$PWD:$PATH"` (from the extracted directory).'
-            echo "- Raw unsigned build output: \`bun-ohos-aarch64-github-unsigned\` — sign yourself with \`binary-sign-tool sign -inFile bun -outFile bun -selfSign 1\`."
-            echo '- Exec fails with "Permission denied" after `chmod +x`? The download was corrupted — re-download.'
             echo ''
             echo '### Release Notes'
             echo ''
@@ -507,13 +511,6 @@ jobs:
             echo ''
             echo "Built from: v$VERSION @$COMMIT (ohos-aarch64)"
             echo ''
-            echo '### Disclaimer'
-            echo ''
-            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
-            echo ''
-            echo '### Known Limitations'
-            echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > /tmp/release-body.md
           echo "✅ Release assets: bun-ohos-aarch64-github-unsigned + $TARBALL_NAME.tar.gz (v$VERSION @ $COMMIT)"
 
@@ -710,6 +707,14 @@ jobs:
           TARBALL_NAME=$(basename products/bun-ohos-aarch64-*.tar.gz .tar.gz)
           {
             printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
+          echo ''
             echo '### Quick Install (OHOS device)'
             echo ''
             echo 'Pre-signed tarball — extract and run, no signing needed:'
@@ -719,10 +724,6 @@ jobs:
             echo "tar xzf bun.tar.gz && ./$TARBALL_NAME/bun --version"
             echo '```'
             echo ''
-            echo '- GitHub unreachable from your network? Prefix the URL with `https://ghfast.top/`.'
-            echo '- Add to PATH: `export PATH="$PWD:$PATH"` (from the extracted directory).'
-            echo "- Raw unsigned build output: \`bun-ohos-aarch64-unsigned\` — sign yourself with \`binary-sign-tool sign -inFile bun -outFile bun -selfSign 1\`."
-            echo '- Exec fails with "Permission denied" after `chmod +x`? The download was corrupted — re-download.'
             echo ''
             echo '### Products'
             echo ''
@@ -747,13 +748,6 @@ jobs:
             echo ''
             echo '[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/latest/README.md)'
             echo ''
-            echo '### Disclaimer'
-            echo ''
-            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
-            echo ''
-            echo '### Known Limitations'
-            echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > "$BODY"
 
       - name: Seed release-docs placeholder
