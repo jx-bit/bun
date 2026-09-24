@@ -60,16 +60,43 @@ SHASUMS256 清单（#76 已关闭——预签后内核 exec 验签本身就是�
 - 未修复形态：直接下载的签名版仍不存在（用户只剩毛坯）；无 `-unsigned` 变体时
   自行签名/二次分发者只能拿被改过的文件。均不可由现有 CI 捕获，以真机冒烟为准。
 
-## 5. 与 social4hyq 实现的对比
+## 5. 与参照 remote 的实现对比（代码级实证，2026-09-24 补）
 
-同一"出生即有效"理念（codesign primer §5.2），应用面不同：
+理念层对比（"出生即有效"延伸到发布链、self-sign 内容自包含、消费版内核强制验签）
+见 codesign primer §5.2 与下表前身；本节为 2026-09-24 按用户要求对 remote 实际
+代码的取证补充，服务于"bin CLI 放 src/ 是否成立"的设计质询。
 
-| 项 | social4hyq | 本 PR 后的我方 |
-|---|---|---|
-| 理念 | 所有写路径签名（compile/install/dlopen 落盘即签），spawn 零签名操作 | 同一理念延伸到**发布链**：binary 在 CI 打包时签名，用户解包即所得 |
-| bun 本体分发 | Harmonybrew bottle，链路上已签 | GitHub release 资产，此前无签名 → 本次补上 |
-| 签名材料 | brew 体系内自洽 | self-sign 内容自包含（无私钥），与设备端 binary-sign-tool 产物逐位对齐（`src/ohos_sign` 与上游工具逐位对齐，见 primer §2.2） |
-| 内核约束 | 其环境签名未强制 | 消费版强制验签（0902 轮 72 文件 EACCES 铁证）——预签正是对这一强制的正面满足 |
+### 5.1 social4hyq/ohos-bun @ ohos-aarch64
+
+**本 PR 的 bin CLI 设计有族谱依据，不是新架构元素。** 其树内存在一模一样的
+crate 结构：`src/ohos_sign/{Cargo.toml, src/{lib,elf,merkle,sha256,descriptor}.rs,
+tests/*}` + **`src/bin/ohos_selfsign.rs`（[[bin]] 目标）**。实测其 CLI（117 行，
+`gh api` 取原文件）：
+
+- 只有 **sign / check / strip 三个子命令**——**没有 verify**；
+- usage 字符串与我们旧版**逐字相同**（`"sign  <input> [--output <out>] [--force]..."`），
+  即 `args[0]` 无条件当文件名的 flag 前置解析坑**在参照线原样存在**——本 PR 的
+  解析修复是对派生来源的缺陷修正，非自创行为；
+- 其 GitHub CI（ohos-full-test.yml）**零签名调用**——bun 本体分发走 Harmonybrew
+  bottle，签名在 brew 安装块（仓库外）。CI 无签名与 codesign primer §5 一致
+  （其容器无内核强制）。
+
+### 5.2 springmin/bun @ ohos-aarch64（build-bun-ohos-native.yml）
+
+**"CI 签名后打包上传"有直接先例。** 其 runner 即鸿蒙 PC 本体，流程：
+原生构建 → `binary-sign-tool sign -selfSign 1` 签 bun 产物（workflow 527-532 行）
+→ chmod 755 → Verify binary → `tar czf` **签好的** bun → 上传 release tarball。
+即其发布资产**出生即已签**，只是签名发生在设备侧（runner = 设备），工具是系统级
+binary-sign-tool（rustc/cargo/build-script 本身都签，esbuild 有专门 workaround）。
+
+### 5.3 结论
+
+| 设计点 | 家族依据 |
+|---|---|
+| `src/ohos_sign/src/bin/ohos_selfsign.rs` 位置与形态 | 三代同构（social4hyq / ljy9812 / 我们），本 PR 未引入新架构元素 |
+| CI 内签名后再打包 | springmin 同语义（设备侧工具）；social4hyq 不签是因分发走 bottle（仓库外） |
+| `verify` 内核等价门禁 | 全家族唯一增量——参照线签名器是仓库外/系统级工具（无需自证），我们是 in-repo 代码，verify 恰好补上这一缺口 |
+| flag 前置参数解析修复 | 参照线 CLI 带着同一缺陷；CI flag 前置写法必炸，属派生缺陷修正 |
 
 ## 6. 发布契约增量
 
