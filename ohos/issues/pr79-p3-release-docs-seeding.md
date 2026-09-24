@@ -1,8 +1,11 @@
 # P3: 发布文档自动占位——release-docs 专用分支 + 播种流水线
 > **关联 PR**：[#79](https://github.com/jx-bit/bun/pull/79)
 
-> 用户需求：每个 release 发布时自动在专用分支生成同名文件夹 + 占位 README，
-> 开发者事后直接编辑填充（"自动存在占位"）。
+> 用户需求三轮迭代：(1) 每个 release 发布时自动在专用分支生成同名文件夹 +
+> 占位 README，开发者事后直接编辑填充（"自动存在占位"）；(2) latest 的
+> Products 表很好——所有 release 统一布局（tag 补 Products、latest/ohos-latest
+> 补 Release Notes）；(3) 主页面需体现非商业独立性声明（与华为/OpenHarmony
+> 社区无隶属、非附属软件非售后配套，可英文）与已知限制提示（细节指向详细文档）。
 
 ## 1. 背景：为什么是专用分支（三方案权衡记录）
 
@@ -31,6 +34,15 @@
    关 `generate_release_notes`（官方也不用）、加 "Release Notes" 链接。
 4. **门禁扩展**：Verify published releases 增加占位文档存在性断言——body
    链接的目标与资产同级验收，断链即红。
+5. **统一页面布局**（所有 release，五段式）：Quick Install（内联自配对）→
+   Products 表（tag 流新增，打包时动态生成含体积）→ Release Notes 链接 →
+   Disclaimer → Known Limitations。latest 的 Quick Install 提到最前、标题
+   层级统一为 ###；tag 流 body 改为动态生成（body_path，产物 /tmp/bun-release-body.md）。
+6. **Disclaimer（英文）**：独立、非商业社区移植，as-is 无担保；非任何华为
+   产品的附属软件或售后配套；与 OpenHarmony 社区及华为公司均无隶属。
+7. **Known Limitations**：主页面提示鸿蒙系统限制（沙箱/签名/内核差异）导致
+   部分功能缺失或降级，细节指向详细文档；三个占位模板均带"已知限制"骨架段
+   供开发者填写。
 
 ## 3. 用户影响速览
 
@@ -39,12 +51,15 @@
 | 占位 | push tag 发布（如 `1.4.0_1`） | release 页"详细说明"链接即刻有效（占位待补） | 每次发布 | —（满足） |
 | 编辑 | 事后补充/修订文档 | 直推 release-docs 即生效，零仪式 | 随意 | —（满足） |
 | 断链 | 发布异常/文档丢失 | CI 红（占位与资产同级门禁） | 异常时 | 中（可发现） |
+| 合规 | 外部用户查看任意 release 页 | 页面明确非商业独立声明与已知限制提示，不会被误认为华为官方配套 | 每次浏览 | —（满足） |
 
 ## 4. 验证
 
-- 实弹三路径（对真实分支）：创建（seeded）→ 幂等（already exists — untouched）
-  → 5xx 重试（首跑 HTTP 500、重试成功——正是加重试的实证）；测试痕迹已还原，
-  分支仅剩根 README。
+- 实弹三路径（对真实分支）：创建（seeded，双文档）→ 幂等（already exists —
+  untouched，双跳过）→ 5xx 重试（首跑 HTTP 500、重试成功——正是加重试的
+  实证）；测试痕迹已还原，分支仅剩根 README。
+- tag/latest 两处 body 生成器本地提取并端到端渲染，确认五段式统一布局
+  （含 Disclaimer/Known Limitations 落版）。
 - workflow YAML 解析 + 全部 run 块 `bash -n` 通过；播种 python `ast.parse`
   通过并经 contents API 端到端执行。
 - check-pr.sh 全项 PASS（单 commit、message/body 无违禁引用、diff 白名单、
