@@ -22,9 +22,13 @@
 # local:* (only Bun__dlopen exported), v8 is not referenced → runs on device
 # (same as self-hosted).
 #
-# Signing: NOT done in CI. install-bun-ohos.sh signs the binary on the OHOS
-# device at install time (binary-sign-tool -selfSign). Matches the prior
-# bare-ubuntu github-hosted build (build 25), which ran on device this way.
+# Signing: the release binary is PRE-SIGNED here with the ohos-selfsign CLI
+# (src/ohos_sign — pure-Rust, content-based self-signature, no cert needed).
+# Two variants ship side by side, user's choice: the raw build output stays
+# untouched as the -unsigned asset; the signed copy takes the canonical asset
+# name (recommended, runs out of the box). install-bun-ohos.sh stays as the
+# convenience layer (PATH setup + A/B variants) and still signs on device via
+# binary-sign-tool as a fallback for unsigned/legacy assets.
 
 name: OHOS Build (GitHub-hosted, social4hyq container)
 
@@ -403,33 +407,91 @@ jobs:
           readelf --dyn-syms "$OUT" 2>/dev/null | grep -E "GLOBAL.*T " | head -5
           echo "=== validation OK ==="
 
+      # ── Pre-sign the release binary (variant copy) ───────────────
+      # ohos-selfsign (src/ohos_sign, std-only Rust) writes the .codesign
+      # section the OHOS kernel validates at exec: same bytes the device-side
+      # binary-sign-tool produces. Built OUTSIDE the workspace (see step
+      # body): configure generates .cargo/config.toml with a container-only
+      # linker that does not exist on this runner.
+      - name: Pre-sign binary (out-of-the-box release assets)
+        if: success()
+        run: |
+          set -e
+          SIGNER=/tmp/ohos-selfsign
+          if [ ! -x "$SIGNER" ]; then
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="$HOME/.cargo/bin:$PATH"
+            fi
+            # Standalone copy: configure generates .cargo/config.toml with a
+            # container-only linker (Harmonybrew llvm@21) absent on this
+            # runner; outside the workspace cargo uses the default linker.
+            # The crate has zero dependencies — no registry access needed.
+            rm -rf /tmp/ohos_sign-build
+            cp -r src/ohos_sign /tmp/ohos_sign-build
+            (cd /tmp/ohos_sign-build && cargo build --release --bin ohos-selfsign)
+            cp /tmp/ohos_sign-build/target/release/ohos-selfsign "$SIGNER"
+          fi
+          # --force: strip + re-sign if a stale section ever sneaks in (idempotent).
+          "$SIGNER" sign --force --output build/release-ohos/bun-signed build/release-ohos/bun
+          # Kernel-equivalent gate (file_size + merkle root recompute), not
+          # just section presence — an invalid descriptor must fail here,
+          # not on devices as EACCES.
+          "$SIGNER" verify build/release-ohos/bun-signed
+          echo "✅ signed variant ready (unsigned build output kept alongside)"
+
       - name: Prepare github-hosted release asset
         if: success()
         id: gh_release
         run: |
           BIN=build/release-ohos/bun
-          test -f "$BIN" || { echo "FATAL: no bun binary to release"; exit 1; }
+          BIN_SIGNED=build/release-ohos/bun-signed
+          test -f "$BIN_SIGNED" || { echo "FATAL: no signed bun binary to release (Pre-sign step missing?)"; exit 1; }
           VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
           COMMIT=$(git rev-parse --short HEAD)
-          cp "$BIN" /tmp/bun-ohos-aarch64-github
+          # Canonical name carries the SIGNED binary (recommended path);
+          # the raw build output ships as the -unsigned variant.
+          cp "$BIN_SIGNED" /tmp/bun-ohos-aarch64-github
+          cp "$BIN" /tmp/bun-ohos-aarch64-github-unsigned
           cp ohos/fulltest/install-bun-ohos.sh /tmp/install-bun-ohos.sh
           {
             echo "asset_path=/tmp/bun-ohos-aarch64-github"
+            echo "unsigned_asset_path=/tmp/bun-ohos-aarch64-github-unsigned"
             echo "script_path=/tmp/install-bun-ohos.sh"
             echo "body_path=/tmp/release-body.md"
             echo "commit=$COMMIT"
           } >> "$GITHUB_OUTPUT"
-          # Release body: install one-liner + build provenance (reference
-          # release-page convention).
           {
             echo '## Latest Bun for HarmonyOS (OHOS) aarch64'
             echo ''
             echo 'This release is automatically updated with the latest build.'
             echo ''
+            echo '### Out-of-the-box (recommended)'
+            echo ''
+            echo 'The binary ships pre-signed — download, make executable, run:'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64-github'
+            echo 'chmod +x bun && ./bun --version'
+            echo '```'
+            echo ''
+            echo 'If exec fails with "Permission denied" after `chmod +x`, the'
+            echo 'download was corrupted — re-download (the embedded signature'
+            echo 'is what the kernel validates).'
+            echo ''
             echo '### Quick Install'
             echo ''
             echo '```bash'
             echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo '```'
+            echo ''
+            echo '### Variants'
+            echo ''
+            echo 'Prefer to sign on the device yourself? Download the raw build'
+            echo 'output instead — `bun-ohos-aarch64-github-unsigned` — and sign:'
+            echo ''
+            echo '```bash'
+            echo 'binary-sign-tool sign -inFile bun -outFile bun -selfSign 1'
             echo '```'
             echo ''
             echo '### Release Notes'
@@ -494,7 +556,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bun-ohos-aarch64-github
-          path: build/release-ohos/bun
+          path: |
+            build/release-ohos/bun
+            build/release-ohos/bun-signed
           retention-days: 90
 
       - name: Upload github-hosted binary to ohos-latest release
@@ -508,20 +572,21 @@ jobs:
           body_path: /tmp/release-body.md
           files: |
             ${{ steps.gh_release.outputs.asset_path }}
+            ${{ steps.gh_release.outputs.unsigned_asset_path }}
             ${{ steps.gh_release.outputs.script_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify ohos-latest release assets
         # Publish gate: the one-liner target must exist — script anchors
-        # unchanged (verbatim repo copy) and both assets uploaded.
+        # unchanged (verbatim repo copy) and all assets uploaded.
         if: success() && github.ref == 'refs/heads/ohos-aarch64'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           grep -qF 'RELEASE_TAG="ohos-latest"' /tmp/install-bun-ohos.sh || { echo "❌ rolling script RELEASE_TAG drifted"; exit 1; }
           grep -qF 'BUN_INSTALL_BUILD:-github' /tmp/install-bun-ohos.sh || { echo "❌ rolling script default build drifted"; exit 1; }
-          for asset in bun-ohos-aarch64-github install-bun-ohos.sh; do
+          for asset in bun-ohos-aarch64-github bun-ohos-aarch64-github-unsigned install-bun-ohos.sh; do
             gh release view ohos-latest --repo "${{ github.repository }}" \
               --json assets --jq '.assets[].name' | grep -qx -F "$asset" || {
               echo "❌ asset '$asset' missing from ohos-latest"; exit 1; }
@@ -579,11 +644,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download products (same run, one directory per artifact)
-        # upload-artifact@v4 stores a single-file `path` at the artifact ROOT
-        # (build/release-ohos/bun → artifact root `bun`), so every linux/darwin
-        # artifact is a file literally named `bun`. merge-multiple would extract
-        # them all into one directory and each artifact would overwrite the
-        # previous — download each into its own subdirectory instead.
+        # upload-artifact@v4 stores `path` entries at the artifact ROOT by
+        # basename (build/release-ohos/bun → root `bun`; the pre-sign step
+        # adds `bun-signed`), so every linux/darwin artifact is a file
+        # literally named `bun`. merge-multiple would extract them all into
+        # one directory and each artifact would overwrite the previous —
+        # download each into its own subdirectory instead.
         uses: actions/download-artifact@v4
         with:
           name: bun-ohos-aarch64-github
@@ -598,7 +664,10 @@ jobs:
       - name: Stage products
         run: |
           mkdir -p products
-          cp dist/ohos/bun                              products/bun-ohos-aarch64
+          # OHOS artifact holds both variants: the signed copy takes the
+          # canonical latest asset, the raw build output ships as -unsigned.
+          cp dist/ohos/bun-signed                       products/bun-ohos-aarch64
+          cp dist/ohos/bun                              products/bun-ohos-aarch64-unsigned
           cp dist-cross/bun-cross-linux-x64/bun         products/bun-linux-x64
           cp dist-cross/bun-cross-linux-arm64/bun       products/bun-linux-arm64
           cp dist-cross/bun-cross-windows-x64/bun.exe   products/bun-windows-x64.exe
@@ -619,6 +688,18 @@ jobs:
           BODY=/tmp/latest-body.md
           {
             printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
+            echo '### Out-of-the-box (recommended, OHOS device)'
+            echo ''
+            echo 'The OHOS binary ships pre-signed — download, make executable, run:'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/latest/bun-ohos-aarch64'
+            echo 'chmod +x bun && ./bun --version'
+            echo '```'
+            echo ''
+            echo 'A raw unsigned variant (`bun-ohos-aarch64-unsigned`) is attached'
+            echo 'for device-side signing.'
+            echo ''
             echo '### Quick Install (OHOS device)'
             echo ''
             echo '```bash'
@@ -633,7 +714,8 @@ jobs:
               name=$(basename "$f")
               size=$(du -h "$f" | cut -f1)
               case "$name" in
-                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane' ;;
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane (pre-signed)' ;;
+                bun-ohos-aarch64-unsigned) target='OHOS (HarmonyOS) aarch64'; build='container lane (no .codesign)' ;;
                 install-bun-ohos.sh) target='OHOS installer';            build='paired to this release' ;;
                 bun-linux-x64)       target='Linux x86_64 (glibc)';    build='cross (aarch64 host)' ;;
                 bun-linux-arm64)     target='Linux arm64 (glibc)';     build='native (arm64 host)' ;;
@@ -713,11 +795,11 @@ jobs:
           # Staged-script pairing (the exact bytes uploaded above).
           grep -qF 'RELEASE_TAG="latest"' products/install-bun-ohos.sh || { echo "❌ latest script RELEASE_TAG not latest"; exit 1; }
           grep -qF 'BUN_INSTALL_BUILD:-self' products/install-bun-ohos.sh || { echo "❌ latest script default build not self"; exit 1; }
-          for product in bun-ohos-aarch64 bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64 install-bun-ohos.sh; do
+          for product in bun-ohos-aarch64 bun-ohos-aarch64-unsigned bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64 install-bun-ohos.sh; do
             gh release view latest --repo "${{ github.repository }}" \
               --json assets --jq '.assets[].name' | grep -qx -F "$product" || {
               echo "❌ product '$product' missing from latest"; exit 1; }
           done
           gh api "repos/${{ github.repository }}/contents/releases/latest/README.md?ref=release-docs" >/dev/null 2>&1 \
             || { echo "❌ release-docs placeholder missing for latest"; exit 1; }
-          echo "✅ latest release: 5 products + paired installer + release-docs placeholder verified"
+          echo "✅ latest release: 5 products (+OHOS unsigned variant) + paired installer + release-docs placeholder verified"

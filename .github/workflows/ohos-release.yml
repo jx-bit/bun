@@ -1,18 +1,21 @@
 # Bun OHOS Release Workflow
 #
-# Builds, optionally signs, and publishes a Bun binary for HarmonyOS (OHOS).
+# Builds, pre-signs, and publishes a Bun binary for HarmonyOS (OHOS).
 # Creates a GitHub Release with:
-#   - bun-ohos-aarch64          (raw binary for curl install)
-#   - bun-ohos-aarch64-*.tar.gz (versioned archive)
-#   - install-bun-ohos.sh       (curl install script)
+#   - bun-ohos-aarch64            (pre-signed binary — runs out of the box)
+#   - bun-ohos-aarch64-unsigned   (raw build output, sign yourself on device)
+#   - bun-ohos-aarch64-*.tar.gz   (versioned archive, pre-signed bun inside)
+#   - install-bun-ohos.sh         (curl install script)
 #
 # Triggers:
 #   - Tag push: ANY tag (rolling ohos-latest/latest and ohos-full-v* excluded)
 #   - Manual: workflow_dispatch
 #
-# Signing (optional):
-#   Requires Java + binary-sign-tool.jar + keystore (.p12).
-#   If any component is missing, the unsigned binary is released.
+# Signing: the binary is pre-signed with the ohos-selfsign CLI (src/ohos_sign
+# — pure-Rust, content-based self-signature, no cert needed) so the canonical
+# asset runs on device out of the box; the unsigned variant ships alongside
+# for users who prefer device-side signing. install-bun-ohos.sh still signs
+# on device via binary-sign-tool as a fallback for unsigned/legacy assets.
 
 name: OHOS Release
 
@@ -244,9 +247,34 @@ jobs:
           echo "✅ Binary validation passed"
 
       # ===== Signing =====
-      # binary-sign-tool is an OHOS-only binary (needs libc++.so from HarmonyOS).
-      # It cannot run on the openEuler build environment.
-      # Signing is done on the OHOS device after installation.
+      # Pre-signed here with ohos-selfsign (src/ohos_sign, std-only Rust):
+      # the device-side binary-sign-tool cannot run on openEuler, and the
+      # self-signature is content-based (file_size + merkle root), so the
+      # same bytes work on any OHOS device out of the box.
+      # Two variants ship side by side (user's choice): the build output
+      # stays UNTOUCHED as the -unsigned asset; the signed copy takes the
+      # canonical asset name (recommended, runs without on-device signing).
+
+      - name: Pre-sign binary (out-of-the-box release assets)
+        working-directory: bun
+        run: |
+          set -e
+          command -v cargo >/dev/null 2>&1 || export PATH="$HOME/.cargo/bin:$PATH"
+          # Standalone copy: configure generates .cargo/config.toml with a
+          # linker for the ninja build's OHOS-target setup; outside the
+          # workspace cargo uses the default linker. The crate has zero
+          # dependencies — no registry access needed.
+          rm -rf /tmp/ohos_sign-build
+          cp -r src/ohos_sign /tmp/ohos_sign-build
+          (cd /tmp/ohos_sign-build && cargo build --release --bin ohos-selfsign)
+          SIGNER=/tmp/ohos_sign-build/target/release/ohos-selfsign
+          # --force: strip + re-sign if a stale section ever sneaks in.
+          "$SIGNER" sign --force --output build/release-ohos/bun-signed build/release-ohos/bun
+          # Kernel-equivalent gate (file_size + merkle root recompute), not
+          # just section presence — an invalid descriptor must fail here,
+          # not on devices as EACCES.
+          "$SIGNER" verify build/release-ohos/bun-signed
+          echo "✅ signed variant ready (unsigned build output kept alongside)"
 
       # ===== Package & Release =====
 
@@ -263,13 +291,16 @@ jobs:
           RELEASE_DIR=/tmp/bun-release
           rm -rf $RELEASE_DIR && mkdir -p $RELEASE_DIR
 
-          # 1. Raw binary (fixed name for curl install)
-          cp $BIN $RELEASE_DIR/bun-ohos-aarch64
+          # 1. Raw binaries: canonical name = SIGNED (recommended, runs
+          #    as-is); unsigned raw build output ships as -unsigned variant
+          #    (device-side signing, user's choice).
+          cp build/release-ohos/bun-signed $RELEASE_DIR/bun-ohos-aarch64
+          cp $BIN $RELEASE_DIR/bun-ohos-aarch64-unsigned
 
-          # 2. Versioned tar.gz
+          # 2. Versioned tar.gz (inner bun = signed canonical pairing)
           ARCHIVE_NAME="bun-ohos-aarch64-${VERSION}-${COMMIT}"
           mkdir -p $RELEASE_DIR/$ARCHIVE_NAME
-          cp $BIN $RELEASE_DIR/$ARCHIVE_NAME/bun
+          cp build/release-ohos/bun-signed $RELEASE_DIR/$ARCHIVE_NAME/bun
           # Tag-inject the install script: RELEASE_TAG points at THIS tag's
           # assets and the default build becomes "self" — this release ships
           # only the self-hosted binary, the rolling "github" default 404s here.
@@ -279,11 +310,18 @@ jobs:
           cat > $RELEASE_DIR/$ARCHIVE_NAME/README.md << 'EOF'
           # Bun for HarmonyOS (OHOS) aarch64
 
-          Unpack and run the bundled installer — it installs the bun shipped
-          in this archive (no download) and self-signs it on device:
+          The bundled bun is pre-signed — run it directly:
 
               tar xzf bun-ohos-aarch64-*.tar.gz
+              ./bun-ohos-aarch64-*/bun --version
+
+          Or use the bundled installer, which also adds bun to PATH:
+
               sh bun-ohos-aarch64-*/install-bun-ohos.sh
+
+          If exec fails with "Permission denied" after `chmod +x bun`, the
+          archive was corrupted — re-download it (the embedded signature is
+          what the kernel validates at exec).
           EOF
           cd $RELEASE_DIR
           tar czf ${ARCHIVE_NAME}.tar.gz $ARCHIVE_NAME/
@@ -302,10 +340,11 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
           echo "binary_path=$RELEASE_DIR/bun-ohos-aarch64" >> $GITHUB_OUTPUT
+          echo "unsigned_binary_path=$RELEASE_DIR/bun-ohos-aarch64-unsigned" >> $GITHUB_OUTPUT
           echo "archive_path=$RELEASE_DIR/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
           echo "script_path=$RELEASE_DIR/install-bun-ohos.sh" >> $GITHUB_OUTPUT
           echo "rolling_script_path=$RELEASE_DIR/rolling/install-bun-ohos.sh" >> $GITHUB_OUTPUT
-          echo "✅ Packaged: bun-ohos-aarch64 + ${ARCHIVE_NAME}.tar.gz + install-bun-ohos.sh"
+          echo "✅ Packaged: bun-ohos-aarch64 (signed) + -unsigned + ${ARCHIVE_NAME}.tar.gz + install-bun-ohos.sh"
 
       - name: Generate release body
         id: body
@@ -321,10 +360,32 @@ jobs:
             echo "Version: ${{ steps.package.outputs.version }}"
             echo "Commit: ${{ github.sha }}"
             echo ''
+            echo '### Out-of-the-box (recommended)'
+            echo ''
+            echo 'The binary ships pre-signed — download, make executable, run:'
+            echo ''
+            echo '```bash'
+            echo "curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/${TAG}/bun-ohos-aarch64"
+            echo 'chmod +x bun && ./bun --version'
+            echo '```'
+            echo ''
+            echo 'If exec fails with "Permission denied" after `chmod +x`, the'
+            echo 'download was corrupted — re-download (the embedded signature'
+            echo 'is what the kernel validates).'
+            echo ''
             echo '### Quick Install'
             echo ''
             echo '```bash'
             echo "curl -fsSL https://github.com/jx-bit/bun/releases/download/${TAG}/install-bun-ohos.sh | sh"
+            echo '```'
+            echo ''
+            echo '### Variants'
+            echo ''
+            echo 'Prefer signing on the device yourself? Download the raw build'
+            echo 'output `bun-ohos-aarch64-unsigned` and sign it:'
+            echo ''
+            echo '```bash'
+            echo 'binary-sign-tool sign -inFile bun -outFile bun -selfSign 1'
             echo '```'
             echo ''
             echo '### Products'
@@ -332,12 +393,14 @@ jobs:
             echo '| File | Target | Build | Size |'
             echo '|---|---|---|---|'
             for f in "$RELEASE_DIR/bun-ohos-aarch64" \
+                     "$RELEASE_DIR/bun-ohos-aarch64-unsigned" \
                      "$RELEASE_DIR/${{ steps.package.outputs.archive_name }}.tar.gz" \
                      "$RELEASE_DIR/install-bun-ohos.sh"; do
               name=$(basename "$f")
               size=$(du -h "$f" | cut -f1)
               case "$name" in
-                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='self-hosted lane' ;;
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='self-hosted lane (pre-signed)' ;;
+                bun-ohos-aarch64-unsigned) target='OHOS (HarmonyOS) aarch64'; build='self-hosted lane (no .codesign)' ;;
                 install-bun-ohos.sh) target='OHOS installer';            build='paired to this release' ;;
                 *.tar.gz)            target='OHOS archive';              build='binary + paired installer + README' ;;
                 *)                   target='?';                         build='?' ;;
@@ -364,6 +427,7 @@ jobs:
         with:
           files: |
             ${{ steps.package.outputs.binary_path }}
+            ${{ steps.package.outputs.unsigned_binary_path }}
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.script_path }}
           name: "Bun OHOS ${{ github.ref_name }}"
@@ -376,12 +440,25 @@ jobs:
           name: "Bun OHOS (Latest)"
           files: |
             ${{ steps.package.outputs.binary_path }}
+            ${{ steps.package.outputs.unsigned_binary_path }}
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.rolling_script_path }}
           body: |
             ## Latest Bun for HarmonyOS (OHOS) aarch64
 
             This release is automatically updated with the latest build.
+
+            ### Out-of-the-box (recommended)
+
+            The binary ships pre-signed — download, make executable, run:
+
+            ```bash
+            curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64
+            chmod +x bun && ./bun --version
+            ```
+
+            A raw unsigned variant (`bun-ohos-aarch64-unsigned`) is attached
+            for device-side signing.
 
             ### Quick Install
 
@@ -515,7 +592,7 @@ jobs:
               except urllib.error.HTTPError as e:
                   print(f"❌ release {rel} not readable (HTTP {e.code})")
                   sys.exit(1)
-          need = {"bun-ohos-aarch64", f"{archive}.tar.gz", "install-bun-ohos.sh"}
+          need = {"bun-ohos-aarch64", "bun-ohos-aarch64-unsigned", f"{archive}.tar.gz", "install-bun-ohos.sh"}
           for rel in (tag, "ohos-latest"):
               missing = need - release_assets(rel)
               if missing:
