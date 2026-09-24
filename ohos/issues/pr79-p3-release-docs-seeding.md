@@ -78,7 +78,7 @@
 Known Limitations 在页面上呈断续短行。**#80**（claude/ohos-release-doc-wrap，
 517c362774，独立 worktree 制作以避开并行未提交工作）将四个 body 生成器中两段
 各合并为整行（markdown 按视口流式排版），其合并触发的下次滚动发布自动治愈
-线上页面。
+线上页面。**#80 已合并（90d9dbb3eb，2026-09-24 03:57）**。
 
 ---
 *立档：2026-09-24 | 分析者：Sisyphus | 依据：三方案权衡 + contents API 实弹测试*
