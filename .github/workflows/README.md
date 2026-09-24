@@ -10,9 +10,9 @@
 
 | Workflow | 职责 | 触发 | 产物 |
 |---|---|---|---|
-| `ohos-build-github.yml` | 权威构建：容器通道全量构建（GitHub 托管 ARM） | 每次 push / PR 到交付分支 | `ohos-latest`（github 二进制+脚本）、`latest`（5 平台产品+脚本）；每个 release 的安装命令自指 |
+| `ohos-build-github.yml` | 权威构建：容器通道全量构建（GitHub 托管 ARM） | 每次 push / PR 到交付分支 | `ohos-latest`（github 二进制+脚本）、`latest`（5 平台产品+脚本）；统一页面布局（Quick Install / Products / Release Notes / Disclaimer+Known Limitations），各自的占位文档自动播种到 release-docs |
 | `ohos-build-rust.yml` | 快速反馈：自托管增量 Rust 构建（sccache） | push/PR 命中 Rust 源码路径 | 无（仅构建校验） |
-| `ohos-release.yml` | 版本发布：自托管构建 → GitHub release | 任意 tag push（滚动 tag 与 `ohos-full-v*` 除外） | `<tag>` release：二进制 + tar.gz 归档 + 配对安装脚本 |
+| `ohos-release.yml` | 版本发布：自托管构建 → GitHub release | 任意 tag push（滚动 tag 与 `ohos-full-v*` 除外） | `<tag>` release：二进制 + tar.gz 归档 + 配对安装脚本；统一页面布局（含 Disclaimer+Known Limitations），tag 与 ohos-latest 的占位文档自动播种到 release-docs（已存在不覆盖） |
 | `ohos-brew-deps-canary.yml` | 漂移哨兵：浮动 tap tip 日常验收 | 每日 cron | 运行结论：tip 可消费（打印 bump SHA）/ 不可消费（warning，保持 OHOS_CORE_PIN）；红 = 评估本身失败 |
 | `ohos-container-test.yml` | 容器内 JS 测试集（无设备，全 GitHub 托管） | 手动 / 本文件变更 | results.json（`--test-filter` 支持部分跑） |
 | `ohos-full-test.yml` | 两段式：自托管构建 → 容器测试 | 手动 / 本文件变更 | 测试报告 |

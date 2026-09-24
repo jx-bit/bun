@@ -432,11 +432,67 @@ jobs:
             echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
             echo '```'
             echo ''
+            echo '### Release Notes'
+            echo ''
+            echo '[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/ohos-latest/README.md)'
+            echo ''
             echo '### Version'
             echo ''
             echo "Built from: v$VERSION @$COMMIT (ohos-aarch64)"
+            echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is,'
+            echo 'with no warranty. It is not accessory software for, nor after-sales'
+            echo 'support of, any Huawei product, and has no affiliation with the'
+            echo 'OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel'
+            echo 'differences), some features are missing or degraded — see the release'
+            echo 'notes above for details.'
           } > /tmp/release-body.md
           echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
+
+      - name: Seed release-docs placeholder
+        # Same contract as the tag-release flow: the ohos-latest body links
+        # to releases/ohos-latest/README.md on release-docs — seed a rolling
+        # placeholder once (idempotent; developer edits afterwards via direct
+        # push). Re-probes before re-creating to cover transient
+        # contents-API 5xx.
+        if: success() && github.ref == 'refs/heads/ohos-aarch64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DOC="releases/ohos-latest/README.md"
+          PLACEHOLDER='# ohos-latest（滚动发布线）
+
+          > 占位文档 —— 发布流水线自动生成，等待开发者补充。
+          > 此文档描述滚动线的当前状态（在途变更、已知问题等），
+          > 直接编辑并 push 到 `release-docs` 分支，
+          > release 页面的链接会自动显示最新内容。
+
+          ## 已知限制
+
+          （鸿蒙系统限制导致的功能缺失/降级，具体条目……）'
+          for attempt in 1 2 3; do
+            if gh api "repos/${{ github.repository }}/contents/${DOC}?ref=release-docs" >/dev/null 2>&1; then
+              echo "✅ ${DOC} already exists — untouched"
+              exit 0
+            fi
+            if gh api --method PUT "repos/${{ github.repository }}/contents/${DOC}" \
+                -f message="docs: seed placeholder for ohos-latest" \
+                -f branch=release-docs \
+                -f content="$(printf '%s\n' "$PLACEHOLDER" | base64 -w0)" >/dev/null 2>&1; then
+              echo "✅ seeded ${DOC}"
+              exit 0
+            fi
+            echo "⚠️ attempt ${attempt} failed, retrying..."
+            [ "$attempt" = 3 ] || sleep $((5 * attempt))
+          done
+          echo "❌ could not seed ${DOC} after 3 attempts"
+          exit 1
 
       - name: Upload binary artifact
         if: success()
@@ -475,7 +531,9 @@ jobs:
               --json assets --jq '.assets[].name' | grep -qx -F "$asset" || {
               echo "❌ asset '$asset' missing from ohos-latest"; exit 1; }
           done
-          echo "✅ ohos-latest verified: install one-liner target present"
+          gh api "repos/${{ github.repository }}/contents/releases/ohos-latest/README.md?ref=release-docs" >/dev/null 2>&1 \
+            || { echo "❌ release-docs placeholder missing for ohos-latest"; exit 1; }
+          echo "✅ ohos-latest verified: install one-liner target + release-docs placeholder present"
 
       - name: Dump failure diagnostics
         if: failure()
@@ -559,12 +617,20 @@ jobs:
           ls -la products/
 
       - name: Generate release body
+        # Same layout as every other release page: Quick Install, Products,
+        # Release Notes (the release-docs placeholder is seeded below).
         run: |
           SHA='${{ github.sha }}'
           BODY=/tmp/latest-body.md
           {
             printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
-            echo '## Products'
+            echo '### Quick Install (OHOS device)'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/latest/install-bun-ohos.sh | sh'
+            echo '```'
+            echo ''
+            echo '### Products'
             echo ''
             echo '| File | Target | Build | Size |'
             echo '|---|---|---|---|'
@@ -583,12 +649,59 @@ jobs:
               printf '| %s | %s | %s | %s |\n' "$name" "$target" "$build" "$size"
             done
             echo ''
-            echo '## Quick Install (OHOS device)'
+            echo '### Release Notes'
             echo ''
-            echo '```bash'
-            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/latest/install-bun-ohos.sh | sh'
-            echo '```'
+            echo '[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/latest/README.md)'
+            echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is,'
+            echo 'with no warranty. It is not accessory software for, nor after-sales'
+            echo 'support of, any Huawei product, and has no affiliation with the'
+            echo 'OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel'
+            echo 'differences), some features are missing or degraded — see the release'
+            echo 'notes above for details.'
           } > "$BODY"
+
+      - name: Seed release-docs placeholder
+        # Same contract as the other flows: the latest body links to
+        # releases/latest/README.md on release-docs — seed a rolling
+        # placeholder once (idempotent; developer edits afterwards).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DOC="releases/latest/README.md"
+          PLACEHOLDER='# latest（五平台滚动发布线）
+
+          > 占位文档 —— 发布流水线自动生成，等待开发者补充。
+          > 此文档描述滚动线的当前状态（在途变更、已知问题等），
+          > 直接编辑并 push 到 `release-docs` 分支，
+          > release 页面的链接会自动显示最新内容。
+
+          ## 已知限制
+
+          （鸿蒙系统限制导致的功能缺失/降级，具体条目……）'
+          for attempt in 1 2 3; do
+            if gh api "repos/${{ github.repository }}/contents/${DOC}?ref=release-docs" >/dev/null 2>&1; then
+              echo "✅ ${DOC} already exists — untouched"
+              exit 0
+            fi
+            if gh api --method PUT "repos/${{ github.repository }}/contents/${DOC}" \
+                -f message="docs: seed placeholder for latest" \
+                -f branch=release-docs \
+                -f content="$(printf '%s\n' "$PLACEHOLDER" | base64 -w0)" >/dev/null 2>&1; then
+              echo "✅ seeded ${DOC}"
+              exit 0
+            fi
+            echo "⚠️ attempt ${attempt} failed, retrying..."
+            [ "$attempt" = 3 ] || sleep $((5 * attempt))
+          done
+          echo "❌ could not seed ${DOC} after 3 attempts"
+          exit 1
 
       - name: Publish rolling latest
         env:
@@ -615,4 +728,6 @@ jobs:
               --json assets --jq '.assets[].name' | grep -qx -F "$product" || {
               echo "❌ product '$product' missing from latest"; exit 1; }
           done
-          echo "✅ latest release: 5 products + paired installer verified"
+          gh api "repos/${{ github.repository }}/contents/releases/latest/README.md?ref=release-docs" >/dev/null 2>&1 \
+            || { echo "❌ release-docs placeholder missing for latest"; exit 1; }
+          echo "✅ latest release: 5 products + paired installer + release-docs placeholder verified"
