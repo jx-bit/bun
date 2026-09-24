@@ -71,5 +71,14 @@
 - 编辑 = 直接改该文件、push release-docs；release 页链接自动显示最新
 - 不删挪已发布的文档文件；可在仓库设置对该分支禁 force-push 加固
 
+## 6. §后续：#80 段落断行修复（2026-09-24）
+
+合并（9e48275b81）后线上页面暴露渲染问题：GitHub release 页的 markdown 把
+单个换行当**硬断行**（与 .md 文件不同），#79 按 ~65 字符预折行的 Disclaimer /
+Known Limitations 在页面上呈断续短行。**#80**（claude/ohos-release-doc-wrap，
+517c362774，独立 worktree 制作以避开并行未提交工作）将四个 body 生成器中两段
+各合并为整行（markdown 按视口流式排版），其合并触发的下次滚动发布自动治愈
+线上页面。
+
 ---
 *立档：2026-09-24 | 分析者：Sisyphus | 依据：三方案权衡 + contents API 实弹测试*
