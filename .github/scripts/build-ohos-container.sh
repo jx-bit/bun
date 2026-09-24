@@ -21,7 +21,8 @@
 # Signing: NOT done here. The container runs a Linux kernel (not OHOS), so
 # unsigned ELFs exec fine (the musl loader does not check .codesign —
 # confirmed: cargo reached symbol-relocation before failing on OpenSSL).
-# install-bun-ohos.sh signs the final binary on the device at install time.
+# The release workflows pre-sign the final binary with ohos-selfsign
+# (src/ohos_sign) before publishing.
 #
 # Run via:
 #   docker exec -e RUST_TOOLCHAIN -e NINJA_JOBS "$CONTAINER" \
