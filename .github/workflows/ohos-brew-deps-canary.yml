@@ -14,10 +14,13 @@
 #
 # Formula names are resolved dynamically — the sdk from llvm@21's deps,
 # the verified set from bun.rb's current resolved tree — so a rename alone
-# should not turn this red. Red means a real pour failure (atomgit CDN
-# 404s are retried once below) or a contract change the resolution cannot
-# track; either way, mirror the fix into ohos-build-github.yml, whose
-# install/verify steps must stay in sync with this file.
+# should not turn this red. Red means the evaluation itself broke (a pour
+# failure — atomgit CDN 404s are retried once below — or a missing keg).
+# A sysroot-less floating tip is NOT red: that is the normal
+# "nothing to bump" steady state (the build lane stays pinned) and is
+# reported as a warning — steady-state red is alarm fatigue. Mirror fixes
+# into ohos-build-github.yml, whose install/verify steps must stay in
+# sync with this file.
 
 name: OHOS brew-deps canary (container)
 
@@ -99,12 +102,13 @@ jobs:
           CORE_SHA=$(docker exec ohos-canary bash -lc \
             'git -C "$(brew --repo harmonybrew/core)" rev-parse HEAD' || true)
           echo "harmonybrew/core tip validated: ${CORE_SHA:-<unavailable>}"
+          echo "CORE_SHA=$CORE_SHA" >> "$GITHUB_ENV"
 
       - name: Verify kegs (representative set + dynamic sdk)
         run: |
           set -e
           set -o pipefail
-          docker exec -e SDK_FORMULA="$SDK_FORMULA" ohos-canary bash -lc '
+          docker exec -e SDK_FORMULA="$SDK_FORMULA" -e CORE_SHA="${CORE_SHA:-}" ohos-canary bash -lc '
             for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
@@ -112,13 +116,17 @@ jobs:
             done
             # Same sysroot contract as the build lane verify step: a renamed
             # sdk keg without native/sysroot pours fine and kills configure.
+            # Absent sysroot = tip not consumable: warn and pass (keep the
+            # pin); red stays reserved for a broken evaluation.
             sysroot=""
             for d in "$(brew --prefix)"/opt/ohos-sdk*/; do
               [ -d "${d}native/sysroot" ] && { sysroot="${d}native/sysroot"; break; }
             done
-            [ -n "$sysroot" ] \
-              || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
-            echo "OK  sysroot -> $sysroot"
+            if [ -n "$sysroot" ]; then
+              echo "OK  sysroot -> $sysroot (tip consumable — bump OHOS_CORE_PIN to ${CORE_SHA:-<unavailable>})"
+            else
+              echo "::warning::no ohos-sdk* keg carries native/sysroot — tip NOT consumable, keep OHOS_CORE_PIN"
+            fi
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
             echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
           '
