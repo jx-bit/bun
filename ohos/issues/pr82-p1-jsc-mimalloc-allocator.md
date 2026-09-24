@@ -38,6 +38,25 @@
 非 OHOS 平台（linux/windows/darwin 产物）走 prebuilt 下载路径，按 `webkit.ts`
 版本号拉取，上游 `6119947592b6` 预编译包本身即带 mimalloc，随 pin 自动覆盖。
 
+### 3.1 第二轮：CI 实测暴露的引擎 API 失配（已全部修复，commit 4807e5484f → bae897b237）
+
+首轮 CI（`4807e5484f`）在 C++ 编译期失败，暴露两处引擎 API 失配 + 一处门禁构建雷
+（后两者编译期不报或链接期才爆，移植自上游升级 commit `11fb73032c9`/`a92d84e5bfb`
+及 OHOS 分支 1.4.1 合并后的构建经验）：
+
+| # | 失配 | 修法 | 文件 |
+|---|---|---|---|
+| 1 | 新 WTF 不再传递提供 `hex()` → `use of undeclared identifier 'hex'` | 自带 `#include <wtf/HexNumber.h>` | `EncodeURIComponent.cpp` |
+| 2 | `GlobalObjectMethodTable::moduleLoaderFetch` 增加 `const String& referrer` 参数 | 三处实现/调用点同步加参数（忽略） | `ZigGlobalObject.h/.cpp`、`BakeGlobalObject.cpp` |
+| 3 | 引擎删除私有内建 `@newPromiseCapability`（**编译不报、运行时模块加载崩**） | 6 处调用点迁 `$newPromise()` + `$resolvePromise/$rejectPromiseWithFirstResolvingFunctionCallCheck` | `builtins.d.ts`、`node:events/util/dgram/_http_server` |
+| 4 | 新 WTF 移除 `relaxAdoptionRequirement`（10 处编译失败） | 全部删除（上游 #41083 同款） | `bindings.cpp`、`ScriptExecutionContext.cpp` |
+| 5 | `VM::heap.collectAsync` 增加 `CollectionScope::Full` 参数 | FFI 三层同步加 `bool full`，Rust 包装传 `false` 保持既有增量回收行为 | `bindings.cpp`、`headers.h`、`VM.rs` |
+| 6 | OHOS 门禁构建雷（ FindThreads 探针编出假 `-lpthreads` "kills the final jsc link"；新 cmake 需要 ICU_INCLUDE_DIR；挂载盘并发 copy 规则竞态） | `cfg.ohos` 下 `-Dpthread_cancel(x)=` 空宏 + `ICU_INCLUDE_DIR` 显式传入 + 嵌套构建 `parallel: 1` | `webkit.ts`、`source.ts` |
+
+其中 #3 若只修 #1/#2 放行编译，`node:events`/`node:util`/`node:dgram`/HTTP server
+会在用户机器上运行时崩——上游也是踩过才补的。#1-#5 的修法全部来自上游升级
+commit 自身，非自创。
+
 ## 4. 验证
 
 - 复现脚本（`await $\`echo hello\`` ×50 万、每万次采样 RSS，即设备侧 s3_min_repro3）：
