@@ -31,9 +31,12 @@
 |---|---|
 | `scripts/build/deps/webkit.ts` | `WEBKIT_VERSION` → `6119947592b6e1c1faef02a4c2e03174cf05d062`（1.4.1 pin）；本地 cmake WebKit 构建加 `USE_MIMALLOC: "ON"` / `USE_EXTERNAL_MIMALLOC: "ON"`（非 ASAN，上游原句注释一并带入） |
 | `scripts/build/deps/mimalloc.ts` | `MIMALLOC_COMMIT` → `6a64e1ba7f5b2130d4efccb67ec87fd0003f0f6a`（1.4.1 pin） |
+| `.github/workflows/ohos-{build-github,full-test,container-test,build-rust,release}.yml` | `WEBKIT_REF` 全部 bump 到同一 pin——门禁是 `--webkit=local` 源码编译，老 pin（`0f966e81`/`caad865e`，实测 0 处 MIMALLOC 引用）上开关是静默空操作；release 门禁原默认 ref 指向不存在的分支（404），静默回退 runner 本地 `/home/user/sources/bun/vendor/WebKit`（版本无主），改 pin 后 clone 确定成功、回退路径失效 |
 
 无运行时源码改动。与上游 v1.4.1 逐 hunk 核对：剩余 diff 全为 OHOS 定制块
 （OHOS_WEBKIT_ROOT prebuilt 路径、OHOS cmake 交叉参数、`MI_NO_SET_VMA_NAME` 等）。
+非 OHOS 平台（linux/windows/darwin 产物）走 prebuilt 下载路径，按 `webkit.ts`
+版本号拉取，上游 `6119947592b6` 预编译包本身即带 mimalloc，随 pin 自动覆盖。
 
 ## 4. 验证
 
