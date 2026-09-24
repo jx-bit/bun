@@ -93,7 +93,7 @@ gh api repos/ljy9812/bun/actions/artifacts -q '.artifacts[] | [.id, .name, .crea
 gh run download <run-id> -R ljy9812/bun -n bun-ohos-aarch64-github -D .
 ```
 
-> 注意:CI 构建的 binary **未签名**——正好匹配本指导的 media 域测试路径(hdc root 域无需签名)。若要在 currentUser 域(用户终端)使用,走 `ohos/fulltest/install-bun-ohos.sh`(安装时自动调 binary-sign-tool 签名)。
+> 注意:CI 构建的 binary **未签名**——正好匹配本指导的 media 域测试路径(hdc root 域无需签名)。若要在 currentUser 域(用户终端)使用,下载 release 的预签 tar.gz(解包即跑),或对未签名产物手动执行 `binary-sign-tool sign -selfSign 1 -inFile <bin> -outFile <bin>`。
 
 ### 3.1 下载(release 的 ohos-latest 滚动版本)
 
