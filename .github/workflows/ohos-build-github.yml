@@ -442,16 +442,11 @@ jobs:
             echo ''
             echo '### Disclaimer'
             echo ''
-            echo 'This is an independent, non-commercial community port provided as-is,'
-            echo 'with no warranty. It is not accessory software for, nor after-sales'
-            echo 'support of, any Huawei product, and has no affiliation with the'
-            echo 'OpenHarmony community or Huawei.'
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
             echo ''
             echo '### Known Limitations'
             echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel'
-            echo 'differences), some features are missing or degraded — see the release'
-            echo 'notes above for details.'
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > /tmp/release-body.md
           echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
 
@@ -655,16 +650,11 @@ jobs:
             echo ''
             echo '### Disclaimer'
             echo ''
-            echo 'This is an independent, non-commercial community port provided as-is,'
-            echo 'with no warranty. It is not accessory software for, nor after-sales'
-            echo 'support of, any Huawei product, and has no affiliation with the'
-            echo 'OpenHarmony community or Huawei.'
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
             echo ''
             echo '### Known Limitations'
             echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel'
-            echo 'differences), some features are missing or degraded — see the release'
-            echo 'notes above for details.'
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > "$BODY"
 
       - name: Seed release-docs placeholder
