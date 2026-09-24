@@ -59,7 +59,7 @@ env:
   RUSTC_WRAPPER: ""
   NINJA_JOBS: 2
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: caad865eb1a6e5ca4427f5ea1f066140b11953e7
+  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
 
 defaults:
   run:

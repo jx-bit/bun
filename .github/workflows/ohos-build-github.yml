@@ -83,7 +83,7 @@ env:
   TAP_IN_CONTAINER: ${{ vars.OHOS_TAP_IN_CONTAINER }}
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: 0f966e81b78c84bb23213e391bc679c4ef83e56b
+  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
   RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
 
@@ -388,6 +388,10 @@ jobs:
           docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun build/release-ohos/bun 2>/dev/null || \
             docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun-profile build/release-ohos/bun 2>/dev/null || \
             echo "::warning::no bun binary found to copy out"
+          # docker cp restores container ownership (root); the pre-sign step
+          # writes alongside it as the runner user - reclaim or it hits EACCES.
+          sudo chown -R "$(id -u):$(id -g)" build/release-ohos 2>/dev/null || \
+            chmod -R a+rwX build/release-ohos 2>/dev/null || true
           docker cp "$CONTAINER":/tmp/build.log /tmp/build.log 2>/dev/null || true
 
       - name: Verify binary
@@ -440,6 +444,9 @@ jobs:
             cp /tmp/ohos_sign-build/target/release/ohos-selfsign "$SIGNER"
           fi
           # --force: strip + re-sign if a stale section ever sneaks in (idempotent).
+          # A stale root-owned bun-signed left by an earlier run blocks the
+          # runner-user write (EACCES) — remove it before signing.
+          rm -f build/release-ohos/bun-signed
           "$SIGNER" sign --force --output build/release-ohos/bun-signed build/release-ohos/bun
           # Kernel-equivalent gate (file_size + merkle root recompute), not
           # just section presence — an invalid descriptor must fail here,
