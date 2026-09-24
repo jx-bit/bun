@@ -307,6 +307,63 @@ jobs:
           echo "rolling_script_path=$RELEASE_DIR/rolling/install-bun-ohos.sh" >> $GITHUB_OUTPUT
           echo "✅ Packaged: bun-ohos-aarch64 + ${ARCHIVE_NAME}.tar.gz + install-bun-ohos.sh"
 
+      - name: Generate release body
+        id: body
+        # Same layout as every other release page: Quick Install (inline,
+        # self-paired), a Products table (sizes known only at package time),
+        # and the Release Notes link to the seeded release-docs placeholder.
+        run: |
+          TAG="${{ github.ref_name }}"
+          RELEASE_DIR=/tmp/bun-release
+          {
+            echo '## Bun for HarmonyOS (OHOS) aarch64'
+            echo ''
+            echo "Version: ${{ steps.package.outputs.version }}"
+            echo "Commit: ${{ github.sha }}"
+            echo ''
+            echo '### Quick Install'
+            echo ''
+            echo '```bash'
+            echo "curl -fsSL https://github.com/jx-bit/bun/releases/download/${TAG}/install-bun-ohos.sh | sh"
+            echo '```'
+            echo ''
+            echo '### Products'
+            echo ''
+            echo '| File | Target | Build | Size |'
+            echo '|---|---|---|---|'
+            for f in "$RELEASE_DIR/bun-ohos-aarch64" \
+                     "$RELEASE_DIR/${{ steps.package.outputs.archive_name }}.tar.gz" \
+                     "$RELEASE_DIR/install-bun-ohos.sh"; do
+              name=$(basename "$f")
+              size=$(du -h "$f" | cut -f1)
+              case "$name" in
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='self-hosted lane' ;;
+                install-bun-ohos.sh) target='OHOS installer';            build='paired to this release' ;;
+                *.tar.gz)            target='OHOS archive';              build='binary + paired installer + README' ;;
+                *)                   target='?';                         build='?' ;;
+              esac
+              printf '| %s | %s | %s | %s |\n' "$name" "$target" "$build" "$size"
+            done
+            echo ''
+            echo '### Release Notes'
+            echo ''
+            echo "[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/${TAG}/README.md)"
+            echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is,'
+            echo 'with no warranty. It is not accessory software for, nor after-sales'
+            echo 'support of, any Huawei product, and has no affiliation with the'
+            echo 'OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel'
+            echo 'differences), some features are missing or degraded — see the release'
+            echo 'notes above for details.'
+          } > /tmp/bun-release-body.md
+          echo "path=/tmp/bun-release-body.md" >> "$GITHUB_OUTPUT"
+
       - name: Create versioned release
         uses: softprops/action-gh-release@v2
         with:
@@ -314,24 +371,8 @@ jobs:
             ${{ steps.package.outputs.binary_path }}
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.script_path }}
-          generate_release_notes: true
           name: "Bun OHOS ${{ github.ref_name }}"
-          body: |
-            ## Bun for HarmonyOS (OHOS) aarch64
-
-            Version: ${{ steps.package.outputs.version }}
-            Commit: ${{ github.sha }}
-
-            ### Quick Install
-
-            ```bash
-            curl -fsSL https://github.com/jx-bit/bun/releases/download/${{ github.ref_name }}/install-bun-ohos.sh | sh
-            ```
-
-            ### Manual Download
-
-            - `bun-ohos-aarch64` — Raw binary
-            - `${{ steps.package.outputs.archive_name }}.tar.gz` — Versioned archive
+          body_path: ${{ steps.body.outputs.path }}
 
       - name: Update ohos-latest release
         uses: softprops/action-gh-release@v2
@@ -353,9 +394,110 @@ jobs:
             curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh
             ```
 
+            ### Release Notes
+
+            [详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/ohos-latest/README.md)
+
             ### Version
 
             Built from: ${{ github.ref_name }} (${{ github.sha }})
+
+            ### Disclaimer
+
+            This is an independent, non-commercial community port provided as-is,
+            with no warranty. It is not accessory software for, nor after-sales
+            support of, any Huawei product, and has no affiliation with the
+            OpenHarmony community or Huawei.
+
+            ### Known Limitations
+
+            Due to HarmonyOS system restrictions (sandboxing, code signing, kernel
+            differences), some features are missing or degraded — see the release
+            notes above for details.
+
+      - name: Seed release-docs placeholders
+        # The release bodies link to releases/<tag>/README.md (tag release)
+        # and releases/ohos-latest/README.md (rolling) on the release-docs
+        # branch — auto-create placeholders so the links never dangle; the
+        # developer fills them in afterwards (direct push to release-docs,
+        # no PR). Idempotent: an existing file is never overwritten (re-runs
+        # and developer content must survive).
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          python3 - "$TAG" "${{ github.repository }}" \
+            "${{ steps.package.outputs.version }}" "${{ github.sha }}" <<'PYEOF'
+          import base64, json, os, sys, time, urllib.error, urllib.request
+          tag, repo, version, commit = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+          token = os.environ["GITHUB_TOKEN"]
+          def api(method, path, data=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/{path}", method=method,
+                  data=json.dumps(data).encode() if data else None,
+                  headers={"Authorization": f"Bearer {token}",
+                           "Accept": "application/vnd.github+json"})
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      body = resp.read()
+                      return resp.status, (json.loads(body) if body else {})
+              except urllib.error.HTTPError as e:
+                  return e.code, {}
+          placeholder_tag = (
+              f"# {tag}\n\n"
+              "> 占位文档 —— 发布流水线自动生成，等待开发者补充。\n"
+              "> 直接编辑本文件并 push 到 `release-docs` 分支，"
+              "release 页面的链接会自动显示最新内容。\n\n"
+              f"- 版本：{version}\n"
+              f"- 提交：`{commit}`\n"
+              f"- Release：<https://github.com/{repo}/releases/tag/{tag}>\n\n"
+              "## 补充说明\n\n"
+              "（本次变更内容、已知问题、升级注意事项……）\n\n"
+              "## 已知限制\n\n"
+              "（鸿蒙系统限制导致的功能缺失/降级，具体条目……）\n"
+          )
+          placeholder_rolling = (
+              "# ohos-latest（滚动发布线）\n\n"
+              "> 占位文档 —— 发布流水线自动生成，等待开发者补充。\n"
+              "> 此文档描述滚动线的当前状态（在途变更、已知问题等），"
+              "直接编辑并 push 到 `release-docs` 分支，"
+              "release 页面的链接会自动显示最新内容。\n\n"
+              "## 已知限制\n\n"
+              "（鸿蒙系统限制导致的功能缺失/降级，具体条目……）\n"
+          )
+          # The contents API intermittently 500s (observed live); retrying the
+          # whole probe+create sequence also covers a 500 whose PUT actually
+          # landed server-side (the re-probe sees the file and skips).
+          docs = [
+              (f"releases/{tag}/README.md", placeholder_tag),
+              ("releases/ohos-latest/README.md", placeholder_rolling),
+          ]
+          for doc, content in docs:
+              seeded = False
+              for attempt in range(3):
+                  status, _ = api("GET", f"contents/{doc}?ref=release-docs")
+                  if status == 200:
+                      print(f"✅ {doc} already exists on release-docs — untouched")
+                      seeded = True
+                      break
+                  if status == 404:
+                      status, _ = api("PUT", f"contents/{doc}", {
+                          "message": f"docs: seed placeholder for {doc}",
+                          "branch": "release-docs",
+                          "content": base64.b64encode(content.encode()).decode(),
+                      })
+                      if status in (200, 201):
+                          print(f"✅ seeded {doc} on release-docs")
+                          seeded = True
+                          break
+                  if attempt < 2:
+                      print(f"⚠️ {doc}: attempt {attempt + 1} failed (HTTP {status}), retrying...")
+                      time.sleep(5 * (attempt + 1))
+              if not seeded:
+                  hint = " — is the release-docs branch present?" if status == 404 else ""
+                  print(f"❌ could not seed {doc} after 3 attempts (last HTTP {status}){hint}")
+                  sys.exit(1)
+          PYEOF
 
       - name: Verify published releases
         env:
@@ -389,7 +531,19 @@ jobs:
               if missing:
                   print(f"❌ release {rel} missing assets: {sorted(missing)}")
                   sys.exit(1)
-          print(f"✅ releases verified: {tag} and ohos-latest carry all paired assets")
+          # The release bodies link to release-docs placeholders — gate them
+          # like the assets so a dangling link fails the run.
+          for doc in (f"releases/{tag}/README.md", "releases/ohos-latest/README.md"):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/contents/{doc}?ref=release-docs",
+                  headers={"Authorization": f"Bearer {token}"})
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      resp.read()
+              except urllib.error.HTTPError as e:
+                  print(f"❌ release-docs placeholder missing: {doc} (HTTP {e.code})")
+                  sys.exit(1)
+          print(f"✅ releases verified: {tag} and ohos-latest carry all paired assets + release-docs placeholders")
           PYEOF
 
       - name: Copy to shared directory
