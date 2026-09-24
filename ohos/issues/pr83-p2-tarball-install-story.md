@@ -63,5 +63,15 @@ Permission denied = 损坏重下。
 - 脚本缺陷史：[pr67-p2-install-script-release.md](pr67-p2-install-script-release.md)（#67/#68/#77 三轮，本 PR 后归档为历史）
 - 签名机制：[`../knowledge/codesign-and-spawn-primer.md`](../knowledge/codesign-and-spawn-primer.md)
 
+## §后续：#84 页面布局微调（2026-09-24）
+
+#83 的合并与最终页面布局强推发生竞态——进交付线的 b6e51965b6 仍带四条安装
+提示 bullet 且 Disclaimer/Known Limitations 在页尾（强推的 f913f74afe 未赶上
+合并）。[#84](https://github.com/jx-bit/bun/pull/84) 以纯 body 文本重构送达
+终态：Disclaimer + Known Limitations 前置，Quick Install 只留 tar 两行命令
+（代理/PATH/自签/损坏四条提示由 tar.gz README 与资产名承载）。纯文本变更，
+资产/门禁不动，无"未修复即红"门禁（body 文本不承重）。 免责声明同步精简为中英双语短句（非官方社区项目、社区开发者维护），替换原英文长段。
+
+---
 ---
 *立档：2026-09-24 | 分析者：Sisyphus | 依据：两 workflow 实读 + 本地 tar roundtrip + 用户拍板记录*
