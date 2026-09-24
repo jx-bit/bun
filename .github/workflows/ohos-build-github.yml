@@ -26,8 +26,9 @@
 # (src/ohos_sign — pure-Rust, content-based self-signature, no cert needed).
 # Two variants ship side by side, user's choice: the raw build output stays
 # untouched as the -unsigned asset; the signed copy takes the canonical asset
-# name (recommended, runs out of the box). No install script: the tarball
-# is the whole install story (extract and run; README covers PATH).
+# name (recommended, runs out of the box). install-bun-ohos.sh stays as the
+# convenience layer (PATH setup + A/B variants) and still signs on device via
+# binary-sign-tool as a fallback for unsigned/legacy assets.
 
 name: OHOS Build (GitHub-hosted, social4hyq container)
 
@@ -75,7 +76,7 @@ env:
   TAP_IN_CONTAINER: ${{ vars.OHOS_TAP_IN_CONTAINER }}
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: 0f966e81b78c84bb23213e391bc679c4ef83e56b
+  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
   RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
 
@@ -448,35 +449,15 @@ jobs:
           test -f "$BIN_SIGNED" || { echo "FATAL: no signed bun binary to release (Pre-sign step missing?)"; exit 1; }
           VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
           COMMIT=$(git rev-parse --short HEAD)
-          # Two OHOS assets, user's choice: the pre-signed tarball (primary,
-          # extract and run) and the raw unsigned build output (sign yourself
-          # on device). The tarball extracts to a versioned directory —
-          # README covers run/PATH/corruption diagnosis.
+          # Canonical name carries the SIGNED binary (recommended path);
+          # the raw build output ships as the -unsigned variant.
+          cp "$BIN_SIGNED" /tmp/bun-ohos-aarch64-github
           cp "$BIN" /tmp/bun-ohos-aarch64-github-unsigned
-          TARBALL_NAME="bun-ohos-aarch64-github-${VERSION}"
-          mkdir -p "/tmp/bun-tarball/$TARBALL_NAME"
-          cp "$BIN_SIGNED" "/tmp/bun-tarball/$TARBALL_NAME/bun"
-          cat > "/tmp/bun-tarball/$TARBALL_NAME/README.md" << 'EOF'
-          # Bun for HarmonyOS (OHOS) aarch64
-
-          The bundled bun is pre-signed — run it directly:
-
-              chmod +x bun && ./bun --version
-
-          Optional — add to PATH for the current session:
-
-              export PATH="$PWD:$PATH"
-
-          If exec fails with "Permission denied" after `chmod +x bun`, the
-          archive was corrupted — re-download it (the embedded signature is
-          what the kernel validates at exec).
-          EOF
-          tar czf "/tmp/$TARBALL_NAME.tar.gz" -C /tmp/bun-tarball "$TARBALL_NAME"
-          rm -rf /tmp/bun-tarball
+          cp ohos/fulltest/install-bun-ohos.sh /tmp/install-bun-ohos.sh
           {
+            echo "asset_path=/tmp/bun-ohos-aarch64-github"
             echo "unsigned_asset_path=/tmp/bun-ohos-aarch64-github-unsigned"
-            echo "tar_path=/tmp/$TARBALL_NAME.tar.gz"
-            echo "tar_name=$TARBALL_NAME"
+            echo "script_path=/tmp/install-bun-ohos.sh"
             echo "body_path=/tmp/release-body.md"
             echo "commit=$COMMIT"
           } >> "$GITHUB_OUTPUT"
@@ -485,23 +466,33 @@ jobs:
             echo ''
             echo 'This release is automatically updated with the latest build.'
             echo ''
-            echo '### Disclaimer'
+            echo '### Out-of-the-box (recommended)'
             echo ''
-            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
-            echo ''
-            echo '### Known Limitations'
-            echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
-          echo ''
-            echo '### Quick Install (OHOS device)'
-            echo ''
-            echo 'Pre-signed tarball — extract and run, no signing needed:'
+            echo 'The binary ships pre-signed — download, make executable, run:'
             echo ''
             echo '```bash'
-            echo "curl -fsSL -o bun.tar.gz https://github.com/jx-bit/bun/releases/download/ohos-latest/$TARBALL_NAME.tar.gz"
-            echo "tar xzf bun.tar.gz && ./$TARBALL_NAME/bun --version"
+            echo 'curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64-github'
+            echo 'chmod +x bun && ./bun --version'
             echo '```'
             echo ''
+            echo 'If exec fails with "Permission denied" after `chmod +x`, the'
+            echo 'download was corrupted — re-download (the embedded signature'
+            echo 'is what the kernel validates).'
+            echo ''
+            echo '### Quick Install'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/ohos-latest/install-bun-ohos.sh | sh'
+            echo '```'
+            echo ''
+            echo '### Variants'
+            echo ''
+            echo 'Prefer to sign on the device yourself? Download the raw build'
+            echo 'output instead — `bun-ohos-aarch64-github-unsigned` — and sign:'
+            echo ''
+            echo '```bash'
+            echo 'binary-sign-tool sign -inFile bun -outFile bun -selfSign 1'
+            echo '```'
             echo ''
             echo '### Release Notes'
             echo ''
@@ -511,8 +502,15 @@ jobs:
             echo ''
             echo "Built from: v$VERSION @$COMMIT (ohos-aarch64)"
             echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > /tmp/release-body.md
-          echo "✅ Release assets: bun-ohos-aarch64-github-unsigned + $TARBALL_NAME.tar.gz (v$VERSION @ $COMMIT)"
+          echo "✅ Release asset: bun-ohos-aarch64-github + install-bun-ohos.sh (v$VERSION @ $COMMIT)"
 
       - name: Seed release-docs placeholder
         # Same contract as the tag-release flow: the ohos-latest body links
@@ -573,19 +571,22 @@ jobs:
           name: "Bun OHOS (Latest)"
           body_path: /tmp/release-body.md
           files: |
+            ${{ steps.gh_release.outputs.asset_path }}
             ${{ steps.gh_release.outputs.unsigned_asset_path }}
-            ${{ steps.gh_release.outputs.tar_path }}
+            ${{ steps.gh_release.outputs.script_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify ohos-latest release assets
-        # Publish gate: the tarball one-liner target must exist — all
-        # assets uploaded.
+        # Publish gate: the one-liner target must exist — script anchors
+        # unchanged (verbatim repo copy) and all assets uploaded.
         if: success() && github.ref == 'refs/heads/ohos-aarch64'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for asset in "bun-ohos-aarch64-github-unsigned" "${{ steps.gh_release.outputs.tar_name }}.tar.gz"; do
+          grep -qF 'RELEASE_TAG="ohos-latest"' /tmp/install-bun-ohos.sh || { echo "❌ rolling script RELEASE_TAG drifted"; exit 1; }
+          grep -qF 'BUN_INSTALL_BUILD:-github' /tmp/install-bun-ohos.sh || { echo "❌ rolling script default build drifted"; exit 1; }
+          for asset in bun-ohos-aarch64-github bun-ohos-aarch64-github-unsigned install-bun-ohos.sh; do
             gh release view ohos-latest --repo "${{ github.repository }}" \
               --json assets --jq '.assets[].name' | grep -qx -F "$asset" || {
               echo "❌ asset '$asset' missing from ohos-latest"; exit 1; }
@@ -663,37 +664,20 @@ jobs:
       - name: Stage products
         run: |
           mkdir -p products
-          # OHOS artifact holds both variants: bun-signed goes into the
-          # pre-signed tarball (the install story), the raw build output
-          # ships as the -unsigned variant.
+          # OHOS artifact holds both variants: the signed copy takes the
+          # canonical latest asset, the raw build output ships as -unsigned.
+          cp dist/ohos/bun-signed                       products/bun-ohos-aarch64
           cp dist/ohos/bun                              products/bun-ohos-aarch64-unsigned
           cp dist-cross/bun-cross-linux-x64/bun         products/bun-linux-x64
           cp dist-cross/bun-cross-linux-arm64/bun       products/bun-linux-arm64
           cp dist-cross/bun-cross-windows-x64/bun.exe   products/bun-windows-x64.exe
           cp dist-cross/bun-cross-darwin-arm64/bun      products/bun-darwin-arm64
-          # Pre-signed tarball (extract and run), same shape as the OHOS
-          # rolling page: signed bun + README.
-          VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
-          TARBALL_NAME="bun-ohos-aarch64-${VERSION}"
-          mkdir -p "bun-tarball/$TARBALL_NAME"
-          cp dist/ohos/bun-signed "bun-tarball/$TARBALL_NAME/bun"
-          cat > "bun-tarball/$TARBALL_NAME/README.md" << 'EOF'
-          # Bun for HarmonyOS (OHOS) aarch64
-
-          The bundled bun is pre-signed — run it directly:
-
-              chmod +x bun && ./bun --version
-
-          Optional — add to PATH for the current session:
-
-              export PATH="$PWD:$PATH"
-
-          If exec fails with "Permission denied" after `chmod +x bun`, the
-          archive was corrupted — re-download it (the embedded signature is
-          what the kernel validates at exec).
-          EOF
-          tar czf "products/$TARBALL_NAME.tar.gz" -C bun-tarball "$TARBALL_NAME"
-          rm -rf bun-tarball
+          # Self-contained installer: RELEASE_TAG + default build injected so
+          # this release's one-liner downloads THIS release's OHOS product
+          # (bun-ohos-aarch64), not another release's assets.
+          sed -e 's|RELEASE_TAG="ohos-latest"|RELEASE_TAG="latest"|' \
+              -e 's|BUN_INSTALL_BUILD:-github|BUN_INSTALL_BUILD:-self|' \
+            ohos/fulltest/install-bun-ohos.sh > products/install-bun-ohos.sh
           ls -la products/
 
       - name: Generate release body
@@ -702,28 +686,25 @@ jobs:
         run: |
           SHA='${{ github.sha }}'
           BODY=/tmp/latest-body.md
-          # Tarball name from the staged file (not recomputed) so the body
-          # command always matches the uploaded asset.
-          TARBALL_NAME=$(basename products/bun-ohos-aarch64-*.tar.gz .tar.gz)
           {
             printf 'Products built from the same baseline commit `%s` (ohos-aarch64).\n\n' "$SHA"
-            echo '### Disclaimer'
+            echo '### Out-of-the-box (recommended, OHOS device)'
             echo ''
-            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
-            echo ''
-            echo '### Known Limitations'
-            echo ''
-            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
-          echo ''
-            echo '### Quick Install (OHOS device)'
-            echo ''
-            echo 'Pre-signed tarball — extract and run, no signing needed:'
+            echo 'The OHOS binary ships pre-signed — download, make executable, run:'
             echo ''
             echo '```bash'
-            echo "curl -fsSL -o bun.tar.gz https://github.com/jx-bit/bun/releases/download/latest/$TARBALL_NAME.tar.gz"
-            echo "tar xzf bun.tar.gz && ./$TARBALL_NAME/bun --version"
+            echo 'curl -fsSL -o bun https://github.com/jx-bit/bun/releases/download/latest/bun-ohos-aarch64'
+            echo 'chmod +x bun && ./bun --version'
             echo '```'
             echo ''
+            echo 'A raw unsigned variant (`bun-ohos-aarch64-unsigned`) is attached'
+            echo 'for device-side signing.'
+            echo ''
+            echo '### Quick Install (OHOS device)'
+            echo ''
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/jx-bit/bun/releases/download/latest/install-bun-ohos.sh | sh'
+            echo '```'
             echo ''
             echo '### Products'
             echo ''
@@ -733,8 +714,9 @@ jobs:
               name=$(basename "$f")
               size=$(du -h "$f" | cut -f1)
               case "$name" in
+                bun-ohos-aarch64)    target='OHOS (HarmonyOS) aarch64'; build='container lane (pre-signed)' ;;
                 bun-ohos-aarch64-unsigned) target='OHOS (HarmonyOS) aarch64'; build='container lane (no .codesign)' ;;
-                *.tar.gz)            target='OHOS (HarmonyOS) aarch64'; build='container lane (pre-signed tarball)' ;;
+                install-bun-ohos.sh) target='OHOS installer';            build='paired to this release' ;;
                 bun-linux-x64)       target='Linux x86_64 (glibc)';    build='cross (aarch64 host)' ;;
                 bun-linux-arm64)     target='Linux arm64 (glibc)';     build='native (arm64 host)' ;;
                 bun-windows-x64.exe) target='Windows x86_64';          build='cross' ;;
@@ -748,6 +730,13 @@ jobs:
             echo ''
             echo '[详细说明（发布后可持续更新）](https://github.com/jx-bit/bun/blob/release-docs/releases/latest/README.md)'
             echo ''
+            echo '### Disclaimer'
+            echo ''
+            echo 'This is an independent, non-commercial community port provided as-is, with no warranty. It is not accessory software for, nor after-sales support of, any Huawei product, and has no affiliation with the OpenHarmony community or Huawei.'
+            echo ''
+            echo '### Known Limitations'
+            echo ''
+            echo 'Due to HarmonyOS system restrictions (sandboxing, code signing, kernel differences), some features are missing or degraded — see the release notes above for details.'
           } > "$BODY"
 
       - name: Seed release-docs placeholder
@@ -803,12 +792,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAR_NAME=$(basename products/bun-ohos-aarch64-*.tar.gz)
-          for product in bun-ohos-aarch64-unsigned "$TAR_NAME" bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64; do
+          # Staged-script pairing (the exact bytes uploaded above).
+          grep -qF 'RELEASE_TAG="latest"' products/install-bun-ohos.sh || { echo "❌ latest script RELEASE_TAG not latest"; exit 1; }
+          grep -qF 'BUN_INSTALL_BUILD:-self' products/install-bun-ohos.sh || { echo "❌ latest script default build not self"; exit 1; }
+          for product in bun-ohos-aarch64 bun-ohos-aarch64-unsigned bun-linux-x64 bun-linux-arm64 bun-windows-x64.exe bun-darwin-arm64 install-bun-ohos.sh; do
             gh release view latest --repo "${{ github.repository }}" \
               --json assets --jq '.assets[].name' | grep -qx -F "$product" || {
               echo "❌ product '$product' missing from latest"; exit 1; }
           done
           gh api "repos/${{ github.repository }}/contents/releases/latest/README.md?ref=release-docs" >/dev/null 2>&1 \
             || { echo "❌ release-docs placeholder missing for latest"; exit 1; }
-          echo "✅ latest release: 4 platform products + OHOS unsigned variant + pre-signed tarball + release-docs placeholder verified"
+          echo "✅ latest release: 5 products (+OHOS unsigned variant) + paired installer + release-docs placeholder verified"

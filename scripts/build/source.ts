@@ -326,6 +326,11 @@ export interface NestedCmakeBuild {
    */
   buildType?: BuildType;
   /**
+   * Limit the nested CMake build's worker count. Some cross-target
+   * filesystems cannot safely run generated-header copy rules in parallel.
+   */
+  parallel?: number;
+  /**
    * Subdirectory within the build dir where libraries land.
    * E.g. cares puts them in "lib/", hdrhistogram in "src/". Default: root.
    */
@@ -608,7 +613,7 @@ export function registerDepRules(n: Ninja, cfg: Config): void {
   // the dep, cmake --build is a no-op (inner ninja re-stats), and our restat
   // prunes everything downstream.
   n.rule("dep_build", {
-    command: `${stream} ${cmake} --build $builddir --config $buildtype $targets`,
+    command: `${stream} ${cmake} --build $builddir --config $buildtype$parallel $targets`,
     description: "build $name",
     restat: true,
     pool: "dep",
@@ -1392,6 +1397,7 @@ function emitNestedCmake(
       name,
       builddir: buildDir,
       buildtype: buildType,
+      parallel: spec.parallel === undefined ? "" : ` --parallel ${spec.parallel}`,
       targets: targets.map(t => `--target ${t}`).join(" "),
     },
   });
