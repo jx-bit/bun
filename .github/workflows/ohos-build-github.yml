@@ -209,44 +209,49 @@ jobs:
           echo "sdk formula (from llvm@21 deps): $SDK_FORMULA"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install $SDK_FORMULA" 2>&1 | tail -3 \
             || echo "::warning::$SDK_FORMULA install failed — build script falls back to the legacy keg"
-          # bun-bootstrap left bun.rb's direct deps on 2026-09-12 (the
-          # formula itself remained in the tap); our lane still drives bun
-          # install + the build scripts through it, so pour it explicitly.
-          # 2026-09-26: bun-bootstrap is GONE from the floating tap and its
-          # bottle was pruned from the harmonybrew CDN (upstream restructured
-          # social4hyq/core into a small OHOS-only tap; the canary has been
-          # red on exactly this check since 09-22). The tap's own bun.rb /
-          # bun@1.4.rb bottles are prebuilt OHOS bun in the same driver role —
-          # fall back to them. Two traps this pour must dodge (run #322 died
-          # on both): the image bakes HOMEBREW_OHOS_BOTTLE_BINARY_SIGN=1 and
-          # the auto-sign pass corrupts bun ELFs on a re-sign (upstream
-          # build.sh: "the corruption mode is specific to bun") — unset it;
-          # and a keg existing is not enough, so a candidate only counts once
-          # its binary actually runs. Last resort: our own verified OHOS build
-          # from the ohos-latest release asset, staged at .driver-bun — the
-          # resolution loops in bun install / build-ohos-container.sh check
-          # that path too. Hard-fail here: the verify gate below would reject
-          # a driverless pour anyway, and set -e makes the exit stick.
+          # The build driver is a prebuilt OHOS bun that drives `bun install`
+          # and the build scripts. 2026-09-26: bun-bootstrap vanished from the
+          # floating tap (upstream restructured social4hyq/core into a small
+          # OHOS-only tap; canary red since 09-22), so the lane fell back to
+          # the tap's own bun bottles — but those are a FORK: run #338 showed
+          # it ignores BUN_INSTALL_IGNORE_SCRIPTS and its rollback-on-
+          # postinstall-failure is non-deterministic (identical tree, keg and
+          # version kept the package in #333 and rolled it back in #338 an
+          # hour later). The driver is therefore SELF-HOSTED FIRST: our own
+          # verified build from the ohos-latest release asset (official
+          # lineage, honors IGNORE_SCRIPTS), downloaded runner-side and shared
+          # into the container via the workspace mount. Tap kegs remain a
+          # fallback for the day the asset URL breaks. Keg pours unset the
+          # image's baked HOMEBREW_OHOS_BOTTLE_BINARY_SIGN (the auto-sign pass
+          # corrupts bun ELFs on a re-sign) and a candidate only counts once
+          # its binary actually runs. Hard-fail here: the verify gate below
+          # would reject a driverless pour anyway, and set -e makes it stick.
+          mkdir -p "$GITHUB_WORKSPACE/.driver-bun"
+          if curl -fsSL --max-time 300 -o "$GITHUB_WORKSPACE/.driver-bun/bun" \
+              "https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64-github-unsigned" \
+            && chmod +x "$GITHUB_WORKSPACE/.driver-bun/bun"; then
+            echo "self-hosted driver staged at .driver-bun/bun"
+          else
+            echo "::warning::self-hosted driver download failed — falling back to tap kegs"
+            rm -f "$GITHUB_WORKSPACE/.driver-bun/bun"
+          fi
           docker exec -e HOMEBREW_NO_AUTO_UPDATE=1 -e HOMEBREW_NO_ANALYTICS=1 \
             -e HOMEBREW_NO_ENV_HINTS=1 "$CONTAINER" bash -lc '
+              p=/workspace/bun/.driver-bun/bun
+              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 \
+                && { echo "driver bun: self-hosted at $p"; exit 0; }
               unset HOMEBREW_OHOS_BOTTLE_BINARY_SIGN
               for k in bun-bootstrap bun bun@1.4; do
-                p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
-                if [ ! -x "$p" ] || ! "$p" --version >/dev/null 2>&1; then
+                q="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+                if [ ! -x "$q" ] || ! "$q" --version >/dev/null 2>&1; then
                   brew install --force "$k" >/dev/null 2>&1 \
                     || brew install --force "social4hyq/core/$k" >/dev/null 2>&1 || true
-                  p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+                  q="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
                 fi
-                [ -x "$p" ] && "$p" --version >/dev/null 2>&1 \
+                [ -x "$q" ] && "$q" --version >/dev/null 2>&1 \
                   && { echo "driver bun keg: $k"; exit 0; }
               done
-              d="/workspace/bun/.driver-bun/bun"
-              mkdir -p "$(dirname "$d")" \
-                && curl -fsSL -o "$d" \
-                  "https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64-github-unsigned" \
-                && chmod +x "$d" && "$d" --version >/dev/null 2>&1 \
-                && { echo "driver bun: self-hosted (ohos-latest asset) at $d"; exit 0; }
-              echo "::error::no build driver bun (all kegs + self-hosted asset unusable)"; exit 1
+              echo "::error::no build driver bun (self-hosted + all kegs unusable)"; exit 1
             '
           # cargo (OHOS-host rust nightly) links libz. The dependency tree
           # drifts when `brew update` refreshes the index (09-07: the pour
@@ -286,21 +291,18 @@ jobs:
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
-            # Build driver: bun-bootstrap while the tap still carries it, else
-            # the bun / bun@1.4 bottle fallback or the self-hosted .driver-bun
-            # staging path (2026-09-26 — see the install step above). A
-            # candidate only counts once its binary actually runs.
+            # Build driver: the self-hosted .driver-bun staging path first
+            # (deterministic — see the install step above), tap kegs as
+            # fallback. A candidate only counts once its binary actually runs.
             driver=""
-            for k in bun-bootstrap bun bun@1.4; do
-              p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+            for p in /workspace/bun/.driver-bun/bun \
+                     "$(brew --prefix bun-bootstrap 2>/dev/null)/bin/bun" \
+                     "$(brew --prefix bun 2>/dev/null)/bin/bun" \
+                     "$(brew --prefix bun@1.4 2>/dev/null)/bin/bun"; do
               [ -x "$p" ] && "$p" --version >/dev/null 2>&1 && { driver="$p"; break; }
             done
-            if [ -z "$driver" ]; then
-              p=/workspace/bun/.driver-bun/bun
-              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 && driver="$p"
-            fi
             [ -n "$driver" ] \
-              || { echo "::error::no runnable build driver bun (kegs + self-hosted asset all unusable)"; exit 1; }
+              || { echo "::error::no runnable build driver bun (self-hosted + all kegs unusable)"; exit 1; }
             echo "OK  driver bun -> $driver ($("$driver" --version 2>/dev/null | head -1))"
             # Keg existence is not enough: a renamed sdk keg without
             # native/sysroot passes the loop above and dies 6 minutes later in
@@ -402,18 +404,18 @@ jobs:
       # (esbuild, lezer-cpp for cppbind) actually landed in node_modules.
       - name: bun install (root + node-fallbacks)
         run: |
-          # Same driver candidates as the install/verify steps above, gated on
-          # the binary actually running (a pour-time re-sign can corrupt the
-          # ELF — see the install step). LD_LIBRARY_PATH mirrors
-          # build-ohos-container.sh: the driver needs brew libs on the loader
-          # path and this step runs before that script.
+          # Same driver candidates as the install/verify steps above
+          # (.driver-bun first), gated on the binary actually running.
+          # LD_LIBRARY_PATH mirrors build-ohos-container.sh: the driver needs
+          # brew libs on the loader path and this step runs before that script.
           BUN_DIR=$(docker exec "$CONTAINER" bash -lc '
-            for k in bun-bootstrap bun bun@1.4; do
-              p="$(brew --prefix "$k" 2>/dev/null)/bin"
+            for p in /workspace/bun/.driver-bun \
+                     "$(brew --prefix bun-bootstrap 2>/dev/null)/bin" \
+                     "$(brew --prefix bun 2>/dev/null)/bin" \
+                     "$(brew --prefix bun@1.4 2>/dev/null)/bin"; do
               [ -x "$p/bun" ] && "$p/bun" --version >/dev/null 2>&1 && { echo "$p"; exit 0; }
             done
-            [ -x /workspace/bun/.driver-bun/bun ] && { echo "/workspace/bun/.driver-bun"; exit 0; }
-            echo "::error::no runnable build driver bun keg" >&2; exit 1
+            echo "::error::no runnable build driver bun" >&2; exit 1
           ') || { echo "::error::driver bun resolution failed"; exit 1; }
           BUN="$BUN_DIR/bun"
           echo "driver bun: $BUN"
