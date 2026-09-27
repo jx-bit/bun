@@ -75,10 +75,34 @@ SDK_ROOT_DIR=$(dirname "$SDK_SYSROOT")
 ICU_PREFIX=$(brew --prefix icu4c@78)
 # bun-bootstrap left bun.rb's direct deps on 2026-09-12 but our lane drives
 # bun install + the build scripts through it — pour it when the keg is absent.
-if [ ! -d "$(brew --prefix bun-bootstrap 2>/dev/null || true)" ]; then
-  brew install bun-bootstrap || echo "::warning::bun-bootstrap pour failed; build driver bun unavailable"
+# 2026-09-26: bun-bootstrap is gone from the floating tap and its bottle was
+# pruned from the harmonybrew CDN (upstream restructured social4hyq/core into
+# a small OHOS-only tap; the canary has been red on exactly this since 09-22).
+# The tap's own bun.rb / bun@1.4.rb bottles are prebuilt OHOS bun in the same
+# driver role. Two traps (run #322): the image bakes
+# HOMEBREW_OHOS_BOTTLE_BINARY_SIGN=1 and the auto-sign pass corrupts bun ELFs
+# on a re-sign — unset it; and a keg only counts once its binary runs. Last
+# resort: the workflow stages a verified binary at /workspace/bun/.driver-bun.
+BUN_BOOT_DIR=""
+for k in bun-bootstrap bun bun@1.4; do
+  if ! "$(brew --prefix "$k" 2>/dev/null || true)/bin/bun" --version >/dev/null 2>&1; then
+    env -u HOMEBREW_OHOS_BOTTLE_BINARY_SIGN brew install --force "$k" >/dev/null 2>&1 \
+      || env -u HOMEBREW_OHOS_BOTTLE_BINARY_SIGN brew install --force "social4hyq/core/$k" >/dev/null 2>&1 \
+      || true
+  fi
+  p="$(brew --prefix "$k" 2>/dev/null || true)/bin"
+  if [ -x "$p/bun" ] && "$p/bun" --version >/dev/null 2>&1; then
+    BUN_BOOT_DIR="$p"
+    break
+  fi
+done
+if [ -z "$BUN_BOOT_DIR" ] && [ -x /workspace/bun/.driver-bun/bun ] \
+    && /workspace/bun/.driver-bun/bun --version >/dev/null 2>&1; then
+  BUN_BOOT_DIR=/workspace/bun/.driver-bun
 fi
-BUN_BOOT_DIR=$(brew --prefix bun-bootstrap)/bin
+[ -n "$BUN_BOOT_DIR" ] \
+  || { echo "::error::no build driver bun (kegs + self-hosted asset all unusable)"; exit 1; }
+echo "build driver bun: $BUN_BOOT_DIR/bun ($("$BUN_BOOT_DIR/bun" --version 2>/dev/null | head -1))"
 RUST_HOME="/data/storage/el2/base/tmp/rust-${RUST_TOOLCHAIN}"
 SRC=/workspace/bun
 cd "$SRC"

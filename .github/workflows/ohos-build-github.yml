@@ -209,11 +209,45 @@ jobs:
           echo "sdk formula (from llvm@21 deps): $SDK_FORMULA"
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install $SDK_FORMULA" 2>&1 | tail -3 \
             || echo "::warning::$SDK_FORMULA install failed — build script falls back to the legacy keg"
-          # bun-bootstrap also left bun.rb's direct deps on 2026-09-12 (the
-          # formula itself remains in the tap); our lane still drives bun
+          # bun-bootstrap left bun.rb's direct deps on 2026-09-12 (the
+          # formula itself remained in the tap); our lane still drives bun
           # install + the build scripts through it, so pour it explicitly.
-          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install bun-bootstrap" 2>&1 | tail -3 \
-            || echo "::warning::bun-bootstrap install failed — build driver bun unavailable"
+          # 2026-09-26: bun-bootstrap is GONE from the floating tap and its
+          # bottle was pruned from the harmonybrew CDN (upstream restructured
+          # social4hyq/core into a small OHOS-only tap; the canary has been
+          # red on exactly this check since 09-22). The tap's own bun.rb /
+          # bun@1.4.rb bottles are prebuilt OHOS bun in the same driver role —
+          # fall back to them. Two traps this pour must dodge (run #322 died
+          # on both): the image bakes HOMEBREW_OHOS_BOTTLE_BINARY_SIGN=1 and
+          # the auto-sign pass corrupts bun ELFs on a re-sign (upstream
+          # build.sh: "the corruption mode is specific to bun") — unset it;
+          # and a keg existing is not enough, so a candidate only counts once
+          # its binary actually runs. Last resort: our own verified OHOS build
+          # from the ohos-latest release asset, staged at .driver-bun — the
+          # resolution loops in bun install / build-ohos-container.sh check
+          # that path too. Hard-fail here: the verify gate below would reject
+          # a driverless pour anyway, and set -e makes the exit stick.
+          docker exec -e HOMEBREW_NO_AUTO_UPDATE=1 -e HOMEBREW_NO_ANALYTICS=1 \
+            -e HOMEBREW_NO_ENV_HINTS=1 "$CONTAINER" bash -lc '
+              unset HOMEBREW_OHOS_BOTTLE_BINARY_SIGN
+              for k in bun-bootstrap bun bun@1.4; do
+                p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+                if [ ! -x "$p" ] || ! "$p" --version >/dev/null 2>&1; then
+                  brew install --force "$k" >/dev/null 2>&1 \
+                    || brew install --force "social4hyq/core/$k" >/dev/null 2>&1 || true
+                  p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+                fi
+                [ -x "$p" ] && "$p" --version >/dev/null 2>&1 \
+                  && { echo "driver bun keg: $k"; exit 0; }
+              done
+              d="/workspace/bun/.driver-bun/bun"
+              mkdir -p "$(dirname "$d")" \
+                && curl -fsSL -o "$d" \
+                  "https://github.com/jx-bit/bun/releases/download/ohos-latest/bun-ohos-aarch64-github-unsigned" \
+                && chmod +x "$d" && "$d" --version >/dev/null 2>&1 \
+                && { echo "driver bun: self-hosted (ohos-latest asset) at $d"; exit 0; }
+              echo "::error::no build driver bun (all kegs + self-hosted asset unusable)"; exit 1
+            '
           # cargo (OHOS-host rust nightly) links libz. The dependency tree
           # drifts when `brew update` refreshes the index (09-07: the pour
           # set flipped from libedit+libffi to bzip2+libxml2 and zlib
@@ -247,11 +281,27 @@ jobs:
           # installs) and NOT JSON-derived direct deps (the image ships no
           # jq); rename tracking is the daily canary's job.
           docker exec -e SDK_FORMULA="$SDK_FORMULA" "$CONTAINER" bash -lc '
-            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
+            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
+            # Build driver: bun-bootstrap while the tap still carries it, else
+            # the bun / bun@1.4 bottle fallback or the self-hosted .driver-bun
+            # staging path (2026-09-26 — see the install step above). A
+            # candidate only counts once its binary actually runs.
+            driver=""
+            for k in bun-bootstrap bun bun@1.4; do
+              p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 && { driver="$p"; break; }
+            done
+            if [ -z "$driver" ]; then
+              p=/workspace/bun/.driver-bun/bun
+              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 && driver="$p"
+            fi
+            [ -n "$driver" ] \
+              || { echo "::error::no runnable build driver bun (kegs + self-hosted asset all unusable)"; exit 1; }
+            echo "OK  driver bun -> $driver ($("$driver" --version 2>/dev/null | head -1))"
             # Keg existence is not enough: a renamed sdk keg without
             # native/sysroot passes the loop above and dies 6 minutes later in
             # configure (2026-09-17). Assert the sysroot layout itself.
@@ -263,7 +313,6 @@ jobs:
               || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
             echo "OK  sysroot -> $sysroot"
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
-            echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
             echo "=== openssl@3 lib ==="; ls "$(brew --prefix openssl@3)/lib"/libssl* 2>/dev/null | head -3
           '
 
@@ -353,9 +402,25 @@ jobs:
       # (esbuild, lezer-cpp for cppbind) actually landed in node_modules.
       - name: bun install (root + node-fallbacks)
         run: |
-          BUN=$(docker exec "$CONTAINER" bash -lc 'brew --prefix bun-bootstrap')/bin/bun
-          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun && $BUN install" 2>&1 | tail -30
-          docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun/src/node-fallbacks && $BUN install" 2>&1 | tail -30
+          # Same driver candidates as the install/verify steps above, gated on
+          # the binary actually running (a pour-time re-sign can corrupt the
+          # ELF — see the install step). LD_LIBRARY_PATH mirrors
+          # build-ohos-container.sh: the driver needs brew libs on the loader
+          # path and this step runs before that script.
+          BUN_DIR=$(docker exec "$CONTAINER" bash -lc '
+            for k in bun-bootstrap bun bun@1.4; do
+              p="$(brew --prefix "$k" 2>/dev/null)/bin"
+              [ -x "$p/bun" ] && "$p/bun" --version >/dev/null 2>&1 && { echo "$p"; exit 0; }
+            done
+            [ -x /workspace/bun/.driver-bun/bun ] && { echo "/workspace/bun/.driver-bun"; exit 0; }
+            echo "::error::no runnable build driver bun keg" >&2; exit 1
+          ') || { echo "::error::driver bun resolution failed"; exit 1; }
+          BUN="$BUN_DIR/bun"
+          echo "driver bun: $BUN"
+          BREW_PREFIX=$(docker exec "$CONTAINER" bash -lc 'brew --prefix')
+          export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/opt/libxml2/lib:$BREW_PREFIX/opt/zlib/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          docker exec -e LD_LIBRARY_PATH -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun && $BUN install" 2>&1 | tail -30
+          docker exec -e LD_LIBRARY_PATH -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun/src/node-fallbacks && $BUN install" 2>&1 | tail -30
           # Verify deps actually installed (the | tail above masks the exit code;
           # esbuild postinstall may have failed without aborting the step).
           docker exec "$CONTAINER" bash -lc '
@@ -778,12 +843,12 @@ jobs:
 
           > 占位文档 —— 发布流水线自动生成，等待开发者补充。
           > 此文档描述滚动线的当前状态（在途变更、已知问题等），
-          > 直接编辑并 push 到 `release-docs` 分支，
+          > 直接编辑并 push 到 \`release-docs\` 分支，
           > release 页面的链接会自动显示最新内容。
 
           ## 已知限制
 
-          （鸿蒙系统限制导致的功能缺失/降级，具体条目……）'
+          （鸿蒙系统限制导致的功能缺失/降级，具体条目……）"
           for attempt in 1 2 3; do
             if gh api "repos/${{ github.repository }}/contents/${DOC}?ref=release-docs" >/dev/null 2>&1; then
               echo "✅ ${DOC} already exists — untouched"
@@ -805,7 +870,8 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          BODY: /tmp/latest-body.md
+          # Same file the Generate release body step writes above.
+          BODY: /tmp/release-body.md
         run: |
           TITLE="Bun OHOS Cross-Build (latest)"
           [ "$RELEASE_TARGET" = "latest" ] || TITLE="Bun OHOS $RELEASE_TARGET"
