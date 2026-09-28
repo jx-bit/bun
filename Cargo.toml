@@ -100,7 +100,6 @@ members = [
   "src/spawn",
   "src/spawn_sys",
   "src/bunfig",
-  "src/bun_bin",
   "src/ohos_sign",
 ]
 # `vendor/lolhtml` (the `lol_html` crate) is a non-member path dependency,

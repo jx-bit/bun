@@ -1,0 +1,235 @@
+# CI — GitHub Actions carrier for the official Buildkite single-pipeline
+# semantics (.buildkite/ci.ts). We have no Buildkite, so this workflow is the
+# closest equivalent on GitHub-hosted runners.
+#
+# Job ↔ official step mapping:
+#   build        ↔ getBuildBunStep   (one lane per target)
+#   test         ↔ getTestBunStep    (sharded via runner.node.mjs)
+#   binary-size  ↔ getBinarySizeStep (record-only until S6)
+#
+# Not yet ported (S5/S6, one line each):
+#   - full platform matrix (darwin / windows / musl / asan)
+#   - verify-baseline
+#   - canary release
+#   - commit tags ([skip tests] etc.)
+#   - windows lane (moves in from build-x86.yml in S5)
+
+name: CI
+
+on:
+  push:
+    branches: [ohos-aarch64]
+  pull_request:
+    branches: [ohos-aarch64]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Match build-x86.yml / the Dockerfile: pin CC/CXX so configure picks the
+  # freshly-installed clang-23 over whatever older clang the runner ships.
+  RUST_TOOLCHAIN: nightly-2026-07-20
+  CC: clang
+  CXX: clang++
+
+jobs:
+  build:
+    name: Build ${{ matrix.triplet }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x64
+            runner: ubuntu-24.04
+            triplet: bun-linux-x64
+            build-dir: build/release-x86-linux-x64
+            exe: bun
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            triplet: bun-linux-aarch64
+            build-dir: build/release-x86-linux-arm64
+            exe: bun
+
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Linux toolchain ────────────────────────────────────────────────
+      # ubuntu-24.04(-arm) ship cmake + ninja + clang, but the clang is older
+      # than the 21.1 floor (legacy comment — now 23.1) tools.ts enforces, so install LLVM 23 from
+      # apt.llvm.org (same script the Dockerfile uses).
+      - name: Install LLVM 23 + build tools (linux)
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build cmake build-essential git curl wget gnupg lsb-release \
+            libxml2-dev nasm pkg-config
+          # apt.llvm.org installer: ./llvm.sh 23 all  (clones clang, lld, llvm tools)
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 23 || { echo "llvm.sh failed"; exit 1; }
+          # Surface clang-23 / lld-23 as the unversioned names configure looks for.
+          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip llvm-objcopy; do
+            sudo ln -sf "/usr/bin/$t-23" "/usr/bin/$t"
+          done
+          sudo ln -sf /usr/bin/clang-23 /usr/bin/cc
+          sudo ln -sf /usr/bin/clang++-23 /usr/bin/c++
+          clang --version | head -1
+          cmake --version | head -1
+          ninja --version
+
+      # ── Rust (both) ────────────────────────────────────────────────────
+      # rust-toolchain.toml pins nightly-2026-07-20 + the cross-target list.
+      # We install with the host target only (the release profile builds
+      # native), which is faster than pulling every Tier 2 target's std.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # ── Bun (codegen runtime) ──────────────────────────────────────────
+      # configure.ts findBun() needs bun for `bun install` + codegen scripts.
+      # The repo's setup-bun action pulls a released bun for the host arch.
+      - name: Setup Bun (codegen)
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: bun install (root)
+        shell: bash
+        run: |
+          bun --version
+          bun install --frozen-lockfile 2>&1 | tail -20 || bun install 2>&1 | tail -20
+
+      - name: bun install (src/node-fallbacks)
+        shell: bash
+        run: |
+          cd src/node-fallbacks
+          bun install --frozen-lockfile 2>&1 | tail -20 || bun install 2>&1 | tail -20
+
+      # ── Build ──────────────────────────────────────────────────────────
+      # S4 done: the official cross-compile command is now in use (the
+      # comment above documents the WebKit pin + lto decisions).
+      - name: Configure + build Bun
+        shell: bash
+        run: |
+          set -eo pipefail
+          # Official upstream CI command (S4): ci-build profile + explicit
+          # target. WebKit pinned to the 0f966e81 tree the local C++ sources
+          # are written against (the upstream default 299c532 changes WebKit
+          # headers — see .omo/drafts/s4-execution-package.md). --lto=off
+          # until a runner with enough memory for the ThinLTO link exists.
+          bun scripts/build.ts \
+            --profile=ci-build \
+            --os=linux \
+            --arch=${{ matrix.arch }} \
+            --webkit-version=0f966e81b78c84bb23213e391bc679c4ef83e56b \
+            --lto=off \
+            --build-dir=${{ matrix.build-dir }} 2>&1 | tee build.log; rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "=== build failed (rc=$rc) — first errors ==="
+            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|not found|missing" build.log | head -50 || true
+            echo "=== last 80 lines ==="
+            tail -80 build.log || true
+            exit 1
+          fi
+          echo "=== build OK ==="
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.triplet }}
+          path: ${{ matrix.build-dir }}/${{ matrix.exe }}
+          if-no-files-found: warn
+
+  test:
+    name: Test ${{ matrix.triplet }} shard ${{ matrix.shard }}/${{ matrix['max-shards'] }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, max-shards: 4, shard: 0 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, max-shards: 4, shard: 1 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, max-shards: 4, shard: 2 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, max-shards: 4, shard: 3 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, max-shards: 2, shard: 0 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, max-shards: 2, shard: 1 }
+
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download built bun
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.triplet }}
+          path: ./artifact
+
+      - name: Run test shard
+        shell: bash
+        run: |
+          set -e
+          chmod +x ./artifact/bun
+          node scripts/runner.node.mjs \
+            --exec-path ./artifact/bun \
+            --shard ${{ matrix.shard }} \
+            --max-shards ${{ matrix['max-shards'] }} \
+            --exclude integration/bun-types \
+            --exclude internal/source-lints
+
+  binary-size:
+    name: binary-size
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The script runs under bun; setup-bun also gives us `bun scripts/...`.
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: Download built buns
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-linux-x64
+          path: ./bin/bun-linux-x64
+      - name: Download built buns (aarch64)
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-linux-aarch64
+          path: ./bin/bun-linux-aarch64
+
+      # Record-only: --files measures the downloaded artifacts directly
+      # (BuildKite meta-data does not exist here). The canary-size baseline
+      # needs a GH-side store — S6 introduces one and flips on the FAIL gate
+      # ([skip size check] commit-tag semantics land with it).
+      - name: Report binary sizes
+        shell: bash
+        run: |
+          chmod +x ./bin/bun-linux-x64/bun ./bin/bun-linux-aarch64/bun
+          bun scripts/binary-size.ts \
+            --targets '[{"triplet":"bun-linux-x64"},{"triplet":"bun-linux-aarch64"}]' \
+            --files '{"bun-linux-x64":"bin/bun-linux-x64/bun","bun-linux-aarch64":"bin/bun-linux-aarch64/bun"}' \
+            --threshold-mb 0.5 \
+            --no-fail

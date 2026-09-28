@@ -1,28 +1,28 @@
-# Standard x86_64 / arm64 Bun builds on GitHub-hosted runners (no OHOS, no
-# Buildkite). This is the non-OHOS leg of the "unified CI matrix":
-#   linux-x64   -> ubuntu-24.04         (x86_64 GNU)
-#   windows-x64 -> windows-2025         (x86_64 MSVC, native)
-#   linux-arm64 -> ubuntu-24.04-arm     (aarch64 GNU, optional 4th leg)
+# Windows x64 Bun build on a GitHub-hosted runner (no OHOS, no Buildkite).
+#
+# Linux lanes (linux-x64 / linux-arm64) moved to ci.yml (official
+# single-pipeline convergence); this file keeps windows only until S5 merges
+# it into ci.yml.
 #
 # The OHOS aarch64 build lives in ohos-build-github.yml and is NOT touched
-# here. This workflow only builds the stock oven-sh/bun targets that the
+# here. This workflow only builds the stock oven-sh/bun windows target that
 # upstream produces in Buildkite (see .buildkite/ci.mjs). We use GitHub's
 # native runners instead — no OHOS toolchain, no social4hyq container.
 #
 # Build strategy: `--profile=release` (webkit=prebuilt, lto=false, native
 # host target). The release profile resolves target os/arch from the host,
-# so on ubuntu-24.04 it produces a linux-x64 `bun` ELF and on windows-2025
-# a windows-x64 `bun.exe` PE. WebKit is fetched as a prebuilt tarball from
-# oven-sh/WebKit GitHub releases (scripts/build/deps/webkit.ts prebuiltUrl),
-# so we never compile WebKit from source — keeps the run under ~20min.
+# so on windows-2025 it produces a windows-x64 `bun.exe` PE. WebKit is
+# fetched as a prebuilt tarball from oven-sh/WebKit GitHub releases
+# (scripts/build/deps/webkit.ts prebuiltUrl), so we never compile WebKit from
+# source — keeps the run under ~20min.
 #
-# Toolchain: LLVM 21 (apt.llvm.org on linux, chocolatey on windows) to match
-# the LLVM_VERSION_RANGE ">=21.1.0 <23.0.0" enforced by tools.ts. Rust
-# nightly-2026-07-20 matches rust-toolchain.toml. Bun for codegen comes from
-# the repo's own setup-bun action. On Windows, build.ts auto re-execs into
-# the VS dev shell (vs-shell.ps1) for cl.exe/mt.exe/rc.exe paths.
+# Toolchain: LLVM (chocolatey on windows) to match the LLVM_VERSION_RANGE
+# ">=21.1.0 <23.0.0" enforced by tools.ts. Rust nightly-2026-07-20 matches
+# rust-toolchain.toml. Bun for codegen comes from the repo's own setup-bun
+# action. build.ts auto re-execs into the VS dev shell (vs-shell.ps1) for
+# cl.exe/mt.exe/rc.exe paths.
 
-name: Build Bun (x86/arm64, github-hosted)
+name: Build Bun (windows, github-hosted)
 
 on:
   workflow_dispatch:
@@ -33,10 +33,6 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: nightly-2026-07-20
-  # Match the Dockerfile: pin CC/CXX so configure picks the freshly-installed
-  # clang-21 over whatever older clang the runner image ships.
-  CC: clang
-  CXX: clang++
 
 jobs:
   build:
@@ -47,50 +43,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: linux-x64
-            runner: ubuntu-24.04
-            exe: bun
-            build-dir: build/release-x86-linux-x64
           - label: windows-x64
             runner: windows-2025
             exe: bun.exe
             build-dir: build/release-x86-windows-x64
-          - label: linux-arm64
-            runner: ubuntu-24.04-arm
-            exe: bun
-            build-dir: build/release-x86-linux-arm64
 
     steps:
       - name: Checkout Bun source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # ── Linux toolchain ────────────────────────────────────────────────
-      # ubuntu-latest / ubuntu-24.04-arm ship cmake + ninja + clang, but the
-      # clang is typically older than the 21.1 floor tools.ts enforces, so
-      # install LLVM 21 from apt.llvm.org (same script the Dockerfile uses).
-      - name: Install LLVM 21 + build tools (linux)
-        if: runner.os == 'Linux'
-        run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            ninja-build cmake build-essential git curl wget gnupg lsb-release \
-            libxml2-dev nasm pkg-config
-          # apt.llvm.org installer: ./llvm.sh 21 all  (clones clang, lld, llvm tools)
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 21 || { echo "llvm.sh failed"; exit 1; }
-          # Surface clang-21 / lld-21 as the unversioned names configure looks for.
-          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip llvm-objcopy; do
-            sudo ln -sf "/usr/bin/$t-21" "/usr/bin/$t"
-          done
-          sudo ln -sf /usr/bin/clang-21 /usr/bin/cc
-          sudo ln -sf /usr/bin/clang++-21 /usr/bin/c++
-          clang --version | head -1
-          cmake --version | head -1
-          ninja --version
 
       # ── Windows toolchain ──────────────────────────────────────────────
       # windows-2025 ships VS 2022 (build.ts finds it via vs-shell.ps1),
@@ -99,7 +61,6 @@ jobs:
       # install the latest chocolatey LLVM (22.1.7 at writing — within the
       # >=21.1.0 <23.0.0 range). nasm is needed for BoringSSL win-x64 asm.
       - name: Install LLVM + nasm (windows)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install -y --no-progress llvm
@@ -112,7 +73,7 @@ jobs:
           cmake --version | Select-Object -First 1
           ninja --version
 
-      # ── Rust (both) ────────────────────────────────────────────────────
+      # ── Rust ───────────────────────────────────────────────────────────
       # rust-toolchain.toml pins nightly-2026-07-20 + the cross-target list.
       # We install with the host target only (the release profile builds
       # native), which is faster than pulling every Tier 2 target's std.
@@ -177,20 +138,12 @@ jobs:
           set -e
           OUT="${{ matrix.build-dir }}/${{ matrix.exe }}"
           # Fallback: some profiles name the output bun-profile(.exe).
-          [ -f "$OUT" ] || OUT="${{ matrix.build-dir }}/bun-profile${{ runner.os == 'Windows' && '.exe' || '' }}"
+          [ -f "$OUT" ] || OUT="${{ matrix.build-dir }}/bun-profile.exe"
           [ -f "$OUT" ] || { echo "ERROR: binary not found at $OUT"; ls -la "${{ matrix.build-dir }}"; exit 1; }
           echo "=== binary ==="
           ls -lh "$OUT"
           file "$OUT" || true
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            file "$OUT" | grep -iqE "ELF.*(x86-64|aarch64|ARM aarch64)" || { echo "ERROR: not an ELF for expected arch"; exit 1; }
-            echo "=== ELF header ==="
-            readelf -h "$OUT" 2>/dev/null | head -20 || true
-            echo "=== NEEDED libs ==="
-            readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
-          else
-            file "$OUT" | grep -iqE "PE32|MS-DOS|Windows" || { echo "ERROR: not a Windows PE"; exit 1; }
-          fi
+          file "$OUT" | grep -iqE "PE32|MS-DOS|Windows" || { echo "ERROR: not a Windows PE"; exit 1; }
           echo "=== validation OK ==="
 
       - name: Dump failure diagnostics

@@ -1132,6 +1132,7 @@ extern "C" uint64_t* Bun__getStandaloneModuleGraphELFVaddr()
 // Windows PE section handling
 #include <windows.h>
 #include <winnt.h>
+#include <atomic> // OHOS fork (S4-2): for the execve/pthread_create interposers below
 
 static uint64_t* pe_section_size = nullptr;
 static uint8_t* pe_section_data = nullptr;
@@ -1180,3 +1181,49 @@ extern "C" uint8_t* Bun__getStandaloneModuleGraphPEData()
 }
 
 #endif
+
+// ── OHOS fork (S4-2): execve/pthread_create interposers from upstream ──
+// These pair with the linker's --wrap=execve/--wrap=pthread_create flags:
+// they make pthread_create retry across an in-flight exec of this process.
+
+// an exec of this process is retried instead. `execve_generation` counts execs ever started
+// so one that began and ended inside a single pthread_create is still seen; it is bumped
+// after `threads_in_execve` and read before it.
+static std::atomic<int> threads_in_execve { 0 };
+static std::atomic<unsigned> execve_generation { 0 };
+// The clone(CLONE_VM) child of posix_spawn_bun execs in this address space and never returns
+// to undo a count, so only the pid recorded in bun_initialize_process counts its execs.
+static pid_t execve_counting_pid = 0;
+
+extern "C" int __real_execve(const char*, char* const[], char* const[]);
+extern "C" int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
+
+extern "C" int __wrap_execve(const char* path, char* const argv[], char* const envp[])
+{
+    if (getpid() != execve_counting_pid)
+        return __real_execve(path, argv, envp);
+    threads_in_execve.fetch_add(1, std::memory_order_seq_cst);
+    execve_generation.fetch_add(1, std::memory_order_seq_cst);
+    int rc = __real_execve(path, argv, envp);
+    // Only reached when execve failed and the old image keeps running.
+    threads_in_execve.fetch_sub(1, std::memory_order_seq_cst);
+    return rc;
+}
+
+// The attempt bound keeps a real limit, hit while an exec never completes, from looping forever.
+extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*start_routine)(void*), void* arg)
+{
+    for (int attempt = 0;; attempt++) {
+        unsigned generation = execve_generation.load(std::memory_order_seq_cst);
+        bool execInFlight = threads_in_execve.load(std::memory_order_seq_cst) > 0;
+        int rc = __real_pthread_create(thread, attr, start_routine, arg);
+        if (rc != EAGAIN || attempt >= 1000)
+            return rc;
+        if (!execInFlight && threads_in_execve.load(std::memory_order_seq_cst) == 0
+            && execve_generation.load(std::memory_order_seq_cst) == generation) {
+            // No exec overlapped this attempt: a real limit.
+            return rc;
+        }
+        usleep(1000);
+    }
+}
