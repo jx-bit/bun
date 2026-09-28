@@ -21,7 +21,8 @@
 # Signing: NOT done here. The container runs a Linux kernel (not OHOS), so
 # unsigned ELFs exec fine (the musl loader does not check .codesign —
 # confirmed: cargo reached symbol-relocation before failing on OpenSSL).
-# install-bun-ohos.sh signs the final binary on the device at install time.
+# The release workflows pre-sign the final binary with ohos-selfsign
+# (src/ohos_sign) before publishing.
 #
 # Run via:
 #   docker exec -e RUST_TOOLCHAIN -e NINJA_JOBS "$CONTAINER" \
@@ -72,12 +73,33 @@ fi
 echo "OHOS sysroot: $SDK_SYSROOT"
 SDK_ROOT_DIR=$(dirname "$SDK_SYSROOT")
 ICU_PREFIX=$(brew --prefix icu4c@78)
-# bun-bootstrap left bun.rb's direct deps on 2026-09-12 but our lane drives
-# bun install + the build scripts through it — pour it when the keg is absent.
-if [ ! -d "$(brew --prefix bun-bootstrap 2>/dev/null || true)" ]; then
-  brew install bun-bootstrap || echo "::warning::bun-bootstrap pour failed; build driver bun unavailable"
+# The build driver bun: SELF-HOSTED FIRST — the workflow stages our own
+# verified build at /workspace/bun/.driver-bun/bun (run #338 showed the tap
+# fork's bun ignores BUN_INSTALL_IGNORE_SCRIPTS and rolls back installs on
+# postinstall failure non-deterministically, so the floating tap kegs are
+# only a fallback). Same acceptance rule as everywhere else: a candidate
+# only counts once its binary actually runs.
+BUN_BOOT_DIR=""
+if [ -x /workspace/bun/.driver-bun/bun ] \
+    && /workspace/bun/.driver-bun/bun --version >/dev/null 2>&1; then
+  BUN_BOOT_DIR=/workspace/bun/.driver-bun
+else
+  for k in bun-bootstrap bun bun@1.4; do
+    if ! "$(brew --prefix "$k" 2>/dev/null || true)/bin/bun" --version >/dev/null 2>&1; then
+      env -u HOMEBREW_OHOS_BOTTLE_BINARY_SIGN brew install --force "$k" >/dev/null 2>&1 \
+        || env -u HOMEBREW_OHOS_BOTTLE_BINARY_SIGN brew install --force "social4hyq/core/$k" >/dev/null 2>&1 \
+        || true
+    fi
+    p="$(brew --prefix "$k" 2>/dev/null || true)/bin"
+    if [ -x "$p/bun" ] && "$p/bun" --version >/dev/null 2>&1; then
+      BUN_BOOT_DIR="$p"
+      break
+    fi
+  done
 fi
-BUN_BOOT_DIR=$(brew --prefix bun-bootstrap)/bin
+[ -n "$BUN_BOOT_DIR" ] \
+  || { echo "::error::no build driver bun (self-hosted + all kegs unusable)"; exit 1; }
+echo "build driver bun: $BUN_BOOT_DIR/bun ($("$BUN_BOOT_DIR/bun" --version 2>/dev/null | head -1))"
 RUST_HOME="/data/storage/el2/base/tmp/rust-${RUST_TOOLCHAIN}"
 SRC=/workspace/bun
 cd "$SRC"

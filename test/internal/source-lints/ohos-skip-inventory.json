@@ -1,0 +1,102 @@
+{
+  "entries": [
+    {
+      "file": "test/cli/run/multi-run.test.ts",
+      "conditions": ["isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "early port-era skip, untriaged (known device-side difference with the scripts-with-pipes case)",
+      "device_plan": "triage: reproduce the pipes case on a device, fix the runtime or narrow the skip once the root cause is known, then record the outcome here"
+    },
+    {
+      "file": "test/integration/esbuild/esbuild.test.ts",
+      "conditions": ["isWindowsArm64 || isOHOSArm64"],
+      "direction": "skipped-on-device",
+      "reason": "esbuild native binary availability: OHOS aarch64 has no official esbuild binary for the pinned corpus version (openharmony only supported from esbuild 0.25.x late releases, see the knowledge ledger)",
+      "device_plan": "narrow or remove once the corpus pins an esbuild version with openharmony binaries; keep the exemption until then"
+    },
+    {
+      "file": "test/js/node/tls/node-tls-server.test.ts",
+      "conditions": ["isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "untriaged (TLS SNI callback case, known device-side difference, early port-era skip)",
+      "device_plan": "triage: reproduce the SNI case on a device, fix or narrow the skip once the root cause is known"
+    },
+    {
+      "file": "test/js/node/http/node-http.test.ts",
+      "conditions": ["isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "untriaged (http proxy case, issue#4295; device proxy environment differs)",
+      "device_plan": "triage: re-test on device against a local proxy (Bun.serve), then narrow the skip"
+    },
+    {
+      "file": "test/js/node/fs/fs.test.ts",
+      "conditions": ["isOHOS", "isWindows || isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "two untriaged groups: readdir recursive x100 (device performance/behavior difference) and pre-epoch negative timestamps (OHOS filesystem timestamp representation)",
+      "device_plan": "triage group by group; for the pre-epoch group first check whether it relates to the timestamp hardening in the cwd/rlimit/tmpdir round"
+    },
+    {
+      "file": "test/js/node/process/process-stdin.test.ts",
+      "conditions": ["isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "untriaged (stdin pipe single-read boundary; same platform pipe-behavior family as spawn-stdin-readable-stream)",
+      "device_plan": "triage together with the F1/pipe-capture family follow-up rounds"
+    },
+    {
+      "file": "test/js/bun/spawn/spawn-stdin-readable-stream.test.ts",
+      "conditions": ["isOHOS", "isWindows || isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "spawn stderr backpressure and related pipe-stream cases -- same platform pipe-behavior family as the pipe-capture fixes (see the in-file comment)",
+      "device_plan": "re-verify with the pipe-capture follow-up rounds and narrow the skip; record the outcome here"
+    },
+    {
+      "file": "test/js/bun/spawn/spawn-ohos-node-userinfo.test.ts",
+      "conditions": ["!isOHOS || !node"],
+      "direction": "device-only",
+      "reason": "runtime feature = the node-child os.userInfo preload (fixes ENOENT for app-sandbox uids); always skipped outside devices, only a device can verify it",
+      "device_plan": "the device PATH must have a real node (install via harmonybrew). Do NOT substitute the bun-as-node shim -- its embedded shim makes the preload probe a no-op, so the test would pass without exercising the real path. Acceptance steps in the node-userinfo issue doc"
+    },
+    {
+      "file": "test/js/node/os/os-ohos.test.ts",
+      "conditions": ["!isOHOS"],
+      "direction": "device-only",
+      "reason": "exact-value OHOS platform semantics (machine/platform/type/userInfo) -- the upstream suite's loose membership assertion cannot catch the machine misreport; always skipped outside devices",
+      "device_plan": "must run in the device fulltest round. The machine assertion is red until the os.machine fix merges (it guards exactly that fix); verify with bun -e 'os.machine()' expecting aarch64"
+    },
+    {
+      "file": "test/js/bun/http/serve-directory-routes.test.ts",
+      "conditions": ["!isLinux || isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "openat2 is killed by the OHOS kernel seccomp with SIGSYS (C-probe evidence in the knowledge ledger); since the openat2 gate fix, routing falls back to openat, and this case asserts the openat2-specific error surface",
+      "device_plan": "permanent-exemption candidate (kernel limitation, not our bug); remove the skip if the kernel ever allows openat2"
+    },
+    {
+      "file": "test/js/bun/shell/commands/mv.test.ts",
+      "conditions": ["isOHOS"],
+      "direction": "skipped-on-device",
+      "reason": "untriaged (EXDEV cross-device rename semantics on device filesystems)",
+      "device_plan": "triage: reproduce the EXDEV scenario on a device and attribute"
+    },
+    {
+      "file": "test/bundler/bun-build-compile.test.ts",
+      "conditions": ["isOHOS || !patchelf || !existsSync(ldso", "!isOHOS || !ohosNode"],
+      "direction": "skipped-on-device",
+      "reason": "bun build --compile post-processing needs host tools (patchelf/ld.so) that do not exist on a device; the ohosNode branch needs a device node",
+      "device_plan": "the patchelf/ld.so surface is covered by the CI container lane (device exemption is legitimate); narrow the ohosNode condition once a device node is available"
+    },
+    {
+      "file": "test/regression/issue/24742.test.ts",
+      "conditions": ["!isLinux || isOHOS || !patchelf || !existsSync(ldso"],
+      "direction": "skipped-on-device",
+      "reason": "same as bun-build-compile: compile post-processing depends on host patchelf/ld.so, exempt on device",
+      "device_plan": "covered by the CI container lane; permanent-exemption candidate on device"
+    },
+    {
+      "file": "test/regression/issue/29290.test.ts",
+      "conditions": ["!isLinux || isOHOS || !patchelf || !existsSync(ldso"],
+      "direction": "skipped-on-device",
+      "reason": "same as bun-build-compile: compile post-processing depends on host patchelf/ld.so, exempt on device",
+      "device_plan": "covered by the CI container lane; permanent-exemption candidate on device"
+    }
+  ]
+}

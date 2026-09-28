@@ -68,9 +68,15 @@ name: Cross-compile Bun (aarch64 host)
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      sha:
+        description: 'Commit to build (defaults to the triggering ref)'
+        required: false
+        type: string
 
 concurrency:
-  group: cross-x86-${{ github.ref }}
+  group: cross-x86-${{ inputs.sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -99,6 +105,16 @@ jobs:
             exe: bun
             build-dir: build/cross-linux-x64
             rust-target: x86_64-unknown-linux-gnu
+          # linux-arm64 on the aarch64 host is a native build (host == target):
+          # no sysroot, no cross flags — included for release parity with the
+          # reference delivery line's five-product rolling release.
+          - label: linux-arm64
+            os: linux
+            arch: aarch64
+            abi: gnu
+            exe: bun
+            build-dir: build/cross-linux-arm64
+            rust-target: aarch64-unknown-linux-gnu
           - label: windows-x64
             os: windows
             arch: x64
@@ -125,7 +141,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ inputs.sha || github.event.pull_request.head.sha || github.ref }}
 
       # ── Host toolchain: LLVM 21 + build tools ──────────────────────────
       # ubuntu-24.04-arm ships an older clang; tools.ts enforces
@@ -223,7 +239,11 @@ jobs:
       # on this aarch64 host (--override-arch amd64). The --wrap list in
       # flags.ts (1237-1296) covers 2.31 -> 2.17 so the binary stays portable.
       - name: Install linux-x64 sysroot
-        if: matrix.os == 'linux'
+        # x64 leg only: the provisioned rootfs is amd64. The linux-arm64 leg
+        # is a native build (host == target) and compiles against the host's
+        # own aarch64 glibc — pointing it at this sysroot fails with
+        # "bits/libc-header-start.h file not found".
+        if: matrix.os == 'linux' && matrix.arch == 'x64'
         run: |
           set -eo pipefail
           SYSROOT="/opt/linux-sysroot-glibc"
@@ -345,7 +365,14 @@ jobs:
           ls -lh "$OUT"
           file "$OUT" || true
           if [ "${{ matrix.os }}" = "linux" ]; then
-            file "$OUT" | grep -iqE "ELF.*x86-64" || { echo "ERROR: not an ELF x86-64"; exit 1; }
+            # Expected ELF machine follows the leg's arch token — the shared
+            # verify step serves both linux legs (x64 and the native arm64).
+            case "${{ matrix.arch }}" in
+              x64)    elf_re="ELF.*x86-64" ;;
+              aarch64) elf_re="ELF.*(aarch64|ARM aarch64)" ;;
+              *)      elf_re="ELF" ;;
+            esac
+            file "$OUT" | grep -iqE "$elf_re" || { echo "ERROR: not the expected ELF ($elf_re)"; exit 1; }
             echo "=== ELF header (readelf -h) ==="
             readelf -h "$OUT" 2>/dev/null | head -20 || true
             echo "=== Machine ==="

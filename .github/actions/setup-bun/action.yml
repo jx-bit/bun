@@ -51,5 +51,9 @@ runs:
         mkdir -p "$RUNNER_TEMP/.bun/bin"
         mv "${target}"/bun* "$RUNNER_TEMP/.bun/bin/"
         chmod +x "$RUNNER_TEMP"/.bun/bin/*
-        ln -fs "$RUNNER_TEMP/.bun/bin/bun" "$RUNNER_TEMP/.bun/bin/bunx"
+        # bunx = bun alias. On Windows Git Bash, ln -s may fall back to a
+        # copy or fail entirely if symlink support is off; cp is a safe
+        # fallback (bunx just needs to exec bun). On POSIX ln -s works.
+        ln -fs "$RUNNER_TEMP/.bun/bin/bun" "$RUNNER_TEMP/.bun/bin/bunx" 2>/dev/null \
+          || cp -f "$RUNNER_TEMP"/.bun/bin/bun* "$RUNNER_TEMP/.bun/bin/bunx"
         echo "$RUNNER_TEMP/.bun/bin" >> "$GITHUB_PATH"

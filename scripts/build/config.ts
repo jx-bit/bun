@@ -332,16 +332,6 @@ export interface Config {
   /** Cross-compiled ICU path. */
   ohosIcuDir: string | undefined;
 
-  // ─── OHOS cross-compilation (ohos only, undefined elsewhere) ───
-  /** Sysroot path for OHOS NDK. */
-  ohosSysroot: string | undefined;
-  /** OHOS SDK root path. */
-  ohosSdkRoot: string | undefined;
-  /** Cross-compiled libc++/libunwind path. */
-  ohosCrossLibs: string | undefined;
-  /** Cross-compiled ICU path. */
-  ohosIcuDir: string | undefined;
-
   // ─── Versioning ───
   /** Bun's own version (from package.json). */
   version: string;
@@ -790,6 +780,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const freebsd = os === "freebsd";
   const ohos = os === "ohos";
   const unix = linux || darwin || freebsd || ohos;
+  const kqueue = darwin || freebsd;
   const x64 = arch === "x64";
   const arm64 = arch === "aarch64";
   // Darwin target on a non-darwin host (Linux CI box building macOS
@@ -1316,7 +1307,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     cacheDir,
     vendorDir,
     cc: toolchain.cc,
-    hostCc: ohos ? findHostCc() : toolchain.cc,
+    hostCc: ohos ? findHostCc() : (toolchain.hostCc ?? toolchain.cc),
     cxx: toolchain.cxx,
     hostCxx: toolchain.hostCxx ?? toolchain.cxx,
     clangVersion: toolchain.clangVersion,
@@ -1326,6 +1317,9 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     ld: ld64StripSwap?.ld ?? ld,
     rustLld: toolchain.rustLld,
     rustLlvmVersion: toolchain.rustLlvmVersion,
+    // Cross strips: linux-gnu uses <triple>-strip (GNU, handles -R .eh_frame
+    // fully; host strip rejects foreign-arch ELF); other cross targets use
+    // llvm-strip.
     strip:
       ld64StripSwap?.strip ??
       (crossTarget !== undefined

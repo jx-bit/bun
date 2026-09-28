@@ -398,21 +398,22 @@ impl PackageManager {
             // C++20 <source_location>; route to a newer clang via $OHOS_CC/$OHOS_CXX
             // + $OHOS_SYSROOT. OHOS_CC unconditionally OVERRIDES any pre-existing CC
             // (the install env defaults CC="clang", which lacks source_location).
-            if let Ok(cc) = std::env::var("OHOS_CC") {
-                let _ = script_env.put(b"CC", cc.as_bytes());
+            if let Some(cc) = bun_core::getenv_z(bun_core::zstr!("OHOS_CC")) {
+                let _ = script_env.put(b"CC", cc);
             } else if script_env.get(b"CC").unwrap_or(b"").is_empty() {
                 let _ = script_env.put(b"CC", b"clang");
             }
-            if let Ok(cxx) = std::env::var("OHOS_CXX") {
-                let _ = script_env.put(b"CXX", cxx.as_bytes());
+            if let Some(cxx) = bun_core::getenv_z(bun_core::zstr!("OHOS_CXX")) {
+                let _ = script_env.put(b"CXX", cxx);
             } else if script_env.get(b"CXX").unwrap_or(b"").is_empty() {
                 let _ = script_env.put(b"CXX", b"clang++");
             }
-            if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
-                let flag = format!("--sysroot={}", sysroot);
-                let _ = script_env.put(b"CFLAGS", flag.as_bytes());
-                let _ = script_env.put(b"CXXFLAGS", flag.as_bytes());
-                let _ = script_env.put(b"LDFLAGS", flag.as_bytes());
+            if let Some(sysroot) = bun_core::getenv_z(bun_core::zstr!("OHOS_SYSROOT")) {
+                let mut sysroot_flags = b"--sysroot=".to_vec();
+                sysroot_flags.extend_from_slice(sysroot);
+                let _ = script_env.put(b"CFLAGS", &sysroot_flags);
+                let _ = script_env.put(b"CXXFLAGS", &sysroot_flags);
+                let _ = script_env.put(b"LDFLAGS", &sysroot_flags);
             }
         }
 

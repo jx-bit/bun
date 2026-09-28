@@ -5243,8 +5243,6 @@ pub(crate) fn fix_dead_code_elimination() {
         posix_platform_specific_v8_apis::_ZN2v86BigInt3NewEPNS_7IsolateEl,
         posix_platform_specific_v8_apis::_ZN2v812HeapProfiler25StartSamplingHeapProfilerEmiNS0_13SamplingFlagsE,
     );
-    #[cfg(all(not(windows), target_env = "ohos"))]
-    keep_symbols!(posix_platform_specific_v8_apis::_ZN2v85Array3NewENS_5LocalINS_7ContextEEEmNSt3__18functionIFNS_10MaybeLocalINS_5ValueEEEvEEE);
     #[cfg(all(
         not(windows),
         not(target_os = "android"),

@@ -364,15 +364,14 @@ export const globalFlags: Flag[] = [
     desc: "Full debug info, zstd-compressed",
   },
   {
+    flag: "-g3",
+    when: c => c.unix && c.debug && c.ohos,
+    desc: "Full debug info, uncompressed (OHOS host LLVM lacks zstd)",
+  },
   {
     flag: ["-g", "-gz=zstd"],
     when: c => c.unix && c.release && !c.lto,
     desc: "Full debug info (types and variables) where no LTO link has to carry it: local release, asan, the non-LTO CI lanes",
-  },
-  {
-    flag: "-g3",
-    when: c => c.unix && c.debug && c.ohos,
-    desc: "Full debug info, uncompressed (OHOS host LLVM lacks zstd)",
   },
   {
     // -glldb implies -fstandalone-debug: every TU emits the definition of

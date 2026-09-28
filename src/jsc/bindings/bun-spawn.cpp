@@ -548,12 +548,10 @@ extern "C" ssize_t posix_spawn_bun(
 
     if (child == 0) {
 #if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
-        // Close read end in child
         close(errpipe[0]);
 #endif
         return startChild();
     }
-#endif
 
 #if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
     // macOS/FreeBSD/OHOS fork() path: use self-pipe trick to detect exec failure

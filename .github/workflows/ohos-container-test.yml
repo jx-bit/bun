@@ -12,7 +12,9 @@
 #     --exec-path=<tested binary>
 #
 # The device/self-hosted lane remains in ohos-full-test.yml (unchanged).
-# Triggers: same shape as the original (push paths / dispatch / weekly).
+# Triggers: push paths / dispatch. No schedule: the full suite minus five
+# exclusions is structurally red on the port's known-failure baseline —
+# run on demand, optionally with --test-filter for a partial pass.
 # ──────────────────────────────────────────────────────────────────────
 
 name: ohos-container-test
@@ -37,9 +39,6 @@ on:
         required: false
         type: string
         default: ''
-  schedule:
-    # Weekly, Sunday 21:00 UTC.
-    - cron: '0 21 * * 0'
 
 permissions:
   contents: read

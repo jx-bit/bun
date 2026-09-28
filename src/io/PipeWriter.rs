@@ -144,7 +144,10 @@ pub trait PosixPipeWriter {
                 // `force` because on such a kernel the fd is still armed —
                 // the needs_rearm fast path skips the syscall entirely.
                 // The next buffered write re-registers via register_poll().
-                _ = poll.unregister(crate::Loop::get(), true);
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    _ = poll.unregister(crate::Loop::get(), true);
+                }
             }
             // Some kernels (observed on HongMeng/OHOS) keep delivering ready
             // events for `fd` even after the CTL_DEL above reports success:
@@ -160,6 +163,7 @@ pub trait PosixPipeWriter {
             // times, so the time window keeps this from misfiring there.
             // Reduced idle CPU on an affected OHOS build from ~100% to
             // ~6-8% (measured via /proc/<pid>/stat ground truth).
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             {
                 use bun_threading::Guarded;
                 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};

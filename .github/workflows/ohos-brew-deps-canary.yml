@@ -14,10 +14,13 @@
 #
 # Formula names are resolved dynamically — the sdk from llvm@21's deps,
 # the verified set from bun.rb's current resolved tree — so a rename alone
-# should not turn this red. Red means a real pour failure (atomgit CDN
-# 404s are retried once below) or a contract change the resolution cannot
-# track; either way, mirror the fix into ohos-build-github.yml, whose
-# install/verify steps must stay in sync with this file.
+# should not turn this red. Red means the evaluation itself broke (a pour
+# failure — atomgit CDN 404s are retried once below — or a missing keg).
+# A sysroot-less floating tip is NOT red: that is the normal
+# "nothing to bump" steady state (the build lane stays pinned) and is
+# reported as a warning — steady-state red is alarm fatigue. Mirror fixes
+# into ohos-build-github.yml, whose install/verify steps must stay in
+# sync with this file.
 
 name: OHOS brew-deps canary (container)
 
@@ -89,8 +92,25 @@ jobs:
           echo "SDK_FORMULA=$SDK_FORMULA" >> "$GITHUB_ENV"
           docker exec ohos-canary bash -lc "$BREW_ENV brew install $SDK_FORMULA" 2>&1 | tail -3 \
             || echo "::warning::$SDK_FORMULA install failed"
-          docker exec ohos-canary bash -lc "$BREW_ENV brew install bun-bootstrap" 2>&1 | tail -3 \
-            || echo "::warning::bun-bootstrap install failed"
+          # bun-bootstrap vanished from the floating tap and its bottle was
+          # pruned from the harmonybrew CDN (2026-09-22+ tap restructure; the
+          # build lane falls back the same way). The tap's own bun.rb /
+          # bun@1.4.rb bottles are prebuilt OHOS bun in the same driver role.
+          # The auto-sign pass corrupts bun ELFs on a re-sign (upstream
+          # build.sh) — unset the baked sign env for these pours.
+          docker exec ohos-canary bash -lc '
+            unset HOMEBREW_OHOS_BOTTLE_BINARY_SIGN
+            for k in bun-bootstrap bun bun@1.4; do
+              p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+              if [ ! -x "$p" ] || ! "$p" --version >/dev/null 2>&1; then
+                brew install --force "$k" >/dev/null 2>&1 \
+                  || brew install --force "social4hyq/core/$k" >/dev/null 2>&1 || true
+                p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+              fi
+              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 \
+                && { echo "driver bun keg: $k"; break; }
+            done
+          ' || echo "::warning::no build driver bun from tap (bun-bootstrap, bun, bun@1.4 all failed)"
           docker exec ohos-canary bash -lc "$BREW_ENV brew install zlib" 2>&1 | tail -3 \
             || echo "::warning::zlib install failed (cargo links it)"
           # The build lane pins this tap (OHOS_CORE_PIN in
@@ -99,26 +119,42 @@ jobs:
           CORE_SHA=$(docker exec ohos-canary bash -lc \
             'git -C "$(brew --repo harmonybrew/core)" rev-parse HEAD' || true)
           echo "harmonybrew/core tip validated: ${CORE_SHA:-<unavailable>}"
+          echo "CORE_SHA=$CORE_SHA" >> "$GITHUB_ENV"
 
       - name: Verify kegs (representative set + dynamic sdk)
         run: |
           set -e
           set -o pipefail
-          docker exec -e SDK_FORMULA="$SDK_FORMULA" ohos-canary bash -lc '
-            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
+          docker exec -e SDK_FORMULA="$SDK_FORMULA" -e CORE_SHA="${CORE_SHA:-}" ohos-canary bash -lc '
+            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
             done
+            # Build driver: bun-bootstrap while the tap still carries it, else
+            # the bun / bun@1.4 bottle fallback (2026-09-26 — mirrored from the
+            # build lane). A candidate only counts once its binary runs; a tip
+            # where no driver keg pours is a broken tip.
+            driver=""
+            for k in bun-bootstrap bun bun@1.4; do
+              p="$(brew --prefix "$k" 2>/dev/null)/bin/bun"
+              [ -x "$p" ] && "$p" --version >/dev/null 2>&1 && { driver="$p"; break; }
+            done
+            [ -n "$driver" ] \
+              || { echo "::error::no runnable build driver bun (kegs all unusable)"; exit 1; }
+            echo "OK  driver bun -> $driver ($("$driver" --version 2>/dev/null | head -1))"
             # Same sysroot contract as the build lane verify step: a renamed
             # sdk keg without native/sysroot pours fine and kills configure.
+            # Absent sysroot = tip not consumable: warn and pass (keep the
+            # pin); red stays reserved for a broken evaluation.
             sysroot=""
             for d in "$(brew --prefix)"/opt/ohos-sdk*/; do
               [ -d "${d}native/sysroot" ] && { sysroot="${d}native/sysroot"; break; }
             done
-            [ -n "$sysroot" ] \
-              || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
-            echo "OK  sysroot -> $sysroot"
+            if [ -n "$sysroot" ]; then
+              echo "OK  sysroot -> $sysroot (tip consumable — bump OHOS_CORE_PIN to ${CORE_SHA:-<unavailable>})"
+            else
+              echo "::warning::no ohos-sdk* keg carries native/sysroot — tip NOT consumable, keep OHOS_CORE_PIN"
+            fi
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
-            echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
           '
