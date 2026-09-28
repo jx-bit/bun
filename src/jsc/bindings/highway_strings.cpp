@@ -2352,8 +2352,11 @@ template size_t MemMemTwoWayFallback<uint16_t>(const uint16_t*, size_t, const ui
 // The extern "C" only affects linkage (for C callers), not namespace resolution.
 extern "C" {
 
-void* highway_memmem(const uint8_t* haystack, size_t haystack_len, const uint8_t* needle, size_t needle_len)
+void* highway_memmem(const void* haystack_ptr, size_t haystack_len, const void* needle_ptr, size_t needle_len)
 {
+    // void* params match libc memmem — the alias below overrides that symbol, and clang 23 requires identical alias/aliasee types.
+    const uint8_t* haystack = static_cast<const uint8_t*>(haystack_ptr);
+    const uint8_t* needle = static_cast<const uint8_t*>(needle_ptr);
     return BUN_HWY_DISPATCH(MemMemImpl)(haystack, haystack_len, needle, needle_len);
 }
 

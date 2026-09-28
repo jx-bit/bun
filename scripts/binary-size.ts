@@ -1,7 +1,7 @@
 // Measure stripped binary sizes for every release platform and compare them
 // against the latest finished `main` build ("canary").
 //
-// CI mode (invoked from .buildkite/ci.mjs after all *-build-bun jobs finish):
+// CI mode (invoked from .buildkite/ci.ts after all *-build-bun jobs finish):
 //   bun scripts/binary-size.ts \
 //     --targets '[{"triplet":"bun-darwin-aarch64"},...]' \
 //     --threshold-mb 0.5 \
@@ -11,7 +11,7 @@
 //   any binary grew by more than --threshold-mb vs canary; on main it never
 //   fails (--no-fail) but still shows the comparison against the previous main
 //   build. Escape hatch: put `[skip size check]` in the commit message, which
-//   makes ci.mjs set soft_fail on this step (it still runs and annotates).
+//   makes ci.ts set soft_fail on this step (it still runs and annotates).
 //
 // Local mode (no args):
 //   bun scripts/binary-size.ts
@@ -20,10 +20,9 @@
 //   release by reading uncompressed binary sizes straight from each zip's
 //   central directory (Range request — no full download, no BuildKite access).
 
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { parseArgs } from "node:util";
-// @ts-ignore — utils.mjs has JSDoc types but no .d.ts
-import { markBuildkiteStepReported } from "./utils.mjs";
+import { markBuildkiteStepReported } from "./buildkite.ts";
 
 type Target = { triplet: string };
 type Sizes = Record<string, number>;
@@ -31,6 +30,10 @@ type Sizes = Record<string, number>;
 const { values } = parseArgs({
   options: {
     targets: { type: "string" },
+    // GitHub Actions mode: triplet → local binary path. The workflow downloads
+    // each build job's artifact and passes the extracted paths; BuildKite
+    // meta-data/artifacts/annotations don't exist there.
+    files: { type: "string" },
     "threshold-mb": { type: "string", default: "0.5" },
     "no-fail": { type: "boolean", default: false },
     release: { type: "boolean", default: false },
@@ -66,33 +69,48 @@ async function getSecret(name: string): Promise<string | undefined> {
   return stdout.toString().trim() || undefined;
 }
 
-// ─── Collect current build's sizes from meta-data ───
-// Each *-build-bun job sets `binary-size:<triplet>` after stripping
-// (scripts/build/ci.ts).
+// ─── Collect current build's sizes ───
+// BuildKite: each *-build-bun job sets `binary-size:<triplet>` meta-data
+// after stripping (scripts/build/ci.ts). GitHub Actions: --files maps each
+// triplet to the downloaded artifact's binary.
 
-console.log("--- Reading sizes from build meta-data");
+const files: Record<string, string> | undefined = values.files ? JSON.parse(values.files) : undefined;
+
+console.log("--- Reading sizes");
 const sizes: Sizes = {};
-for (const { triplet } of targets) {
-  const v = agent(["meta-data", "get", `binary-size:${triplet}`], { quiet: true });
-  if (!v) {
-    console.log(`  ${triplet}: not set (build may have failed), skipping`);
-    continue;
+if (files) {
+  for (const { triplet } of targets) {
+    const path = files[triplet];
+    if (!path || !existsSync(path)) {
+      console.log(`  ${triplet}: file missing (${path ?? "no path passed"}), skipping`);
+      continue;
+    }
+    sizes[triplet] = statSync(path).size;
+    console.log(`  ${triplet.padEnd(30)} ${fmtBytes(sizes[triplet]).padStart(10)}`);
   }
-  sizes[triplet] = parseInt(v, 10);
-  console.log(`  ${triplet.padEnd(30)} ${fmtBytes(sizes[triplet]).padStart(10)}`);
+} else {
+  for (const { triplet } of targets) {
+    const v = agent(["meta-data", "get", `binary-size:${triplet}`], { quiet: true });
+    if (!v) {
+      console.log(`  ${triplet}: not set (build may have failed), skipping`);
+      continue;
+    }
+    sizes[triplet] = parseInt(v, 10);
+    console.log(`  ${triplet.padEnd(30)} ${fmtBytes(sizes[triplet]).padStart(10)}`);
+  }
 }
 
 await Bun.write(
   "binary-sizes.json",
   JSON.stringify({ build: buildNumber, branch, release: isRelease, sizes }, null, 2),
 );
-agent(["artifact", "upload", "binary-sizes.json"]);
+if (!files) agent(["artifact", "upload", "binary-sizes.json"]);
 
 // ─── Baselines ───
 
 type Baseline = { label: string; href?: string; sizes: Sizes };
 
-const ghToken = (await getSecret("GITHUB_TOKEN")) ?? process.env.GITHUB_TOKEN;
+const ghToken = files ? process.env.GITHUB_TOKEN : ((await getSecret("GITHUB_TOKEN")) ?? process.env.GITHUB_TOKEN);
 const ghHeaders: Record<string, string> = ghToken ? { Authorization: `Bearer ${ghToken}` } : {};
 
 async function githubJson<T>(path: string): Promise<T> {
@@ -139,6 +157,12 @@ async function baselineFromCommit(sha: string, label: (n: number) => string): Pr
 console.log(`--- Fetching ${buildKind} baseline`);
 let canaryNote = "";
 const canary: Baseline | undefined = await (async () => {
+  if (files) {
+    // GitHub Actions has no BuildKite artifacts to read baselines from; a
+    // GH-side baseline store lands with S6. Until then GH runs are record-only.
+    canaryNote = "GH Actions run: no canary baseline yet (S6 wires a GH-side store)";
+    return undefined;
+  }
   const commits = await githubJson<{ sha: string }[]>("commits?sha=main&per_page=15");
   for (const { sha } of commits) {
     const b = await baselineFromCommit(sha, n => `main #${n}`);
@@ -160,7 +184,7 @@ function delta(now: number, base: number | undefined): Delta | undefined {
   return { base, bytes: now - base };
 }
 
-// Preserve --targets order (buildPlatforms in ci.mjs) so OS families stay grouped.
+// Preserve --targets order (buildPlatforms in ci.ts) so OS families stay grouped.
 const rows: Row[] = targets
   .filter(t => sizes[t.triplet] !== undefined)
   .map(({ triplet }) => ({
@@ -217,19 +241,26 @@ ${tableRows}
 ${failed ? `<p>Add <code>[skip size check]</code> to the commit message if this increase is intentional.</p>` : ""}
 </details>`;
 
-Bun.spawnSync(
-  [
-    "buildkite-agent",
-    "annotate",
-    "--style",
-    failed ? "error" : "info",
-    "--context",
-    "binary-size",
-    "--priority",
-    failed ? "5" : "2",
-  ],
-  { stdin: new Blob([annotation]), stderr: "inherit" },
-);
+if (files) {
+  // GitHub Actions: the job summary replaces a BuildKite annotation.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    await Bun.write(process.env.GITHUB_STEP_SUMMARY, annotation + "\n", { append: true });
+  }
+} else {
+  Bun.spawnSync(
+    [
+      "buildkite-agent",
+      "annotate",
+      "--style",
+      failed ? "error" : "info",
+      "--context",
+      "binary-size",
+      "--priority",
+      failed ? "5" : "2",
+    ],
+    { stdin: new Blob([annotation]), stderr: "inherit" },
+  );
+}
 
 for (const r of rows) {
   const c = r.canary ? `  ${buildKind} ${fmtDelta(r.canary.bytes).padStart(10)}` : "";

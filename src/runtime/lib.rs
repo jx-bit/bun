@@ -5,6 +5,15 @@
 #![deny(improper_ctypes, improper_ctypes_definitions)]
 #![feature(thread_local)]
 #![feature(adt_const_params)]
+// For `__rust_no_alloc_shim_is_unstable_v2` in bin_entry.
+#![feature(rustc_attrs)]
+#![allow(internal_features)]
+
+/// OHOS fork (S4-2): bin_entry provides `main` + panic/alloc C ABI exports
+/// (upstream moved these from the former bun_bin staticlib crate into
+/// bun_runtime so `cargo build -p bun_runtime` covers the whole link).
+#[cfg(not(test))]
+mod bin_entry;
 
 pub mod error;
 pub use error::{Error, Result};

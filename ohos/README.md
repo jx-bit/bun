@@ -9,7 +9,8 @@
    `git reset --soft <base>` → 重写 commit → `push --force-with-lease`；
    **禁止追加 commit**。
    **push 前必跑 `bash ohos/check-pr.sh <branch>`**（校验：单 commit、commit message
-   与 PR body 无 fork 名/内部路径引用、diff 不含 ohos/ 与 Cargo.lock、base 含交付线
+   与 PR body 无 fork 名/内部路径引用、diff 的 ohos/ 部分仅限入库白名单
+   （README.md、fulltest/、agent-guides/）且不含 Cargo.lock、base 含交付线
    tip）——FAIL 不推送。
 2. **每个 PR（含 docs/CI）必须在 `ohos/issues/` 立档**：
    `pr<N>-p<P0阻断/P1回归/P2不完整/P3不阻断>-<关键词>.md`（根因 → 修复 →
@@ -30,25 +31,27 @@
 
 ## 任务路由
 
-| 要做什么 | 去哪 |
-|---|---|
-| 修一个失败用例/文件 | `analys/`（README 索引取最新归因文档）→ 规则 4 排除法 → 规则 2 立档 → port/修 → PR |
-| 看某个 PR 的来龙去脉 | `issues/`（README 索引行 → 对应 pr 文档） |
-| 设备复跑数据回来了 | 解包到 `analys/test-reports/` → 更新归因文档数字与簇归属 → 重算剩余清单 |
-| OHOS 内核/沙箱怪行为 | `knowledge/`（README 有索引：codesign/spawn primer、测试台账、CI 对比） |
-| 工作流步骤细节 | `skills/`（16 步：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析） |
-| 对外使用者说明 | `OpenHarmony-Bun-已知限制与规避指南.md`（功能级限制 × 影响 × 规避，无内部信息） |
+| 要做什么                     | 去哪                                                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| 修一个失败用例/文件          | `analys/`（README 索引取最新归因文档）→ 规则 4 排除法 → 规则 2 立档 → port/修 → PR     |
+| 看某个 PR 的来龙去脉         | `issues/`（README 索引行 → 对应 pr 文档）                                              |
+| 设备复跑数据回来了           | 解包到 `analys/test-reports/` → 更新归因文档数字与簇归属 → 重算剩余清单                |
+| OHOS 内核/沙箱怪行为         | `knowledge/`（README 有索引：codesign/spawn primer、测试台账、CI 对比）                |
+| 工作流步骤细节               | `skills/`（16 步：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析）                   |
+| 对外使用者说明               | `OpenHarmony-Bun-已知限制与规避指南.md`（功能级限制 × 影响 × 规避，无内部信息）        |
+| agent 提 PR / 读 CI / 看日志 | agent-guides/（通用 skill：gh-create-pr / gh-ci-status / gh-ci-logs 等，参数化可复用） |
 
 ## 目录
 
-| 目录 | 内容 |
-|---|---|
-| `issues/` | PR 台账（每 PR 一档 + 索引 + 规程），**主索引入口** |
-| `knowledge/` | 长期知识：测试树改动台账、设备 STATUS、codesign/spawn primer、修复指南 |
-| `analys/` | 归因/取证/验收 + 轮次数据集（archive 存历史轮） |
-| `skills/` | 工作流手册（16 步 + 索引）：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析 |
-| `fulltest/` | 设备全量测试脚本（launcher / 部署 / 安装签名）——**入库** |
-| `_archive/` | 暂时归档（未跟踪：junit 变体脚本等 round C 定型后再定去留） |
+| 目录          | 内容                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| `issues/`     | PR 台账（每 PR 一档 + 索引 + 规程），**主索引入口**                                          |
+| `knowledge/`  | 长期知识：测试树改动台账、设备 STATUS、codesign/spawn primer、修复指南                       |
+| `analys/`     | 归因/取证/验收 + 轮次数据集（archive 存历史轮）                                              |
+| `skills/`     | 工作流手册（16 步 + 索引）：拉代码 → 对比 → 立档 → 修复 → PR → CI → 失败分析                 |
+| `fulltest/`   | 设备全量测试脚本（launcher / 部署 / 安装签名）——**入库**                                     |
+| `_archive/`   | 暂时归档（未跟踪：junit 变体脚本等 round C 定型后再定去留）                                  |
+| agent-guides/ | 通用 agent 工作流 skill（gh PR/CI 状态/日志/修复循环 + check-pr.sh 门禁），参数化不绑定 fork |
 
 > 本 README 已入库（AI/新人入口）；其余子目录（issues/knowledge/analys/skills 等）
 > 仍为构建机本地工作区，精简后分批入库；`analys/binary/reports/BINARIES-SOURCE.md`

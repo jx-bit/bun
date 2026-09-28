@@ -41,10 +41,14 @@ export const zstd: Dependency = {
     commit: ZSTD_COMMIT,
   }),
 
-  patches: (cfg: import("../config.ts").Config) => {
-    if (cfg.ohos) return ["patches/zstd/ohos-qsort-r.patch"];
-    return [];
-  },
+  // x64 targets nehalem, so zstd picks its BMI2 kernels at run time and
+  // probes CPUID in every CCtx/DCtx init. CPUID is a VM exit under a
+  // hypervisor (about 2 us each, two per init). Probe once instead.
+  patches: cfg => [
+    "patches/zstd/bmi2-probe-once.patch",
+    // OHOS musl lacks qsort_r.
+    ...(cfg.ohos ? ["patches/zstd/ohos-qsort-r.patch"] : []),
+  ],
 
   build: cfg => {
     const sources = [...SOURCES];

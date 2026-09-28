@@ -487,6 +487,9 @@ pub fn is_package_path(path: &[u8]) -> bool {
 
 /// Precondition: `non_absolute_path` is known to not be absolute.
 #[inline]
+// The `#[cfg(windows)]` guard below is intentional: on a single-OS clippy run
+// the remaining `if .. return false; true` reads as needless_bool.
+#[allow(clippy::needless_bool)]
 pub fn is_package_path_not_absolute(non_absolute_path: &[u8]) -> bool {
     debug_assert!(!is_absolute(non_absolute_path));
     debug_assert!(!non_absolute_path.starts_with(b"/"));

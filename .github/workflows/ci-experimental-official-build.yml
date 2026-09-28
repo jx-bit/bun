@@ -1,0 +1,119 @@
+# S2 实验 lane：用官方构建体系（1.4.2，vendor 在 scripts/build-official/）构建本地 1.4.0-OHOS 源码树。
+#
+# 目的：验证官方构建体系对本地源码树的兼容性——只跑通该命令本身，不产出版本发布。
+# 预期状态：S3 修完兼容错误前本 lane 常红，红是信号不是失败；S3 绿后才与 ci.yml
+# 建立关系（S4 把 ci.yml 的 build 步骤切到官方构建体系后，本 lane 与
+# scripts/build-official/ 一起删除）。
+#
+# 与 ci.yml 的区别（刻意为之）：
+#   1. 触发：仅 workflow_dispatch，绝不 push/PR 触发（实验 lane，不干扰现有 CI）。
+#   2. LLVM：官方 1.4.2 构建体系 pins clang 23.1.x（scripts/build-official/build/
+#      ci-images/spec.ts → pins.llvm.version = "23.1.1"），而本地 canonical
+#      ci.yml 装的是 LLVM 21（1.4.0 的 pin）。本地冒烟已验证：装 LLVM 21 会在
+#      clang 探测处直接失败（"Could not find clang (version >=23.1.0 <23.1.99)"）。
+#      所以这里照抄 ci.yml 的安装写法（apt.llvm.org llvm.sh），但版本用 23.1。
+#      这也是 S3 的一个工作项：S4 切 ci.yml 时要把 LLVM 21 → 23.1。
+#   3. 步骤裁剪：只做官方构建体系需要的最小工具集（LLVM + Rust + Bun），
+#      不跑 ohos 容器/签名/测试等 canonical lane 的环节。
+
+name: CI Experimental (official build system)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  official-build:
+    name: Official build system × local source tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    env:
+      # Pin CC/CXX so configure picks the freshly-installed clang-23 over any
+      # older clang the runner ships (same pattern as ci.yml).
+      RUST_TOOLCHAIN: nightly-2026-07-20
+      CC: clang
+      CXX: clang++
+
+    steps:
+      - name: Checkout Bun source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Linux toolchain ────────────────────────────────────────────────
+      # Same apt.llvm.org installer pattern as ci.yml, but version 23.1:
+      # the vendored official build system pins clang 23.1.x (see header).
+      - name: Install LLVM 23.1 + build tools (linux)
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build cmake build-essential git curl wget gnupg lsb-release \
+            libxml2-dev nasm pkg-config
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 23.1 || { echo "llvm.sh failed"; exit 1; }
+          # Surface clang-23.1 / lld-23.1 as the unversioned names configure looks for.
+          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip llvm-objcopy; do
+            sudo ln -sf "/usr/bin/$t-23.1" "/usr/bin/$t" || sudo ln -sf "/usr/bin/$t-23" "/usr/bin/$t"
+          done
+          sudo ln -sf /usr/bin/clang-23.1 /usr/bin/cc || sudo ln -sf /usr/bin/clang-23 /usr/bin/cc
+          sudo ln -sf /usr/bin/clang++-23.1 /usr/bin/c++ || sudo ln -sf /usr/bin/clang++-23 /usr/bin/c++
+          clang --version | head -1
+          cmake --version | head -1
+          ninja --version
+
+      # ── Rust (build system resolves cargo/rustc) ───────────────────────
+      # rust-toolchain.toml pins nightly-2026-07-20.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # ── Bun (configure.ts findBun() needs bun; also runs the build script) ──
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: bun install (root)
+        shell: bash
+        run: |
+          bun --version
+          bun install --frozen-lockfile 2>&1 | tail -20 || bun install 2>&1 | tail -20
+
+      # ── Build (official 1.4.2 build system on the local 1.4.0-OHOS tree) ──
+      # The point of this lane: capture the compat errors S3 will fix.
+      #
+      # WebKit pin (S3 finding #2): the local 1.4.0-OHOS source tree's JSC
+      # bindings are built against WebKit @0f966e81 (same pin as
+      # ohos-build-github.yml and the canonical 1.4.0 build system). The
+      # official 1.4.2 default (299c532) would pull a prebuilt whose
+      # headers/ABI target the 1.4.2 tree — a known OHOS-line failure mode
+      # (WEBKIT_REF drift). Carry this pin forward at S4 when ci.yml
+      # switches to the official build system.
+      - name: Run official build system (ci-build profile)
+        shell: bash
+        run: |
+          set -eo pipefail
+          bun scripts/build-official/build.ts \
+            --profile=ci-build --os=linux --arch=x64 \
+            --webkit-version=0f966e81b78c84bb23213e391bc679c4ef83e56b 2>&1 | tee build-official.log; rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "=== official build failed (rc=$rc) — first errors ==="
+            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|not found|missing|version >=" build-official.log | head -60 || true
+            echo "=== last 80 lines ==="
+            tail -80 build-official.log || true
+            exit 1
+          fi
+          echo "=== official build OK ==="
+
+      # ── Artifact ────────────────────────────────────────────────────────
+      # Upload the build log whether the step passed or failed (S3 triage input).
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-build-log
+          path: build-official.log
+          if-no-files-found: warn
