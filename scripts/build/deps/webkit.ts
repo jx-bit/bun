@@ -3,7 +3,7 @@
  * for local mode. Override via `--webkit-version=<hash>` to test a branch.
  * From https://github.com/oven-sh/WebKit releases.
  */
-export const WEBKIT_VERSION = "0f966e81b78c84bb23213e391bc679c4ef83e56b";
+export const WEBKIT_VERSION = "6119947592b6e1c1faef02a4c2e03174cf05d062";
 
 /**
  * WebKit (JavaScriptCore) — the JS engine.
@@ -304,6 +304,23 @@ export const webkit: Dependency = {
     // -no-pie rides along in CMAKE_C_FLAGS so try_compile() probes link on
     // PIE-default distros — without it the driver still passes -pie and the
     // -fno-pic probe object fails R_X86_64_32S relocation, killing FindThreads.
+    if (cfg.ohos) {
+      // FindThreads' libc probe calls pthread_cancel, which OHOS musl
+      // deliberately does not declare (or provide). Define it to nothing
+      // so the probe compiles and the module concludes "threads in libc"
+      // (CMAKE_THREAD_LIBS_INIT=""); otherwise its library fallback
+      // "succeeds" without linking under
+      // CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY and invents a
+      // nonexistent -lpthreads that kills the final jsc link. Nothing in
+      // WTF/JSC/bmalloc calls pthread_cancel, so the macro is inert.
+      // Must live in THESE flags: our CMAKE_C_FLAGS args override the
+      // computeDepFlags/extraCFlags assembly in source.ts (see above).
+      // Parens are backslash-escaped: the flag string rides unquoted
+      // through try_compile children's build.ninja into sh, and sh
+      // strips the backslashes before clang sees the function-like
+      // macro. (Unescaped parens are a shell syntax error there.)
+      optFlags.push("-Dpthread_cancel\\(x\\)=");
+    }
     if (cfg.unix && cfg.abi !== "android" && !cfg.ohos) optFlags.push("-fno-pic", "-fno-pie", "-no-pie");
     if (cfg.lto) optFlags.push("-flto=thin");
     if (cfg.pgoGenerate) optFlags.push(`-fprofile-generate=${cfg.pgoGenerate}`);
@@ -382,6 +399,7 @@ export const webkit: Dependency = {
             CMAKE_FIND_ROOT_PATH: cfg.ohosSysroot,
             CMAKE_PREFIX_PATH: cfg.ohosIcuDir,
             ICU_ROOT: cfg.ohosIcuDir,
+            ICU_INCLUDE_DIR: join(cfg.ohosIcuDir!, "include"),
             CMAKE_THREAD_LIBS_INIT: "-lpthread",
             CMAKE_HAVE_THREADS_LIBRARY: "1",
             CMAKE_DL_LIBS: "",
@@ -403,6 +421,8 @@ export const webkit: Dependency = {
       CMAKE_EXPORT_COMPILE_COMMANDS: "ON",
       USE_BUN_JSC_ADDITIONS: "ON",
       USE_BUN_EVENT_LOOP: "ON",
+      // Match the prebuilt: JSC allocates through Bun's mimalloc, not libpas.
+      ...(cfg.asan ? {} : { USE_MIMALLOC: "ON", USE_EXTERNAL_MIMALLOC: "ON" }),
       ENABLE_BUN_SKIP_FAILING_ASSERTIONS: "ON",
       ALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS: "ON",
       ENABLE_REMOTE_INSPECTOR: "ON",
@@ -419,6 +439,9 @@ export const webkit: Dependency = {
       // Release local WebKit keeps debug info so JSC crashes symbolicate.
       // LTO stays plain Release (debug info + LTO bloats significantly).
       buildType: cfg.release && !cfg.lto ? "RelWithDebInfo" : cfg.buildType,
+      // OHOS generated-header copy rules are not reliable on the mounted
+      // filesystem when Ninja runs them concurrently.
+      ...(cfg.ohos ? { parallel: 1 } : {}),
     };
 
     if (cfg.windows) {

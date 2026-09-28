@@ -46,7 +46,7 @@ on:
       webkit_ref:
         description: 'WebKit fork branch/tag/commit to build against'
         required: false
-        default: 'caad865eb1a6e5ca4427f5ea1f066140b11953e7'
+        default: '6119947592b6e1c1faef02a4c2e03174cf05d062'
         type: string
 
 concurrency:
@@ -71,7 +71,7 @@ env:
   # declaredVariables/lexicalVariables and changed create() signature;
   # bun's BunAnalyzeTranspiledModule.cpp still uses the old API.
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: caad865eb1a6e5ca4427f5ea1f066140b11953e7
+  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
 
 jobs:
   build:
