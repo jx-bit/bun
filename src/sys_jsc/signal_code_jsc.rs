@@ -34,12 +34,10 @@ pub fn from_js(arg: JSValue, global_this: &JSGlobalObject) -> JsResult<SignalCod
     } else if (cfg!(target_env = "ohos") && arg.is_string())
         || (!cfg!(target_env = "ohos") && arg.is_string_literal())
     {
-        // SAFETY: on OHOS the WebKit fork exposes `is_string()` as the string
-        // predicate; elsewhere `is_string_literal()` is the documented contract
-        // for `as_string()` (see JSValue.rs: `debug_assert!(is_string_literal())`).
-        // Either ⇒ `as_string()` returns a non-null JSString cell; borrowed for
-        // `.length()` only.
-        if unsafe { &*arg.as_string() }.length() == 0 {
+        // On OHOS the WebKit fork exposes `is_string()` as the string
+        // predicate; elsewhere `is_string_literal()` is the documented
+        // contract. Either guarantees `as_string()` is non-null.
+        if arg.as_string().length() == 0 {
             return Ok(SignalCode::DEFAULT);
         }
         let signal_code = arg.to_enum::<SignalCode>(global_this, "signal")?;

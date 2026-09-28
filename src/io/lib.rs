@@ -500,6 +500,7 @@ bun_dispatch::link_interface! {
         MultiRunPipeReader,
         TestParallelWorkerPipe,
         LifecycleScript,
+        InstallGit,
         SecurityScan,
     ] {
         fn has_on_read_chunk() -> bool;
@@ -2252,6 +2253,8 @@ pub mod closer {
     #[cfg(windows)]
     use crate::IntrusiveUvFs as _;
     #[cfg(windows)]
+    use bun_sys::ReturnCodeExt as _;
+    #[cfg(windows)]
     use bun_sys::windows::libuv as uv;
     #[cfg(windows)]
     use core::ffi::c_void;
@@ -2279,9 +2282,9 @@ pub mod closer {
                     fd.uv(),
                     Some(Self::on_close),
                 )
-                .err_enum()
+                .errno()
                 {
-                    bun_core::debug_warn!("libuv close() failed = {}", err);
+                    bun_core::debug_warn!("libuv close() failed = {:?}", err);
                     drop(bun_core::heap::take(closer));
                 }
             }
@@ -2301,8 +2304,8 @@ pub mod closer {
                 );
 
                 #[cfg(debug_assertions)]
-                if let Some(err) = (*closer).io_request.result.err_enum() {
-                    bun_core::debug_warn!("libuv close() failed = {}", err);
+                if let Some(err) = (*closer).io_request.result.errno() {
+                    bun_core::debug_warn!("libuv close() failed = {:?}", err);
                 }
 
                 (*req).deinit();

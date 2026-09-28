@@ -13,8 +13,10 @@ on:
     branches: [main]
     paths:
       - "src/**/*.rs"
+      - "src/**/*.h"
+      - "src/**/*.cpp"
       - "src/**/*.classes.ts"
-      - "src/codegen/class-definitions.ts"
+      - "src/codegen/**"
       - "src/js/builtins.d.ts"
       - "src/jsc/bindings/**"
       - "packages/bun-types/redis.d.ts"
@@ -35,12 +37,15 @@ on:
       - "test/integration/**"
       - "test/regression/**"
       - ".github/workflows/source-lints.yml"
+      - ".github/workflows/comment-cop.yml"
       - ".github/actions/setup-bun/**"
   pull_request:
     paths:
       - "src/**/*.rs"
+      - "src/**/*.h"
+      - "src/**/*.cpp"
       - "src/**/*.classes.ts"
-      - "src/codegen/class-definitions.ts"
+      - "src/codegen/**"
       - "src/js/builtins.d.ts"
       - "src/jsc/bindings/**"
       - "packages/bun-types/redis.d.ts"
@@ -61,6 +66,7 @@ on:
       - "test/integration/**"
       - "test/regression/**"
       - ".github/workflows/source-lints.yml"
+      - ".github/workflows/comment-cop.yml"
       - ".github/actions/setup-bun/**"
   merge_group:
 

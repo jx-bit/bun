@@ -6,9 +6,9 @@
   },
   "type": "module",
   "dependencies": {
-    "typescript": "latest"
+    "typescript": "6.0.2"
   },
   "resolutions": {
-    "@types/node": "latest"
+    "@types/node": "26.2.0"
   }
 }
