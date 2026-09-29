@@ -76,6 +76,14 @@ env:
   # (ohos-brew-deps-canary.yml) keeps floating and validates newer core
   # tips daily; bump this SHA only after a green canary on the new tip.
   OHOS_CORE_PIN: 5380be4e3284cb409f6b17ba560570b217cf2707
+  # Pin the bun-formula tap the same way. The 2026-09-29 "bun14-take-over-
+  # bun-name" push (1e03f28560) added `depends_on "gcc"` to the floating
+  # bun formula; no gcc formula exists in harmonybrew/core, and brew's
+  # candidate search then loads the pinned core's ghc.rb — whose
+  # `on_catalina` DSL brew 7.x removed — so both pour attempts die at
+  # formula load. 99c90aea01 is the last tap commit validated green (#91's
+  # container run); bump only after a green canary on a newer tip.
+  OHOS_TAP_PIN: 99c90aea01c513246f215040dd9ab1a86b3daa9e
   CONTAINER: ohos
   TAP: ${{ vars.OHOS_TAP }}
   # In-container tap path (baked into the ci-runner image). Used for the
@@ -83,7 +91,7 @@ env:
   TAP_IN_CONTAINER: ${{ vars.OHOS_TAP_IN_CONTAINER }}
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
+  WEBKIT_REF: 2e2aa2290fac856d6f451ceacb58f7f5b44dd057
   RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
 
@@ -157,9 +165,12 @@ jobs:
           # warnings below judge `docker exec | tail` pipelines, and without
           # it tail's exit 0 always wins — a failed pour is reported as
           # success and the retry never fires (2026-09-14 finding).
-          # Refresh the formula index first: the baked index can reference
-          # bottles the CDN has pruned (stale 404 that fails identically on
-          # every retry). (social4hyq build.sh line 39.)
+          # `brew update` is required: brew 7.0.6_3 resolves the bun formula's
+          # `depends_on "gcc" => :build if OS.ohos?`, the baked brew does not
+          # ("No available formula gcc" — 2026-09-29 runs). Both taps are
+          # force-pinned right after, so the update cannot drift the formulas
+          # we pour; only brew itself moves, and 7.0.6_3 is the version this
+          # lane validated green.
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew update --quiet" \
             || echo "::warning::brew update failed; continuing with baked index"
           # brew update fast-forwards the baked harmonybrew/core tap to
@@ -177,6 +188,31 @@ jobs:
           else
             echo "::warning::OHOS_CORE_PIN unset — harmonybrew/core floats to origin/main"
           fi
+          if [ -n "$OHOS_TAP_PIN" ]; then
+            docker exec -e OHOS_TAP_PIN="$OHOS_TAP_PIN" -e TAP="$TAP" "$CONTAINER" bash -lc '
+              TAP_DIR="$(brew --repo "$TAP")"
+              git -C "$TAP_DIR" fetch origin main \
+                || { echo "::error::$TAP fetch failed"; exit 1; }
+              git -C "$TAP_DIR" checkout --detach "$OHOS_TAP_PIN" \
+                || { echo "::error::$TAP pin $OHOS_TAP_PIN not fetchable (rewritten upstream?)"; exit 1; }
+              echo "=== $TAP pinned to $OHOS_TAP_PIN ==="
+            '
+          else
+            echo "::warning::OHOS_TAP_PIN unset — $TAP floats to origin/main"
+          fi
+          # The bun formula (99c90aea01) declares `depends_on "gcc" => :build
+          # if OS.ohos?`, but harmonybrew/core has no gcc formula — brew's
+          # candidate search then loads the pinned core's ghc.rb, whose
+          # `on_catalina` DSL brew 7.0.6_3 removed, and the pour dies at
+          # formula load. This lane builds bun with the pinned llvm@21
+          # clang, not gcc, so drop that build-dep from the pinned copy.
+          docker exec -e TAP="$TAP" "$CONTAINER" bash -lc '
+            BUN_RB="$(brew --repo "$TAP")/Formula/b/bun.rb"
+            sed -i "/depends_on .gcc. => :build if OS.ohos?/d" "$BUN_RB"
+            grep -q "depends_on .gcc." "$BUN_RB" \
+              && { echo "::error::gcc build-dep still present in $BUN_RB"; exit 1; } \
+              || echo "=== bun formula gcc build-dep dropped ==="
+          '
           # Retry once after 90s for transient atomgit CDN 404s (social4hyq
           # build.sh lines 41-48 — brew reuses partial work).
           # --build-bottle (not --include-build: Harmonybrew's brew fork does
