@@ -1,0 +1,1553 @@
+diff --git a/src/ohos_sign/Cargo.toml b/src/ohos_sign/Cargo.toml
+new file mode 100644
+index 0000000000..8e1913648d
+--- /dev/null
++++ b/src/ohos_sign/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "ohos_sign"
++version = "0.0.0"
++edition = "2024"
++
++[lib]
++path = "src/lib.rs"
++
++[[bin]]
++name = "ohos-selfsign"
++path = "src/bin/ohos_selfsign.rs"
+diff --git a/src/ohos_sign/src/bin/ohos_selfsign.rs b/src/ohos_sign/src/bin/ohos_selfsign.rs
+new file mode 100644
+index 0000000000..14dafa8e0e
+--- /dev/null
++++ b/src/ohos_sign/src/bin/ohos_selfsign.rs
+@@ -0,0 +1,157 @@
++// Standalone CLI for the ohos_sign crate, which has no workspace
++// dependencies — bun_core::output / bun_sys are unavailable here, so
++// std I/O macros and std::fs are the only option.
++#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
++
++use std::path::Path;
++use std::process::ExitCode;
++
++fn usage(prog: &str) -> ! {
++    eprintln!(
++        "Usage:\n  {prog} sign   <input> [--output <out>] [--force]\n  {prog} check  <input>\n  {prog} verify <input>\n  {prog} strip  <input> [--output <out>]"
++    );
++    std::process::exit(1);
++}
++
++fn main() -> ExitCode {
++    let args: Vec<String> = std::env::args().collect();
++    let prog = args.first().map(|s| s.as_str()).unwrap_or("ohos-selfsign");
++    if args.len() < 3 {
++        usage(prog);
++    }
++    match args[1].as_str() {
++        "sign" => cmd_sign(&args[2..], prog),
++        "check" => cmd_check(&args[2..]),
++        "verify" => cmd_verify(&args[2..]),
++        "strip" => cmd_strip(&args[2..], prog),
++        _ => usage(prog),
++    }
++}
++
++fn cmd_sign(args: &[String], prog: &str) -> ExitCode {
++    let mut input: Option<&Path> = None;
++    let mut output: Option<&Path> = None;
++    let mut force = false;
++    let mut i = 0;
++    while i < args.len() {
++        match args[i].as_str() {
++            "--output" | "-o" => {
++                i += 1;
++                output = args.get(i).map(Path::new);
++            }
++            "--force" | "-f" => force = true,
++            s if s.starts_with('-') => usage(prog),
++            s if input.is_none() => input = Some(Path::new(s)),
++            _ => usage(prog),
++        }
++        i += 1;
++    }
++    let Some(input) = input else { usage(prog) };
++    let out = output.unwrap_or(input);
++    let bytes = match std::fs::read(input) {
++        Ok(b) => b,
++        Err(e) => {
++            eprintln!("ohos-selfsign: read {}: {e}", input.display());
++            return ExitCode::FAILURE;
++        }
++    };
++    let signed = if force {
++        ohos_sign::sign_selfsign_with_strip(&bytes)
++    } else {
++        ohos_sign::sign_selfsign(&bytes)
++    };
++    match signed {
++        Ok(data) => {
++            if let Err(e) = std::fs::write(out, &data) {
++                eprintln!("ohos-selfsign: write {}: {e}", out.display());
++                return ExitCode::FAILURE;
++            }
++            ExitCode::SUCCESS
++        }
++        Err(e) => {
++            eprintln!("ohos-selfsign: sign {}: {e}", input.display());
++            ExitCode::FAILURE
++        }
++    }
++}
++
++fn cmd_check(args: &[String]) -> ExitCode {
++    let Some(input) = args.first() else {
++        eprintln!("ohos-selfsign: check requires <input>");
++        return ExitCode::FAILURE;
++    };
++    let bytes = match std::fs::read(input) {
++        Ok(b) => b,
++        Err(e) => {
++            eprintln!("ohos-selfsign: read {input}: {e}");
++            return ExitCode::FAILURE;
++        }
++    };
++    if ohos_sign::has_codesign(&bytes) {
++        ExitCode::SUCCESS
++    } else {
++        ExitCode::FAILURE
++    }
++}
++
++// Unlike `check` (presence only), `verify` recomputes the two comparisons
++// the OHOS kernel performs at exec — release gates must use this one.
++fn cmd_verify(args: &[String]) -> ExitCode {
++    let Some(input) = args.first() else {
++        eprintln!("ohos-selfsign: verify requires <input>");
++        return ExitCode::FAILURE;
++    };
++    let bytes = match std::fs::read(input) {
++        Ok(b) => b,
++        Err(e) => {
++            eprintln!("ohos-selfsign: read {input}: {e}");
++            return ExitCode::FAILURE;
++        }
++    };
++    if ohos_sign::has_valid_codesign(&bytes) {
++        ExitCode::SUCCESS
++    } else {
++        eprintln!("ohos-selfsign: {input} has no valid .codesign (missing, stale, or corrupt)");
++        ExitCode::FAILURE
++    }
++}
++
++fn cmd_strip(args: &[String], prog: &str) -> ExitCode {
++    let mut input: Option<&str> = None;
++    let mut output: Option<&str> = None;
++    let mut i = 0;
++    while i < args.len() {
++        match args[i].as_str() {
++            "--output" | "-o" => {
++                i += 1;
++                output = args.get(i).map(|s| s.as_str());
++            }
++            s if s.starts_with('-') => usage(prog),
++            s if input.is_none() => input = Some(s),
++            _ => usage(prog),
++        }
++        i += 1;
++    }
++    let Some(input) = input else { usage(prog) };
++    let output = output.unwrap_or(input);
++    let mut bytes = match std::fs::read(input) {
++        Ok(b) => b,
++        Err(e) => {
++            eprintln!("ohos-selfsign: read {input}: {e}");
++            return ExitCode::FAILURE;
++        }
++    };
++    match ohos_sign::strip_codesign(&mut bytes) {
++        Ok(_) => {
++            if let Err(e) = std::fs::write(output, &bytes) {
++                eprintln!("ohos-selfsign: write {output}: {e}");
++                return ExitCode::FAILURE;
++            }
++            ExitCode::SUCCESS
++        }
++        Err(e) => {
++            eprintln!("ohos-selfsign: strip {input}: {e}");
++            ExitCode::FAILURE
++        }
++    }
++}
+diff --git a/src/ohos_sign/src/descriptor.rs b/src/ohos_sign/src/descriptor.rs
+new file mode 100644
+index 0000000000..510d2d17f0
+--- /dev/null
++++ b/src/ohos_sign/src/descriptor.rs
+@@ -0,0 +1,25 @@
++pub const SIZE: usize = 256;
++pub const FLAG_SELF_SIGN: u32 = 0x10;
++pub const ELF_SIGN_INFO_TYPE: u32 = 1;
++
++/// Build the 256-byte fs-verity descriptor.
++/// When computing the digest, pass `sign_size = 0`.
++/// When writing to disk, pass `sign_size = 32`.
++pub fn build(sign_size: u32, file_size: u64, root_hash: &[u8; 32]) -> [u8; SIZE] {
++    let mut out = [0u8; SIZE];
++    out[0] = 1; // version
++    out[1] = 1; // hashAlgorithm = SHA-256
++    out[2] = 12; // log2BlockSize = 4096
++    out[3] = 0; // saltSize
++    out[4..8].copy_from_slice(&sign_size.to_le_bytes());
++    out[8..16].copy_from_slice(&file_size.to_le_bytes());
++    out[16..48].copy_from_slice(root_hash); // rootHash (left-aligned in 64-byte field)
++    // out[48..80] = 0  (rootHash padding)
++    // out[80..112] = 0 (salt)
++    out[112..116].copy_from_slice(&FLAG_SELF_SIGN.to_le_bytes());
++    // out[116..120] reserved1 = 0
++    // out[120..128] merkleTreeOffset = 0
++    // out[128..255] reserved2 = 0
++    out[255] = 3; // csVersion
++    out
++}
+diff --git a/src/ohos_sign/src/elf.rs b/src/ohos_sign/src/elf.rs
+new file mode 100644
+index 0000000000..49ca474a3b
+--- /dev/null
++++ b/src/ohos_sign/src/elf.rs
+@@ -0,0 +1,429 @@
++use std::fmt;
++
++use crate::{descriptor, merkle, sha256};
++
++const PAGE: usize = 4096;
++const CODESIGN_NAME: &[u8] = b".codesign\0";
++
++#[derive(Debug)]
++pub enum SignError {
++    NotElf64,
++    NoSectionHeaders,
++    ShstrtabOutOfBounds,
++    AlreadySigned,
++    Io(std::io::Error),
++}
++
++impl fmt::Display for SignError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            SignError::NotElf64 => write!(f, "not an ELF64 binary"),
++            SignError::NoSectionHeaders => write!(f, "ELF has no section header table"),
++            SignError::ShstrtabOutOfBounds => write!(f, "shstrtab out of bounds"),
++            SignError::AlreadySigned => {
++                write!(
++                    f,
++                    "already has .codesign section; strip first or use --force"
++                )
++            }
++            SignError::Io(e) => write!(f, "I/O error: {e}"),
++        }
++    }
++}
++
++impl std::error::Error for SignError {}
++
++impl From<std::io::Error> for SignError {
++    fn from(e: std::io::Error) -> Self {
++        SignError::Io(e)
++    }
++}
++
++// ── ELF64 header field offsets ────────────────────────────────────────────
++const E_SHOFF: usize = 0x28;
++const E_SHENTSIZE: usize = 0x3a;
++const E_SHNUM: usize = 0x3c;
++const E_SHSTRNDX: usize = 0x3e;
++
++fn read_u16(buf: &[u8], off: usize) -> u16 {
++    u16::from_le_bytes(buf[off..off + 2].try_into().unwrap())
++}
++fn read_u32(buf: &[u8], off: usize) -> u32 {
++    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
++}
++fn read_u64(buf: &[u8], off: usize) -> u64 {
++    u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
++}
++fn write_u16(buf: &mut [u8], off: usize, v: u16) {
++    buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
++}
++fn write_u64(buf: &mut [u8], off: usize, v: u64) {
++    buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
++}
++
++fn align_up(v: u64, a: u64) -> u64 {
++    v.div_ceil(a) * a
++}
++
++/// Parsed ELF section header table metadata.
++struct SectionHeaderTable {
++    e_shoff: u64,
++    e_shnum: u16,
++    e_shstrndx: u16,
++    e_shentsize: u16,
++}
++
++/// Validate header and return section header table metadata.
++fn parse_header(elf: &[u8]) -> Result<SectionHeaderTable, SignError> {
++    if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 {
++        return Err(SignError::NotElf64);
++    }
++    let e_shoff = read_u64(elf, E_SHOFF);
++    let e_shnum = read_u16(elf, E_SHNUM);
++    let e_shentsize = read_u16(elf, E_SHENTSIZE);
++    let e_shstrndx = read_u16(elf, E_SHSTRNDX);
++    // Downstream functions assume 64-byte section header entries; reject
++    // anything else instead of silently misreading the section header table.
++    if e_shentsize != 64 || e_shoff == 0 || e_shnum == 0 || e_shstrndx as u64 >= e_shnum as u64 {
++        return Err(SignError::NoSectionHeaders);
++    }
++    // Reject a section header table that runs past the end of the buffer
++    let sht_end = (e_shoff as usize)
++        .checked_add(e_shnum as usize * e_shentsize as usize)
++        .ok_or(SignError::NoSectionHeaders)?;
++    if sht_end > elf.len() {
++        return Err(SignError::NoSectionHeaders);
++    }
++    Ok(SectionHeaderTable {
++        e_shoff,
++        e_shnum,
++        e_shstrndx,
++        e_shentsize,
++    })
++}
++
++/// Read section header entry at index i with given entry size.
++fn sh_entry(elf: &[u8], e_shoff: usize, i: usize, e_shentsize: usize) -> &[u8] {
++    &elf[e_shoff + i * e_shentsize..e_shoff + (i + 1) * e_shentsize]
++}
++
++/// Find the index of a section by name in the shstrtab; returns offset of that section entry.
++fn find_section_by_name(
++    elf: &[u8],
++    e_shoff: u64,
++    e_shnum: u16,
++    e_shstrndx: u16,
++    e_shentsize: u16,
++    name: &[u8],
++) -> Option<usize> {
++    let e_shentsize = e_shentsize as usize;
++    let shstr_e = e_shoff as usize + e_shstrndx as usize * e_shentsize;
++    let shstr_off = read_u64(elf, shstr_e + 24) as usize;
++    let shstr_sz = read_u64(elf, shstr_e + 32) as usize;
++    if shstr_off + shstr_sz > elf.len() {
++        return None;
++    }
++    for i in 0..e_shnum as usize {
++        let entry = sh_entry(elf, e_shoff as usize, i, e_shentsize);
++        let name_off = read_u32(entry, 0) as usize;
++        if name_off + name.len() <= shstr_sz
++            && &elf[shstr_off + name_off..shstr_off + name_off + name.len()] == name
++        {
++            return Some(e_shoff as usize + i * e_shentsize);
++        }
++    }
++    None
++}
++
++pub fn has_codesign_section(elf: &[u8]) -> bool {
++    let Ok(header) = parse_header(elf) else {
++        return false;
++    };
++    find_section_by_name(
++        elf,
++        header.e_shoff,
++        header.e_shnum,
++        header.e_shstrndx,
++        header.e_shentsize,
++        CODESIGN_NAME,
++    )
++    .is_some()
++}
++
++/// Validate an existing .codesign section: the descriptor's file_size must
++/// equal the actual file length and the recomputed merkle root (over the
++/// file with the section skipped) must match the descriptor's root hash.
++///
++/// `bun build --compile` uses the running executable as its stub, and the
++/// compiled output inherits the stub's section verbatim - the section then
++/// describes the stub rather than the payload-expanded output. Mere
++/// existence (has_codesign_section) therefore does not mean the signature
++/// is usable; the kernel rejects files whose section fails this check.
++pub fn has_valid_codesign(elf: &[u8]) -> bool {
++    let Ok(header) = parse_header(elf) else {
++        return false;
++    };
++    let Some(hdr_off) = find_section_by_name(
++        elf,
++        header.e_shoff,
++        header.e_shnum,
++        header.e_shstrndx,
++        header.e_shentsize,
++        CODESIGN_NAME,
++    ) else {
++        return false;
++    };
++    let entry = &elf[hdr_off..hdr_off + header.e_shentsize as usize];
++    let cs_off = read_u64(entry, 24) as usize; // sh_offset
++    let cs_size = read_u64(entry, 32) as usize; // sh_size
++    // payload: ElfSignInfo header (8B) + descriptor (256B) + signature (32B)
++    if cs_off + 8 + descriptor::SIZE > elf.len() || cs_size < 8 + descriptor::SIZE {
++        return false;
++    }
++    let payload = &elf[cs_off..];
++    if payload[0..4] != descriptor::ELF_SIGN_INFO_TYPE.to_le_bytes() {
++        return false;
++    }
++    let desc = &payload[8..8 + descriptor::SIZE];
++    let file_size = u64::from_le_bytes(desc[8..16].try_into().unwrap());
++    let root: [u8; 32] = desc[16..48].try_into().unwrap();
++    if file_size != elf.len() as u64 {
++        return false;
++    }
++    let (recomputed, _) = merkle::root_hash_and_tree(elf, cs_off as u64, PAGE as u64);
++    recomputed == root
++}
++
++/// Strip .codesign section. Returns true if a section was removed.
++/// Rebuilds the ELF in-place by rewriting shstrtab and SHT without the removed entry.
++pub fn strip(elf: &mut Vec<u8>) -> Result<bool, SignError> {
++    let header = parse_header(elf)?;
++    let e_shoff = header.e_shoff;
++    let e_shnum = header.e_shnum;
++    let e_shstrndx = header.e_shstrndx;
++    let e_shentsize = header.e_shentsize as usize;
++    let Some(cs_entry_off) = find_section_by_name(
++        elf,
++        e_shoff,
++        e_shnum,
++        e_shstrndx,
++        e_shentsize as u16,
++        CODESIGN_NAME,
++    ) else {
++        return Ok(false);
++    };
++    let cs_idx = (cs_entry_off - e_shoff as usize) / e_shentsize;
++
++    // Read shstrtab location
++    let shstr_e = e_shoff as usize + e_shstrndx as usize * 64;
++    let shstr_off = read_u64(elf, shstr_e + 24) as usize;
++    let shstr_sz = read_u64(elf, shstr_e + 32) as usize;
++    if shstr_off + shstr_sz > elf.len() {
++        return Err(SignError::ShstrtabOutOfBounds);
++    }
++
++    // Remove .codesign\0 from shstrtab
++    let cs_name_off = read_u32(elf, cs_entry_off) as usize;
++    let cs_name_len = CODESIGN_NAME.len();
++    let mut new_shstr = elf[shstr_off..shstr_off + shstr_sz].to_vec();
++    if cs_name_off + cs_name_len <= new_shstr.len() {
++        new_shstr.drain(cs_name_off..cs_name_off + cs_name_len);
++    }
++
++    // Build new SHT without the .codesign entry
++    let new_shnum = e_shnum - 1;
++    let mut new_sht = Vec::with_capacity(new_shnum as usize * 64);
++    for i in 0..e_shnum as usize {
++        if i == cs_idx {
++            continue;
++        }
++        let e = e_shoff as usize + i * 64;
++        let entry = elf[e..e + 64].to_vec();
++        new_sht.extend_from_slice(&entry);
++    }
++
++    // Place new shstrtab and SHT at end of file (after removing the .codesign section data)
++    let cs_sec_off = read_u64(elf, cs_entry_off + 24) as usize;
++    let cs_sec_sz = read_u64(elf, cs_entry_off + 32) as usize;
++
++    // Truncate the ELF to remove the .codesign section data.
++    // Assumption: .codesign is at end of file (which it always is, since we append it).
++    let keep_len = cs_sec_off.min(elf.len());
++    elf.truncate(keep_len);
++
++    // Append new shstrtab
++    let new_shstr_off = elf.len() as u64;
++    elf.extend_from_slice(&new_shstr);
++
++    // Align SHT to 8 bytes
++    let new_sht_off = align_up(elf.len() as u64, 8);
++    elf.resize(new_sht_off as usize, 0);
++    let new_sht_off_usize = elf.len();
++    elf.extend_from_slice(&new_sht);
++
++    // Update shstrtab entry (adjust name offsets for removed string)
++    let new_shstrndx = e_shstrndx as usize;
++    let shstr_entry_off_in_new = new_shstrndx * 64;
++    if new_shstrndx < cs_idx {
++        // entry index unchanged, update sh_offset and sh_size
++        write_u64(
++            elf,
++            new_sht_off_usize + shstr_entry_off_in_new + 24,
++            new_shstr_off,
++        );
++        write_u64(
++            elf,
++            new_sht_off_usize + shstr_entry_off_in_new + 32,
++            new_shstr.len() as u64,
++        );
++    } else {
++        // index shifted down by 1
++        let adj = (new_shstrndx - 1) * 64;
++        write_u64(elf, new_sht_off_usize + adj + 24, new_shstr_off);
++        write_u64(elf, new_sht_off_usize + adj + 32, new_shstr.len() as u64);
++    }
++
++    // Adjust name offsets for all entries that reference names after cs_name_off
++    for i in 0..new_shnum as usize {
++        let e = new_sht_off_usize + i * 64;
++        let noff = read_u32(elf, e) as usize;
++        if noff > cs_name_off {
++            let new_noff = (noff - cs_name_len) as u32;
++            elf[e..e + 4].copy_from_slice(&new_noff.to_le_bytes());
++        }
++    }
++
++    // Update ELF header: e_shoff, e_shnum; keep e_shstrndx (same index if shstrndx < cs_idx)
++    write_u64(elf, E_SHOFF, new_sht_off);
++    write_u16(elf, E_SHNUM, new_shnum);
++    // If cs_idx < e_shstrndx, shstrndx shifts down
++    if cs_idx < e_shstrndx as usize {
++        write_u16(elf, E_SHSTRNDX, e_shstrndx - 1);
++    }
++
++    let _ = cs_sec_sz; // not needed directly
++    Ok(true)
++}
++
++/// Inject a 4KB placeholder .codesign section.
++/// Returns (new_elf_bytes, cs_section_file_offset).
++fn inject_codesign_section(elf: &[u8]) -> Result<(Vec<u8>, u64), SignError> {
++    let header = parse_header(elf)?;
++    let e_shoff = header.e_shoff;
++    let e_shnum = header.e_shnum;
++    let e_shstrndx = header.e_shstrndx;
++    let entsz = header.e_shentsize as usize;
++
++    let shstr_e = e_shoff as usize + e_shstrndx as usize * entsz;
++    let shstr_off = read_u64(elf, shstr_e + 24);
++    let shstr_sz = read_u64(elf, shstr_e + 32);
++    if shstr_off + shstr_sz > elf.len() as u64 {
++        return Err(SignError::ShstrtabOutOfBounds);
++    }
++
++    // cs section offset: max of all existing section ends, rounded up to PAGE
++    let mut cur_end = e_shoff + e_shnum as u64 * entsz as u64;
++    for i in 0..e_shnum as usize {
++        let entry = sh_entry(elf, e_shoff as usize, i, entsz);
++        let sh_type = read_u32(entry, 4);
++        let off = read_u64(entry, 24);
++        let sz = if sh_type == 8 { 0 } else { read_u64(entry, 32) }; // SHT_NOBITS
++        if off + sz > cur_end {
++            cur_end = off + sz;
++        }
++    }
++    let cs_off = align_up(cur_end, PAGE as u64);
++
++    // new shstrtab = old shstrtab + ".codesign\0"
++    let cs_shname = shstr_sz as u32;
++    let mut new_shstr = elf[shstr_off as usize..shstr_off as usize + shstr_sz as usize].to_vec();
++    new_shstr.extend_from_slice(CODESIGN_NAME);
++
++    // layout: [original 0..cs_off] [4KB cs section] [new shstrtab] [8B-aligned new SHT]
++    let new_shstr_off = cs_off + PAGE as u64;
++    let new_sht_off = align_up(new_shstr_off + new_shstr.len() as u64, 8);
++    let new_shnum = e_shnum + 1;
++    let new_total = new_sht_off as usize + new_shnum as usize * entsz;
++
++    let mut buf = vec![0u8; new_total];
++    // 1) original content (may be shorter than cs_off)
++    let copy_len = elf.len().min(new_total);
++    buf[..copy_len.min(cs_off as usize)].copy_from_slice(&elf[..copy_len.min(cs_off as usize)]);
++    // 2) .codesign section (4KB zeros, already zero)
++    // 3) new shstrtab
++    buf[new_shstr_off as usize..new_shstr_off as usize + new_shstr.len()]
++        .copy_from_slice(&new_shstr);
++    // 4) old SHT at new position
++    let old_sht_bytes = e_shnum as usize * entsz;
++    buf[new_sht_off as usize..new_sht_off as usize + old_sht_bytes]
++        .copy_from_slice(&elf[e_shoff as usize..e_shoff as usize + old_sht_bytes]);
++    // 5) new .codesign SHT entry
++    let cs_e = new_sht_off as usize + e_shnum as usize * entsz;
++    buf[cs_e..cs_e + 4].copy_from_slice(&cs_shname.to_le_bytes()); // sh_name
++    buf[cs_e + 4..cs_e + 8].copy_from_slice(&1u32.to_le_bytes()); // sh_type = SHT_PROGBITS
++    // sh_flags, sh_addr = 0
++    buf[cs_e + 24..cs_e + 32].copy_from_slice(&cs_off.to_le_bytes()); // sh_offset
++    buf[cs_e + 32..cs_e + 40].copy_from_slice(&(PAGE as u64).to_le_bytes()); // sh_size
++    buf[cs_e + 48..cs_e + 56].copy_from_slice(&(PAGE as u64).to_le_bytes()); // sh_addralign
++    // 6) update shstrtab entry in new SHT
++    let shstr_e_new = new_sht_off as usize + e_shstrndx as usize * entsz;
++    buf[shstr_e_new + 24..shstr_e_new + 32].copy_from_slice(&new_shstr_off.to_le_bytes());
++    buf[shstr_e_new + 32..shstr_e_new + 40]
++        .copy_from_slice(&(new_shstr.len() as u64).to_le_bytes());
++    // 7) update ELF header
++    write_u64(&mut buf, E_SHOFF, new_sht_off);
++    write_u16(&mut buf, E_SHNUM, new_shnum);
++    // e_shstrndx unchanged
++
++    Ok((buf, cs_off))
++}
++
++/// Sign an ELF. If `force` is true, strip any existing .codesign first.
++pub fn sign(elf: &[u8], force: bool) -> Result<Vec<u8>, SignError> {
++    if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 {
++        return Err(SignError::NotElf64);
++    }
++    let mut buf: Vec<u8> = elf.to_vec();
++    if has_codesign_section(&buf) {
++        if !force {
++            return Err(SignError::AlreadySigned);
++        }
++        strip(&mut buf)?;
++    }
++    let (mut tmp, cs_off) = inject_codesign_section(&buf)?;
++
++    // Merkle root + intermediate tree bytes over tmp, skipping the cs section
++    let (root, tree_bytes) = merkle::root_hash_and_tree(&tmp, cs_off, PAGE as u64);
++
++    // descriptor with sign_size=0 for digest, then SHA-256 it
++    let desc_for_digest = descriptor::build(0, tmp.len() as u64, &root);
++    let signature = sha256::hash(&desc_for_digest);
++
++    // descriptor with sign_size=32 for on-disk layout
++    let desc_on_disk = descriptor::build(32, tmp.len() as u64, &root);
++
++    // ElfSignInfo header (8B) + descriptor (256B) + signature (32B) = 296B
++    let sig_size = 32u32;
++    let payload_len = 8 + descriptor::SIZE + sig_size as usize;
++    let mut payload = vec![0u8; payload_len];
++    payload[0..4].copy_from_slice(&descriptor::ELF_SIGN_INFO_TYPE.to_le_bytes());
++    payload[4..8].copy_from_slice(&(descriptor::SIZE as u32 + sig_size).to_le_bytes());
++    payload[8..8 + descriptor::SIZE].copy_from_slice(&desc_on_disk);
++    payload[8 + descriptor::SIZE..].copy_from_slice(&signature);
++
++    // Write payload then merkle tree bytes into the cs section
++    let cs_section = &mut tmp[cs_off as usize..cs_off as usize + PAGE];
++    cs_section[..payload_len].copy_from_slice(&payload);
++    // Write merkle tree intermediate hashes after the signature, as the
++    // upstream binary-sign-tool does. The section is 4KB; if tree bytes
++    // exceed available space they are silently truncated (the kernel does
++    // not verify the tree for self-signed binaries).
++    let tree_start = payload_len;
++    let tree_max = PAGE - tree_start;
++    if !tree_bytes.is_empty() {
++        let n = tree_bytes.len().min(tree_max);
++        cs_section[tree_start..tree_start + n].copy_from_slice(&tree_bytes[..n]);
++    }
++
++    Ok(tmp)
++}
+diff --git a/src/ohos_sign/src/lib.rs b/src/ohos_sign/src/lib.rs
+new file mode 100644
+index 0000000000..50a018046e
+--- /dev/null
++++ b/src/ohos_sign/src/lib.rs
+@@ -0,0 +1,94 @@
++mod descriptor;
++mod elf;
++mod merkle;
++mod sha256;
++
++pub use elf::{SignError, has_valid_codesign};
++
++// Exported under `__` names so integration tests can reach internal primitives
++// without exposing them as first-class public API.
++#[doc(hidden)]
++pub fn __sha256_hash(data: &[u8]) -> [u8; 32] {
++    sha256::hash(data)
++}
++
++#[doc(hidden)]
++pub fn __merkle_root_hash(data: &[u8], cs_off: u64, cs_len: u64) -> [u8; 32] {
++    merkle::root_hash(data, cs_off, cs_len)
++}
++
++#[doc(hidden)]
++pub fn __descriptor_build(sign_size: u32, file_size: u64, root_hash: &[u8; 32]) -> [u8; 256] {
++    descriptor::build(sign_size, file_size, root_hash)
++}
++
++/// Returns true if the ELF bytes already contain a `.codesign` section.
++pub fn has_codesign(elf: &[u8]) -> bool {
++    elf::has_codesign_section(elf)
++}
++
++/// Sign `elf` bytes with self-sign (flags=0x10). Fails if already signed.
++/// Use `sign_selfsign_with_strip` to strip-then-sign.
++pub fn sign_selfsign(elf: &[u8]) -> Result<Vec<u8>, SignError> {
++    elf::sign(elf, false)
++}
++
++/// Strip existing `.codesign` section then sign.
++pub fn sign_selfsign_with_strip(elf: &[u8]) -> Result<Vec<u8>, SignError> {
++    elf::sign(elf, true)
++}
++
++/// Strip `.codesign` section in-place in the buffer.
++/// Returns true if a section was removed, false if none present.
++pub fn strip_codesign(elf: &mut Vec<u8>) -> Result<bool, SignError> {
++    elf::strip(elf)
++}
++
++/// Sign a file in-place. Creates a `.unsigned` sibling during the operation.
++// ohos_sign is a standalone crate (no bun_sys dependency); std::fs is the
++// only available file I/O. The clippy.toml disallowed-methods exemption
++// applies only to this crate.
++#[allow(clippy::disallowed_methods)]
++pub fn sign_selfsign_inplace(path: &std::path::Path) -> Result<(), SignError> {
++    let bytes = std::fs::read(path)?;
++    let signed = sign_selfsign(&bytes)?;
++    std::fs::write(path, &signed)?;
++    Ok(())
++}
++
++/// Sign a file in-place, stripping any existing `.codesign` section first.
++#[allow(clippy::disallowed_methods)]
++pub fn sign_selfsign_inplace_with_strip(path: &std::path::Path) -> Result<(), SignError> {
++    let bytes = std::fs::read(path)?;
++    let signed = sign_selfsign_with_strip(&bytes)?;
++    std::fs::write(path, &signed)?;
++    Ok(())
++}
++
++/// Inspect the ELF at `path`; when its `.codesign` section is missing or
++/// fails validation, strip the stale section (if any) and re-sign in place.
++/// Returns true when the file was modified, so the caller knows a spawn retry
++/// is worthwhile.
++///
++/// Call this after the kernel refused an exec, not eagerly: the validation
++/// recompute is a full-file merkle hash (~100 MB for the bun binary), and the
++/// kernel re-validates anyway.
++#[allow(clippy::disallowed_methods)]
++pub fn repair_codesign_if_needed(path: &std::path::Path) -> bool {
++    // Regular files only: fs::read on a char device (e.g. argv0=/dev/zero,
++    // which exec rejects with EACCES and lands here) never reaches EOF.
++    if !matches!(std::fs::metadata(path), Ok(m) if m.is_file()) {
++        return false;
++    }
++    let bytes = match std::fs::read(path) {
++        Ok(bytes) => bytes,
++        Err(_) => return false,
++    };
++    if bytes.len() <= 4 || bytes[..4] != [0x7f, 0x45, 0x4c, 0x46] {
++        return false;
++    }
++    if has_valid_codesign(&bytes) {
++        return false;
++    }
++    sign_selfsign_inplace_with_strip(path).is_ok()
++}
+diff --git a/src/ohos_sign/src/merkle.rs b/src/ohos_sign/src/merkle.rs
+new file mode 100644
+index 0000000000..d9f726d81a
+--- /dev/null
++++ b/src/ohos_sign/src/merkle.rs
+@@ -0,0 +1,98 @@
++use crate::sha256;
++
++const PAGE: usize = 4096;
++const H: usize = 32;
++
++/// Compute the fs-verity merkle tree root hash and intermediate tree bytes.
++/// Matches upstream merkle_tree_builder.cpp::RunHashTask exactly:
++/// - leaf pages are SHA-256(4KB page), last page zero-padded
++/// - pages in [cs_off/PAGE, ceil((cs_off+cs_len)/PAGE)) get zero leaf hash
++/// - upper layers: every 128 leaf hashes fill one page, re-hashed
++/// - when current layer fits in one page it is zero-padded and hashed → root
++///
++/// Returns (root_hash, tree_bytes) where tree_bytes contains all non-leaf
++/// intermediate hashes (levels from just above leaves up to, but not including,
++/// the root).  These are packed sequentially: each level is a contiguous block
++/// of 32-byte hashes, and levels are written top-down (root-1 first).
++pub fn root_hash_and_tree(data: &[u8], cs_off: u64, cs_len: u64) -> ([u8; H], Vec<u8>) {
++    if data.is_empty() {
++        let zeros = [0u8; PAGE];
++        return (sha256::hash(&zeros), Vec::new());
++    }
++
++    let npages = data.len().div_ceil(PAGE);
++    let cs_page_begin = (cs_off / PAGE as u64) as usize;
++    let cs_page_end = if cs_len > 0 {
++        ((cs_off + cs_len).div_ceil(PAGE as u64)) as usize
++    } else {
++        0
++    };
++
++    let leaves: Vec<[u8; H]> = (0..npages)
++        .map(|i| {
++            if cs_len > 0 && i >= cs_page_begin && i < cs_page_end {
++                [0u8; H]
++            } else {
++                let off = i * PAGE;
++                let n = PAGE.min(data.len() - off);
++                let mut page = [0u8; PAGE];
++                page[..n].copy_from_slice(&data[off..off + n]);
++                sha256::hash(&page)
++            }
++        })
++        .collect();
++
++    // Single page case: leaf is also the root, no intermediate tree.
++    if leaves.len() == 1 {
++        return (leaves[0], Vec::new());
++    }
++
++    // Build internal levels bottom-up. `levels[0]` = leaves (not included in
++    // tree bytes); each subsequent level is built from the previous one.
++    let mut levels: Vec<Vec<[u8; H]>> = vec![leaves];
++    loop {
++        let prev = &levels[levels.len() - 1];
++        let packed = prev.len() * H;
++        if packed <= PAGE {
++            break; // root level reached (fits in one page)
++        }
++        let next_pages = packed.div_ceil(PAGE);
++        let mut next: Vec<[u8; H]> = Vec::with_capacity(next_pages);
++        for i in 0..next_pages {
++            let mut page = [0u8; PAGE];
++            let off = i * PAGE / H;
++            let count = (PAGE / H).min(prev.len() - off);
++            for j in 0..count {
++                page[j * H..j * H + H].copy_from_slice(&prev[off + j]);
++            }
++            next.push(sha256::hash(&page));
++        }
++        levels.push(next);
++    }
++
++    // The last level is the root (fits in one page). Hash it for the descriptor.
++    let root_level = &levels[levels.len() - 1];
++    let mut root_page = [0u8; PAGE];
++    for (i, hash) in root_level.iter().enumerate() {
++        root_page[i * H..i * H + H].copy_from_slice(hash);
++    }
++    let root_hash = sha256::hash(&root_page);
++
++    // Tree bytes = all non-leaf, non-root levels, top-down.
++    // When levels has only 1 or 2 entries, there are no intermediate levels.
++    let mut tree = Vec::new();
++    if levels.len() > 2 {
++        for level in &levels[1..levels.len() - 1] {
++            for hash in level {
++                tree.extend_from_slice(hash);
++            }
++        }
++    }
++
++    (root_hash, tree)
++}
++
++/// Compute only the fs-verity merkle tree root hash (backward compat).
++pub fn root_hash(data: &[u8], cs_off: u64, cs_len: u64) -> [u8; H] {
++    root_hash_and_tree(data, cs_off, cs_len).0
++}
+diff --git a/src/ohos_sign/src/sha256.rs b/src/ohos_sign/src/sha256.rs
+new file mode 100644
+index 0000000000..6eb7d80d15
+--- /dev/null
++++ b/src/ohos_sign/src/sha256.rs
+@@ -0,0 +1,132 @@
++// SHA-256 per FIPS 180-4. Direct port of self-sign.c — no external dependencies.
++
++const K: [u32; 64] = [
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++];
++
++struct Ctx {
++    state: [u32; 8],
++    bitlen: u64,
++    buf: [u8; 64],
++    buflen: usize,
++}
++
++impl Ctx {
++    fn new() -> Self {
++        Ctx {
++            state: [
++                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
++                0x5be0cd19,
++            ],
++            bitlen: 0,
++            buf: [0u8; 64],
++            buflen: 0,
++        }
++    }
++
++    fn block(&mut self) {
++        let p = &self.buf;
++        let mut w = [0u32; 64];
++        for i in 0..16 {
++            w[i] = u32::from_be_bytes([p[i * 4], p[i * 4 + 1], p[i * 4 + 2], p[i * 4 + 3]]);
++        }
++        for i in 16..64 {
++            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
++            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
++            w[i] = w[i - 16]
++                .wrapping_add(s0)
++                .wrapping_add(w[i - 7])
++                .wrapping_add(s1);
++        }
++        let mut a = self.state[0];
++        let mut b = self.state[1];
++        let mut c = self.state[2];
++        let mut d = self.state[3];
++        let mut e = self.state[4];
++        let mut f = self.state[5];
++        let mut g = self.state[6];
++        let mut h = self.state[7];
++        for i in 0..64 {
++            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
++            let ch = (e & f) ^ (!e & g);
++            let t1 = h
++                .wrapping_add(s1)
++                .wrapping_add(ch)
++                .wrapping_add(K[i])
++                .wrapping_add(w[i]);
++            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
++            let maj = (a & b) ^ (a & c) ^ (b & c);
++            let t2 = s0.wrapping_add(maj);
++            h = g;
++            g = f;
++            f = e;
++            e = d.wrapping_add(t1);
++            d = c;
++            c = b;
++            b = a;
++            a = t1.wrapping_add(t2);
++        }
++        self.state[0] = self.state[0].wrapping_add(a);
++        self.state[1] = self.state[1].wrapping_add(b);
++        self.state[2] = self.state[2].wrapping_add(c);
++        self.state[3] = self.state[3].wrapping_add(d);
++        self.state[4] = self.state[4].wrapping_add(e);
++        self.state[5] = self.state[5].wrapping_add(f);
++        self.state[6] = self.state[6].wrapping_add(g);
++        self.state[7] = self.state[7].wrapping_add(h);
++    }
++
++    fn update(&mut self, data: &[u8]) {
++        self.bitlen = self.bitlen.wrapping_add(data.len() as u64 * 8);
++        for &byte in data {
++            self.buf[self.buflen] = byte;
++            self.buflen += 1;
++            if self.buflen == 64 {
++                self.block();
++                self.buflen = 0;
++            }
++        }
++    }
++
++    fn finalize(mut self) -> [u8; 32] {
++        let bits = self.bitlen;
++        let mut i = self.buflen;
++        self.buf[i] = 0x80;
++        i += 1;
++        if i > 56 {
++            while i < 64 {
++                self.buf[i] = 0;
++                i += 1;
++            }
++            self.block();
++            i = 0;
++        }
++        while i < 56 {
++            self.buf[i] = 0;
++            i += 1;
++        }
++        // write bit length big-endian at bytes 56-63
++        for j in 0..8usize {
++            self.buf[56 + j] = (bits >> (56 - 8 * j)) as u8;
++        }
++        self.block();
++        let mut out = [0u8; 32];
++        for (k, &s) in self.state.iter().enumerate() {
++            out[k * 4..k * 4 + 4].copy_from_slice(&s.to_be_bytes());
++        }
++        out
++    }
++}
++
++pub fn hash(data: &[u8]) -> [u8; 32] {
++    let mut ctx = Ctx::new();
++    ctx.update(data);
++    ctx.finalize()
++}
+diff --git a/src/ohos_sign/tests/descriptor_layout.rs b/src/ohos_sign/tests/descriptor_layout.rs
+new file mode 100644
+index 0000000000..aff2dc758a
+--- /dev/null
++++ b/src/ohos_sign/tests/descriptor_layout.rs
+@@ -0,0 +1,51 @@
++// Verify the 256-byte descriptor byte layout matches self-sign.c's build_descriptor().
++
++use ohos_sign::__descriptor_build as build_descriptor;
++
++#[test]
++fn fields_at_correct_offsets() {
++    let root = [0xABu8; 32];
++    let desc = build_descriptor(32, 0x1234_5678_9ABC_DEF0u64, &root);
++
++    assert_eq!(desc.len(), 256);
++    assert_eq!(desc[0], 1, "version");
++    assert_eq!(desc[1], 1, "hashAlgorithm = SHA-256");
++    assert_eq!(desc[2], 12, "log2BlockSize");
++    assert_eq!(desc[3], 0, "saltSize");
++
++    // sign_size = 32, little-endian at offset 4
++    assert_eq!(&desc[4..8], &[32, 0, 0, 0], "signSize LE");
++
++    // file_size little-endian at offset 8
++    let fs_bytes = 0x1234_5678_9ABC_DEF0u64.to_le_bytes();
++    assert_eq!(&desc[8..16], &fs_bytes, "fileSize LE");
++
++    // rootHash at offset 16, 32 bytes, followed by 32 zero bytes (64B field)
++    assert_eq!(&desc[16..48], &root, "rootHash");
++    assert_eq!(&desc[48..80], &[0u8; 32], "rootHash padding");
++
++    // salt (32 bytes) at offset 80 — all zero
++    assert_eq!(&desc[80..112], &[0u8; 32], "salt");
++
++    // flags = 0x10 (self-sign) at offset 112
++    assert_eq!(&desc[112..116], &[0x10, 0, 0, 0], "flags LE");
++
++    // reserved1 at 116 — zero
++    assert_eq!(&desc[116..120], &[0u8; 4], "reserved1");
++
++    // merkleTreeOffset at 120 — zero
++    assert_eq!(&desc[120..128], &[0u8; 8], "merkleTreeOffset");
++
++    // reserved2 at 128 — 127 zero bytes
++    assert_eq!(&desc[128..255], &[0u8; 127], "reserved2");
++
++    // csVersion = 3 at offset 255
++    assert_eq!(desc[255], 3, "csVersion");
++}
++
++#[test]
++fn sign_size_zero_for_digest() {
++    let root = [0u8; 32];
++    let desc = build_descriptor(0, 0, &root);
++    assert_eq!(&desc[4..8], &[0, 0, 0, 0], "signSize=0 for digest");
++}
+diff --git a/src/ohos_sign/tests/elf_sign.rs b/src/ohos_sign/tests/elf_sign.rs
+new file mode 100644
+index 0000000000..b913a733a9
+--- /dev/null
++++ b/src/ohos_sign/tests/elf_sign.rs
+@@ -0,0 +1,349 @@
++// ELF signing and section injection tests.
++
++use ohos_sign::{
++    has_codesign, has_valid_codesign, repair_codesign_if_needed, sign_selfsign,
++    sign_selfsign_with_strip, strip_codesign,
++};
++
++/// Minimal valid ELF64 LE (no sections, just 64-byte ELF header with empty SHT).
++/// We'll use a real minimal ELF with a shstrtab so injection can work.
++fn tiny_elf64() -> Vec<u8> {
++    // ELF header (64 bytes) + one null section entry (64 bytes) + shstrtab (1 byte "\0")
++    // Build the raw bytes manually so we don't need an assembler in tests.
++    let shstrtab_off: u64 = 64 + 64; // after ELF header + null section
++    let shstrtab_sz: u64 = 1;
++    let sht_off: u64 = 64; // section header table starts right after ELF header
++    let shnum: u16 = 2; // null + shstrtab
++    let shstrndx: u16 = 1;
++
++    let mut elf = vec![0u8; 64 + 64 + 64 + 1]; // hdr + null_section + shstrtab_section + shstrtab_data
++
++    // ELF magic + class + data + version + OS/ABI + padding
++    elf[0..4].copy_from_slice(b"\x7fELF");
++    elf[4] = 2; // ELFCLASS64
++    elf[5] = 1; // ELFDATA2LSB
++    elf[6] = 1; // EV_CURRENT
++    // e_type = ET_EXEC at 0x10
++    elf[0x10..0x12].copy_from_slice(&2u16.to_le_bytes());
++    // e_machine = EM_AARCH64 = 183 at 0x12
++    elf[0x12..0x14].copy_from_slice(&183u16.to_le_bytes());
++    // e_version = 1 at 0x14
++    elf[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
++    // e_ehsize = 64 at 0x34
++    elf[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());
++    // e_shentsize = 64 at 0x3a
++    elf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
++    // e_shoff at 0x28
++    elf[0x28..0x30].copy_from_slice(&sht_off.to_le_bytes());
++    // e_shnum at 0x3c
++    elf[0x3c..0x3e].copy_from_slice(&shnum.to_le_bytes());
++    // e_shstrndx at 0x3e
++    elf[0x3e..0x40].copy_from_slice(&shstrndx.to_le_bytes());
++
++    // null section at offset 64 — all zeros (already zeroed)
++
++    // shstrtab section entry at offset 128 (64 + 64)
++    let shstrtab_entry_off = 64 + 64;
++    // sh_name = 0
++    elf[shstrtab_entry_off..shstrtab_entry_off + 4].copy_from_slice(&0u32.to_le_bytes());
++    // sh_type = SHT_STRTAB = 3
++    elf[shstrtab_entry_off + 4..shstrtab_entry_off + 8].copy_from_slice(&3u32.to_le_bytes());
++    // sh_offset at +24
++    elf[shstrtab_entry_off + 24..shstrtab_entry_off + 32]
++        .copy_from_slice(&shstrtab_off.to_le_bytes());
++    // sh_size at +32
++    elf[shstrtab_entry_off + 32..shstrtab_entry_off + 40]
++        .copy_from_slice(&shstrtab_sz.to_le_bytes());
++    // sh_addralign = 1 at +48
++    elf[shstrtab_entry_off + 48..shstrtab_entry_off + 56].copy_from_slice(&1u64.to_le_bytes());
++
++    // shstrtab data: single null byte (index 0 = empty string)
++    let shstrtab_data_off = (shstrtab_off) as usize;
++    elf[shstrtab_data_off] = 0;
++
++    elf
++}
++
++#[test]
++fn unsigned_elf_not_detected_as_signed() {
++    let elf = tiny_elf64();
++    assert!(!has_codesign(&elf));
++}
++
++#[test]
++fn sign_rejects_non_64byte_section_header_entries() {
++    let mut elf = tiny_elf64();
++    // Corrupt e_shentsize (offset 0x3a) — every downstream offset computation
++    // assumes 64-byte entries, so this must be rejected up front rather than
++    // silently misparsing the section header table.
++    elf[0x3a..0x3c].copy_from_slice(&40u16.to_le_bytes());
++    let result = sign_selfsign(&elf);
++    assert!(
++        result.is_err(),
++        "sign must reject a non-64-byte e_shentsize"
++    );
++}
++
++#[test]
++fn sign_rejects_truncated_section_header_table() {
++    let elf = tiny_elf64();
++    // tiny_elf64: e_shoff=64, e_shnum=2 -> the section header table needs
++    // 64 + 2*64 = 192 bytes. Truncate well below that so the second (shstrtab)
++    // entry is missing entirely — parse_header must reject this instead of a
++    // downstream read later panicking on an out-of-bounds slice.
++    let truncated = &elf[..150];
++    let result = sign_selfsign(truncated);
++    assert!(
++        result.is_err(),
++        "sign must reject a section header table that runs past the end of the buffer"
++    );
++}
++
++#[test]
++fn sign_adds_codesign_section() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("sign failed");
++    assert!(
++        has_codesign(&signed),
++        ".codesign section must be present after signing"
++    );
++}
++
++#[test]
++fn double_sign_fails_without_force() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("first sign failed");
++    let result = sign_selfsign(&signed);
++    assert!(
++        result.is_err(),
++        "signing an already-signed ELF without --force must fail"
++    );
++    matches!(result.unwrap_err(), ohos_sign::SignError::AlreadySigned);
++}
++
++#[test]
++fn sign_with_strip_handles_already_signed() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("first sign");
++    let re_signed = sign_selfsign_with_strip(&signed).expect("re-sign with strip");
++    assert!(has_codesign(&re_signed));
++}
++
++#[test]
++fn strip_removes_codesign_section() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("sign");
++    assert!(has_codesign(&signed));
++    let mut buf = signed;
++    let removed = strip_codesign(&mut buf).expect("strip");
++    assert!(removed, "strip should return true when section was present");
++    assert!(!has_codesign(&buf), "no .codesign after strip");
++}
++
++#[test]
++fn codesign_section_4kb_aligned() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("sign");
++    let cs_off = codesign_section_offset(&signed);
++    assert_eq!(cs_off % 4096, 0, ".codesign section must be 4KB-aligned");
++}
++
++#[test]
++fn codesign_payload_layout() {
++    // ElfSignInfo header: type=1 (4B LE) + length (4B LE) + descriptor (256B) + sig (32B)
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("sign");
++    let cs_off = codesign_section_offset(&signed) as usize;
++    let payload = &signed[cs_off..cs_off + 296];
++
++    // type = 1
++    let ty = u32::from_le_bytes(payload[0..4].try_into().unwrap());
++    assert_eq!(ty, 1, "ElfSignInfo.type must be 1");
++    // length = 256 + 32 = 288
++    let len = u32::from_le_bytes(payload[4..8].try_into().unwrap());
++    assert_eq!(len, 288, "ElfSignInfo.length must be 288");
++    // descriptor version = 1
++    assert_eq!(payload[8], 1, "descriptor.version");
++    // descriptor csVersion = 3 at offset 8+255
++    assert_eq!(payload[8 + 255], 3, "descriptor.csVersion");
++    // descriptor flags = 0x10 (self-sign) at offset 8+112
++    let flags = u32::from_le_bytes(payload[8 + 112..8 + 116].try_into().unwrap());
++    assert_eq!(flags, 0x10, "descriptor.flags must be FLAG_SELF_SIGN=0x10");
++}
++
++fn codesign_section_offset(elf: &[u8]) -> u64 {
++    let e_shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().unwrap());
++    let e_shnum = u16::from_le_bytes(elf[0x3c..0x3e].try_into().unwrap());
++    let e_shstrndx = u16::from_le_bytes(elf[0x3e..0x40].try_into().unwrap()) as usize;
++    let shstr_e = e_shoff as usize + e_shstrndx * 64;
++    let shstr_off = u64::from_le_bytes(elf[shstr_e + 24..shstr_e + 32].try_into().unwrap());
++    let shstr_sz = u64::from_le_bytes(elf[shstr_e + 32..shstr_e + 40].try_into().unwrap());
++    for i in 0..e_shnum as usize {
++        let e = e_shoff as usize + i * 64;
++        let name_off = u32::from_le_bytes(elf[e..e + 4].try_into().unwrap()) as u64;
++        if name_off < shstr_sz {
++            let name_start = (shstr_off + name_off) as usize;
++            let name = elf[name_start..]
++                .iter()
++                .take_while(|&&b| b != 0)
++                .copied()
++                .collect::<Vec<_>>();
++            if name == b".codesign" {
++                return u64::from_le_bytes(elf[e + 24..e + 32].try_into().unwrap());
++            }
++        }
++    }
++    panic!(".codesign section not found");
++}
++
++// ── has_valid_codesign（compile 产物继承段检测）──────────────────────
++
++/// 在签名后的 ELF 里定位 descriptor（ElfSignInfo header 后的 256 字节）。
++/// 测试专用：生产代码走 elf.rs 内部路径。
++fn locate_descriptor(elf: &[u8]) -> Option<usize> {
++    let ty = 1u32.to_le_bytes(); // ELF_SIGN_INFO_TYPE
++    (0..elf.len().saturating_sub(8 + 256))
++        .find(|&i| elf[i..i + 4] == ty && elf[i + 4..i + 8] == (256u32 + 32).to_le_bytes())
++}
++
++#[test]
++fn freshly_signed_section_validates() {
++    let elf = tiny_elf64();
++    let signed = sign_selfsign(&elf).expect("sign failed");
++    assert!(has_codesign(&signed));
++    assert!(
++        has_valid_codesign(&signed),
++        "a freshly signed section must pass validation"
++    );
++}
++
++#[test]
++fn unsigned_elf_fails_validation() {
++    assert!(!has_valid_codesign(&tiny_elf64()));
++}
++
++#[test]
++fn inherited_stale_section_fails_validation() {
++    // 模拟 compile 遗传：向已签名文件追加字节（payload），段内 file_size
++    // 与 hash 便不再匹配追加后的文件 —— has_valid_codesign 必须拒绝。
++    let elf = tiny_elf64();
++    let mut signed = sign_selfsign(&elf).expect("sign failed");
++    let len_before = signed.len();
++    signed.extend_from_slice(b"payload-bytes");
++    assert_ne!(signed.len(), len_before);
++    assert!(
++        !has_valid_codesign(&signed),
++        "appended payload must invalidate the inherited section"
++    );
++}
++
++#[test]
++fn corrupted_root_hash_fails_validation() {
++    let elf = tiny_elf64();
++    let mut signed = sign_selfsign(&elf).expect("sign failed");
++    let pos = locate_descriptor(&signed).expect("descriptor not found");
++    signed[pos + 8 + 16] ^= 0xff; // root hash 第一字节翻转
++    assert!(
++        !has_valid_codesign(&signed),
++        "a flipped root-hash byte must fail validation"
++    );
++}
++
++#[test]
++fn corrupted_file_size_fails_validation() {
++    let elf = tiny_elf64();
++    let mut signed = sign_selfsign(&elf).expect("sign failed");
++    let pos = locate_descriptor(&signed).expect("descriptor not found");
++    signed[pos + 8 + 8] ^= 0x01; // file_size 低位翻转
++    assert!(
++        !has_valid_codesign(&signed),
++        "a corrupted file_size must fail validation"
++    );
++}
++
++// ── repair_codesign_if_needed（spawn 懒模式修复）──────────────────────
++
++fn temp_elf_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
++    let path = std::env::temp_dir().join(format!("ohos-sign-repair-{}-{tag}", std::process::id()));
++    std::fs::write(&path, bytes).expect("write temp elf");
++    path
++}
++
++fn remove(path: &std::path::Path) {
++    let _ = std::fs::remove_file(path);
++}
++
++#[test]
++fn repair_skips_valid_file_and_leaves_bytes_unchanged() {
++    let signed = sign_selfsign(&tiny_elf64()).expect("sign failed");
++    let path = temp_elf_file("valid", &signed);
++    assert!(
++        !repair_codesign_if_needed(&path),
++        "a validly signed file must not be rewritten"
++    );
++    let after = std::fs::read(&path).expect("read back");
++    assert_eq!(after, signed, "valid file must be byte-identical");
++    remove(&path);
++}
++
++#[test]
++fn repair_signs_unsigned_elf() {
++    let path = temp_elf_file("unsigned", &tiny_elf64());
++    assert!(
++        repair_codesign_if_needed(&path),
++        "unsigned ELF must be signed"
++    );
++    let after = std::fs::read(&path).expect("read back");
++    assert!(
++        has_valid_codesign(&after),
++        "file must validate after repair"
++    );
++    remove(&path);
++}
++
++#[test]
++fn repair_resigns_stale_inherited_section() {
++    let mut stale = sign_selfsign(&tiny_elf64()).expect("sign failed");
++    stale.extend_from_slice(b"payload-bytes");
++    let path = temp_elf_file("stale", &stale);
++    assert!(
++        repair_codesign_if_needed(&path),
++        "stale section must be repaired"
++    );
++    let after = std::fs::read(&path).expect("read back");
++    assert!(
++        has_valid_codesign(&after),
++        "file must validate after repair"
++    );
++    remove(&path);
++}
++
++#[test]
++fn repair_ignores_non_elf_and_missing_files() {
++    let text = temp_elf_file("text", b"#!/bin/sh\necho hi\n");
++    assert!(
++        !repair_codesign_if_needed(&text),
++        "non-ELF must be untouched"
++    );
++    remove(&text);
++
++    let missing =
++        std::env::temp_dir().join(format!("ohos-sign-repair-{}-missing", std::process::id()));
++    assert!(
++        !repair_codesign_if_needed(&missing),
++        "missing file must be a no-op"
++    );
++}
++
++#[test]
++fn repair_skips_non_regular_files() {
++    // /dev/zero is a char device: exec rejects it with EACCES, and a repair
++    // that read it would never reach EOF. metadata.is_file() must exclude it.
++    let dev_zero = std::path::Path::new("/dev/zero");
++    if !dev_zero.exists() {
++        return;
++    }
++    let started = std::time::Instant::now();
++    assert!(!repair_codesign_if_needed(dev_zero));
++    assert!(started.elapsed() < std::time::Duration::from_secs(1));
++}
+diff --git a/src/ohos_sign/tests/merkle_tree.rs b/src/ohos_sign/tests/merkle_tree.rs
+new file mode 100644
+index 0000000000..bfd755b8dc
+--- /dev/null
++++ b/src/ohos_sign/tests/merkle_tree.rs
+@@ -0,0 +1,48 @@
++// Merkle tree root hash tests — compared against self-sign.c reference output.
++// Golden values produced by running self-sign.c's merkle_root_hash() over the same inputs.
++
++use ohos_sign::__merkle_root_hash as merkle_root_hash;
++use ohos_sign::__sha256_hash as sha256;
++
++const PAGE: usize = 4096;
++
++#[test]
++fn empty_data() {
++    // empty file → one zero page → SHA-256 of 4096 zeros
++    let zeros = [0u8; PAGE];
++    let expected = sha256(&zeros);
++    let got = merkle_root_hash(&[], 0, 0);
++    assert_eq!(got, expected);
++}
++
++#[test]
++fn single_page_no_cs() {
++    // exactly one page of 0xAA bytes, no codesign section
++    let data = [0xAAu8; PAGE];
++    let expected = sha256(&data);
++    let got = merkle_root_hash(&data, 0, 0);
++    assert_eq!(got, expected);
++}
++
++#[test]
++fn single_page_with_cs_zeroes_leaf() {
++    // one page, codesign section covers the whole page.
++    // self-sign.c: cs-range leaf hash = all-zero bytes (not SHA-256 of zeros).
++    // Single-page fast-path returns leaf directly → root = [0u8; 32].
++    let data = [0xAAu8; PAGE];
++    let expected_no_cs = sha256(&data);
++    let got = merkle_root_hash(&data, 0, PAGE as u64);
++    assert_ne!(got, expected_no_cs, "cs section should affect result");
++    assert_eq!(got, [0u8; 32], "cs page leaf must be all-zero bytes");
++}
++
++#[test]
++fn partial_last_page_padded() {
++    // 5 bytes, should be padded to PAGE before hashing
++    let data = b"hello";
++    let mut padded = [0u8; PAGE];
++    padded[..5].copy_from_slice(data);
++    let expected = sha256(&padded);
++    let got = merkle_root_hash(data, 0, 0);
++    assert_eq!(got, expected);
++}
+diff --git a/src/ohos_sign/tests/sha256_kat.rs b/src/ohos_sign/tests/sha256_kat.rs
+new file mode 100644
+index 0000000000..e4c87203fc
+--- /dev/null
++++ b/src/ohos_sign/tests/sha256_kat.rs
+@@ -0,0 +1,36 @@
++// FIPS 180-4 Known-Answer Tests for SHA-256.
++// Vectors from https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program
++
++use ohos_sign::__sha256_hash as sha256;
++
++#[test]
++fn empty_string() {
++    // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
++    let got = sha256(b"");
++    let want = hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
++    assert_eq!(got, want.as_slice());
++}
++
++#[test]
++fn abc() {
++    // SHA-256("abc") verified against self-sign.c, OpenSSL, Python hashlib, bun CryptoHasher
++    let got = sha256(b"abc");
++    let want = hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
++    assert_eq!(got, want.as_slice());
++}
++
++#[test]
++fn two_blocks() {
++    // SHA-256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
++    // = 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
++    let got = sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
++    let want = hex("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
++    assert_eq!(got, want.as_slice());
++}
++
++fn hex(s: &str) -> Vec<u8> {
++    (0..s.len())
++        .step_by(2)
++        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++        .collect()
++}
+diff --git a/test/internal/source-lints/ohos-sign-call-sites.test.ts b/test/internal/source-lints/ohos-sign-call-sites.test.ts
+new file mode 100644
+index 0000000000..f1e230401c
+--- /dev/null
++++ b/test/internal/source-lints/ohos-sign-call-sites.test.ts
+@@ -0,0 +1,51 @@
++import { expect, test } from "bun:test";
++import { readFileSync } from "node:fs";
++import path from "node:path";
++
++// The OHOS codesign call sites are fork-private hunks inside functions that
++// upstream also refactors. Upstream commit 46557185da ("Android: fix
++// --compile executables (PIE load bias)") restructured
++// StandaloneModuleGraph::inject() and a merge silently dropped the
++// `#[cfg(target_env = "ohos")]` re-sign block — nothing failed until the
++// 20260902 device fulltest, where 72 files (33% of failures) died with
++// posix_spawn EACCES because `bun build --compile` outputs inherited a stale
++// .codesign section from the signed stub.
++//
++// This lint pins each call site so a merge that loses one fails CI here
++// instead of on a device three days later.
++
++const root = path.resolve(import.meta.dir, "..", "..", "..");
++
++const guard = (file: string, needle: string) => {
++  const src = readFileSync(path.join(root, file), "utf8");
++  expect(
++    src.includes(needle),
++    `${file} must keep \`${needle}\` — the OHOS kernel refuses to exec/dlopen ELFs whose .codesign section is missing or stale, and this call site is what repairs that. If a refactor moved the code, update this lint in the same PR; if a merge dropped it, re-apply the hunk (see ohos/analys/issues/p1-codesign-stub-inheritance.md).`,
++  );
++};
++
++test("OHOS codesign call sites survive upstream merges", () => {
++  // compile path: the payload-expanded output must be stripped and re-signed
++  // at write time (dropped by 46557185da, restored by 88a237b0e3).
++  guard("src/standalone_graph/StandaloneModuleGraph.rs", "ohos_sign::sign_selfsign_with_strip");
++
++  // spawn path: kernel refusal (EACCES/EPERM) triggers a lazy repair + single
++  // retry — never an eager per-spawn validation (it re-hashes the ~100 MB
++  // binary and doubled the 20260903 fulltest wall time).
++  guard("src/spawn_sys/spawn_process.rs", "ohos_sign::repair_codesign_if_needed");
++
++  // dlopen path: same lazy-repair contract as spawn.
++  guard("src/sys/lib.rs", "ohos_sign::repair_codesign_if_needed");
++
++  // install path: native modules (.so/.node) repaired at install time.
++  guard("src/install/PackageInstaller.rs", "ohos_sign::repair_codesign_if_needed");
++});
++
++test("OHOS userspace shebang expansion survives upstream merges", () => {
++  // Text scripts cannot carry a .codesign section, so the kernel refuses to
++  // exec them. The spawn path rewrites `#!` targets to their (signed)
++  // interpreter — without this, every direct script spawn fails with
++  // EACCES/EPERM on device.
++  guard("src/spawn_sys/spawn_process.rs", "ohos_expand_shebang(argv0_cstr, argv)");
++  guard("src/spawn_sys/shebang.rs", "pub(crate) fn parse_shebang");
++});

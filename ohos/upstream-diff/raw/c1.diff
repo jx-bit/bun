@@ -1,0 +1,2073 @@
+diff --git a/src/bun_core/Global.rs b/src/bun_core/Global.rs
+index 3ac4e52ace7..22256e7df5e 100644
+--- a/src/bun_core/Global.rs
++++ b/src/bun_core/Global.rs
+@@ -554,12 +554,19 @@ pub const package_json_version_with_revision: &str = if env::GIT_SHA.is_empty()
+ // Android: the kernel-level OS enum stays .linux (so syscall switches keep
+ // working), but user-facing strings — npm user-agent, process.platform —
+ // must be "android" so native-addon postinstalls don't fetch glibc binaries.
+-pub const os_name: &str = if cfg!(target_os = "android") {
++// Android + OHOS: the kernel-level OS enum stays .linux (so syscall switches
++// keep working), but user-facing strings — npm user-agent, process.platform —
++// must match Node.js so native-addon optional deps resolve correctly.
++pub const os_name: &str = if cfg!(target_env = "ohos") {
++    "openharmony"
++} else if cfg!(target_os = "android") {
+     "android"
+ } else {
+     env::OS.name_string()
+ };
+-pub const os_display: &str = if cfg!(target_os = "android") {
++pub const os_display: &str = if cfg!(target_env = "ohos") {
++    "OpenHarmony"
++} else if cfg!(target_os = "android") {
+     "Android"
+ } else {
+     env::OS.display_string()
+diff --git a/src/bun_core/env.rs b/src/bun_core/env.rs
+index 9f4c52ef8c2..f0967c3bf59 100644
+--- a/src/bun_core/env.rs
++++ b/src/bun_core/env.rs
+@@ -41,10 +41,12 @@ pub const IS_LINUX: bool = cfg!(any(target_os = "linux", target_os = "android"))
+ const IS_FREEBSD: bool = cfg!(target_os = "freebsd");
+ /// kqueue-based event loop (macOS + FreeBSD share most of this path).
+ pub const IS_KQUEUE: bool = IS_MAC || IS_FREEBSD;
+-const IS_AARCH64: bool = cfg!(target_arch = "aarch64");
+-const IS_X64: bool = cfg!(target_arch = "x86_64");
+-pub const IS_MUSL: bool = cfg!(target_env = "musl");
++pub(crate) const IS_AARCH64: bool = cfg!(target_arch = "aarch64");
++pub(crate) const IS_X64: bool = cfg!(target_arch = "x86_64");
++pub const IS_MUSL: bool = cfg!(any(target_env = "musl", target_env = "ohos"));
+ pub const IS_ANDROID: bool = cfg!(target_os = "android");
++pub const IS_OHOS: bool = cfg!(target_env = "ohos");
++pub const IS_GLIBC: bool = IS_LINUX && cfg!(target_env = "gnu");
+ pub const ALLOW_ASSERT: bool = IS_DEBUG || IS_TEST || build_options::RELEASE_SAFE;
+ pub const CI_ASSERT: bool =
+     IS_DEBUG || IS_TEST || ENABLE_ASAN || (build_options::RELEASE_SAFE && IS_CANARY);
+diff --git a/src/bun_core/env_var.rs b/src/bun_core/env_var.rs
+index ece9747d32c..329de6ee125 100644
+--- a/src/bun_core/env_var.rs
++++ b/src/bun_core/env_var.rs
+@@ -111,6 +111,13 @@ new!(pub BUN_INSTALL_STREAMING_MIN_SIZE: unsigned, "BUN_INSTALL_STREAMING_MIN_SI
+ // into roughly one per `threshold` bytes.
+ new!(pub BUN_INSTALL_STREAMING_DRAIN_THRESHOLD: unsigned, "BUN_INSTALL_STREAMING_DRAIN_THRESHOLD", { default: 256 * 1024 });
+ new!(pub BUN_NEEDS_PROC_SELF_WORKAROUND: boolean, "BUN_NEEDS_PROC_SELF_WORKAROUND", { default: false });
++// Set by ohos_node_userinfo.rs on a spawned node child's env, not read by
++// bun itself -- registered for discoverability/grep, not consumed here.
++// The preload it injects (ohos_node_userinfo.rs's PRELOAD_JS) reads it as
++// the getpwuid_r-resolved username for os.userInfo(), since $USER is empty
++// on a `bun build --compile` output shipped to a device with no shell
++// profile.
++new!(pub BUN_OHOS_USERNAME: string, "BUN_OHOS_USERNAME", {});
+ new!(pub BUN_OPTIONS: string, "BUN_OPTIONS", {});
+ new!(pub BUN_POSTGRES_SOCKET_MONITOR: string, "BUN_POSTGRES_SOCKET_MONITOR", {});
+ new!(pub BUN_POSTGRES_SOCKET_MONITOR_READER: string, "BUN_POSTGRES_SOCKET_MONITOR_READER", {});
+diff --git a/src/bun_core/util.rs b/src/bun_core/util.rs
+index 28006517b5d..e0d90673e8c 100644
+--- a/src/bun_core/util.rs
++++ b/src/bun_core/util.rs
+@@ -4100,13 +4100,44 @@ pub fn getcwd(buf: &mut PathBuffer) -> crate::CrateResult<&ZStr> {
+     Ok(ZStr::from_buf(&buf.0, len))
+ }
+ 
++/// Like [`getcwd`], but on OHOS honestly surfaces a deleted cwd as
++/// [`crate::CrateError::CurrentWorkingDirectoryUnlinked`] instead of the
++/// ohos-compat-shim's silent `$HOME` substitution. Unlike
++/// [`getcwd_or_exe_dir`] (which tolerates an unreachable cwd and keeps
++/// going), this is for callers that want a genuine failure to propagate —
++/// e.g. `FileSystem`'s top-level-dir init, which documents (BUG-01) that
++/// swallowing this error runs JS from an indeterminate environment.
++pub fn getcwd_honest(buf: &mut PathBuffer) -> crate::CrateResult<&ZStr> {
++    let len = getcwd_len(buf)?;
++    #[cfg(target_env = "ohos")]
++    if cwd_is_deleted_ohos() {
++        return Err(crate::CrateError::CurrentWorkingDirectoryUnlinked);
++    }
++    Ok(ZStr::from_buf(&buf.0, len))
++}
++
+ /// `getcwd` tolerating an unreachable cwd (e.g. deleted while we run): falls
+ /// back to the executable's directory like Node's `Environment::GetCwd`, so
+ /// startup proceeds and `process.cwd()` surfaces the real error later.
+ pub fn getcwd_or_exe_dir(buf: &mut PathBuffer) -> &ZStr {
+-    let len = match getcwd_len(buf) {
+-        Ok(n) => n,
+-        Err(_) => {
++    let ok_len = getcwd_len(buf).ok();
++    // OHOS: ohos-compat-shim's getcwd() interceptor silently substitutes
++    // $HOME for a deleted cwd instead of returning ENOENT (kept for other
++    // callers' robustness — see bun_sys::process_cwd's doc comment), so
++    // `getcwd_len` above reports success even when the real cwd is gone.
++    // This function's whole contract is "fall back cleanly when cwd is
++    // unreachable," so undo the shim's substitution here specifically: an
++    // honest re-check that bypasses it, and if the cwd really is deleted,
++    // drop to the same exe-dir fallback below as a genuine getcwd() failure
++    // would. Without this, startup silently treats $HOME as the cwd (e.g.
++    // `bun install`/`bun test` proceed inside the user's real home
++    // directory instead of erroring), matching upstream's exe-dir fallback
++    // + later `process.cwd()`-surfaced error instead.
++    #[cfg(target_env = "ohos")]
++    let ok_len = ok_len.filter(|_| !cwd_is_deleted_ohos());
++    let len = match ok_len {
++        Some(n) => n,
++        None => {
+             let dir: &[u8] = self_exe_path()
+                 .ok()
+                 .and_then(|p| dirname(p.as_bytes()))
+@@ -4122,6 +4153,44 @@ pub fn getcwd_or_exe_dir(buf: &mut PathBuffer) -> &ZStr {
+     ZStr::from_buf(&buf.0, len)
+ }
+ 
++/// OHOS-only: honest deleted-cwd re-check bypassing ohos-compat-shim's
++/// silent `$HOME` substitution in the plain `getcwd()` that `getcwd_len`
++/// uses. Mirrors `bun_sys::posix::cwd_is_deleted` — duplicated rather than
++/// shared, since `bun_sys` depends on `bun_core`, not the other way around.
++#[cfg(target_env = "ohos")]
++fn cwd_is_deleted_ohos() -> bool {
++    let mut proc_buf = [0u8; 4096];
++    // SAFETY: "/proc/self/cwd" is a valid NUL-terminated path literal;
++    // proc_buf provides 4095 writable bytes + one reserved NUL slot.
++    let n = unsafe {
++        libc::readlink(
++            c"/proc/self/cwd".as_ptr(),
++            proc_buf.as_mut_ptr().cast(),
++            proc_buf.len() - 1,
++        )
++    };
++    // `readlink` does not NUL-terminate when the target fills the buffer.
++    // A truncated path would stat() as ENOENT and be mistaken for a
++    // deleted cwd (the bunfig-errors >PATH_MAX cwd case), so a full buffer
++    // is inconclusive and reported as "not deleted".
++    if n < 0 {
++        return crate::ffi::errno() == libc::ENOENT;
++    }
++    let n = n as usize;
++    if n >= proc_buf.len() - 1 {
++        return false;
++    }
++    if n > 0 {
++        proc_buf[n] = 0;
++        // SAFETY: an all-zero `libc::stat` is a valid POD bit pattern.
++        let mut st: libc::stat = unsafe { core::mem::zeroed() };
++        // SAFETY: proc_buf is NUL-terminated by the assignment above.
++        return unsafe { libc::stat(proc_buf.as_ptr().cast(), &raw mut st) } < 0
++            && crate::ffi::errno() == libc::ENOENT;
++    }
++    false
++}
++
+ /// Length-returning core of [`getcwd`]; `buf` holds the NUL-terminated path.
+ fn getcwd_len(buf: &mut PathBuffer) -> crate::CrateResult<usize> {
+     #[cfg(unix)]
+diff --git a/src/js/node/net.ts b/src/js/node/net.ts
+index 0609cd36d89..5e6ffc4f2df 100644
+--- a/src/js/node/net.ts
++++ b/src/js/node/net.ts
+@@ -675,7 +675,13 @@ function SocketEmitEndNT(self, _err?) {
+         errno?: number;
+         syscall?: string;
+       };
+-      er.errno = _err.errno ?? (process.platform === "win32" ? -4077 : process.platform === "linux" ? -104 : -54);
++      er.errno =
++        _err.errno ??
++        (process.platform === "win32"
++          ? -4077
++          : process.platform === "linux" || process.platform === "openharmony"
++            ? -104
++            : -54);
+       er.syscall = "read";
+       self.destroy(er);
+     } else {
+@@ -3716,7 +3722,8 @@ Server.prototype.listen = function listen(port, hostname, onListen) {
+         port = 0;
+       }
+ 
+-      const isLinux = process.platform === "linux" || process.platform === "android";
++      const isLinux =
++        process.platform === "linux" || process.platform === "android" || process.platform === "openharmony";
+ 
+       // Match Node's listen() option normalization + validation.
+       // https://github.com/nodejs/node/blob/614050b657e9757c1097aa85f92f2cb51149dc0d/lib/net.js#L2145
+diff --git a/src/js/node/os.ts b/src/js/node/os.ts
+index 3326d8093d5..7279ed370fe 100644
+--- a/src/js/node/os.ts
++++ b/src/js/node/os.ts
+@@ -121,7 +121,7 @@ function bound(binding) {
+         ? "Windows_NT"
+         : process.platform === "darwin"
+           ? "Darwin"
+-          : process.platform === "linux" || process.platform === "android"
++          : process.platform === "linux" || process.platform === "android" || process.platform === "openharmony"
+             ? "Linux"
+             : process.platform === "freebsd"
+               ? "FreeBSD"
+@@ -135,7 +135,7 @@ function bound(binding) {
+       // separate PR to avoid behavior change in the Android port.
+       // FreeBSD: uname -m returns MACHINE ("arm64"/"amd64"), not MACHINE_ARCH.
+       return process.arch === "arm64"
+-        ? process.platform === "android"
++        ? process.platform === "android" || process.platform === "openharmony"
+           ? "aarch64"
+           : "arm64"
+         : process.arch === "x64"
+diff --git a/src/js/wasi-runner.js b/src/js/wasi-runner.js
+index 5e7cb48cdb4..64d5de3589e 100644
+--- a/src/js/wasi-runner.js
++++ b/src/js/wasi-runner.js
+@@ -24,13 +24,29 @@ if (WASM_ENV_STR?.length) {
+   env = JSON.parse(WASM_ENV_STR);
+ }
+ 
++// On OHOS the app sandbox denies open("/") (EACCES), which makes the WASI
++// constructor throw before the guest starts. Skip the default "/" preopen
++// when the host root is not openable (an explicit WASM_ROOT_DIR is still
++// honored verbatim — if the caller chose it, they see the error).
++const preopens = { ".": WASM_CWD || process.cwd() };
++if (process.env.WASM_ROOT_DIR !== undefined) {
++  preopens["/"] = WASM_ROOT_DIR;
++} else {
++  const fs = import.meta.require("fs");
++  try {
++    fs.closeSync(fs.openSync("/", "r"));
++    preopens["/"] = "/";
++  } catch (e) {
++    // EISDIR still means the root is openable; only genuine denial
++    // (OHOS sandbox EACCES) drops the preopen.
++    if (e?.code === "EISDIR") preopens["/"] = "/";
++  }
++}
++
+ const wasi = new WASI({
+   args: process.argv.slice(1),
+   env,
+-  preopens: {
+-    ".": WASM_CWD || process.cwd(),
+-    "/": WASM_ROOT_DIR || "/",
+-  },
++  preopens,
+ });
+ 
+ let source = globalThis.wasmSourceBytes;
+diff --git a/src/jsc/VirtualMachine.rs b/src/jsc/VirtualMachine.rs
+index aa9cf30360e..7168d196761 100644
+--- a/src/jsc/VirtualMachine.rs
++++ b/src/jsc/VirtualMachine.rs
+@@ -3760,6 +3760,12 @@ impl VirtualMachine {
+                 }
+             }
+         }
++
++        // OHOS keeps the waiter thread always-on (see spawn_sys/lib.rs);
++        // start it here so its eventfd exists before anything snapshots
++        // the fd table.
++        #[cfg(target_env = "ohos")]
++        bun_spawn::process::WaiterThread::prewarm();
+     }
+ 
+     /// Routes an unhandled promise rejection to the configured handler, bumping the unhandled-error counter.
+diff --git a/src/jsc/bindings/BunProcess.cpp b/src/jsc/bindings/BunProcess.cpp
+index 57f1b66e0ed..b65c25544ef 100644
+--- a/src/jsc/bindings/BunProcess.cpp
++++ b/src/jsc/bindings/BunProcess.cpp
+@@ -211,6 +211,10 @@ static JSValue constructPlatform(VM& vm, JSObject* processObject)
+ {
+ #if defined(__APPLE__)
+     return JSC::jsString(vm, makeAtomString("darwin"_s));
++#elif defined(__OHOS__)
++    // OHOS triples also define __linux__, so this must stay above the
++    // __linux__ branch.
++    return JSC::jsString(vm, makeAtomString("openharmony"_s));
+ #elif defined(__ANDROID__)
+     return JSC::jsString(vm, makeAtomString("android"_s));
+ #elif defined(__linux__)
+@@ -2094,7 +2098,9 @@ JSC_DEFINE_HOST_FUNCTION_WITH_ATTRIBUTES(Process_functionExecve, __attribute__((
+     // undone if execve(2) fails: FD_CLOEXEC only takes effect at the next
+     // exec, so the still-running image is unaffected.
+ #if OS(LINUX) || OS(FREEBSD)
++#if !defined(__OHOS__)
+     if (bun_close_range(3, ~0U, /* CLOSE_RANGE_CLOEXEC */ (1U << 2)) != 0)
++#endif
+ #endif
+     {
+         int maxfd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+@@ -3340,11 +3346,30 @@ JSC_DEFINE_HOST_FUNCTION(Process_functiongetgroups, (JSGlobalObject * globalObje
+         throwSystemError(throwScope, globalObject, "getgroups"_s, errno);
+         return {};
+     }
+-    JSArray* groups = constructEmptyArray(globalObject, nullptr, ngroups);
+-    RETURN_IF_EXCEPTION(throwScope, {});
+-    Vector<gid_t> groupVector(ngroups);
++    Vector<gid_t> groupVector;
++    groupVector.resize(ngroups);
+     getgroups(ngroups, groupVector.begin());
+-    for (unsigned i = 0; i < ngroups; i++) {
++
++    // Node's documented behavior: "POSIX leaves it unspecified if the
++    // effective group ID is included, but Node.js ensures it is." A raw
++    // getgroups(2) returns only supplementary groups, and on platforms
++    // where the effective gid is not also in the supplementary list
++    // (observed on OHOS: egid 20020101 not in the list, while `id -G`
++    // reports it) this array disagrees with both Node and `id -G`.
++    const gid_t egid = getegid();
++    bool hasEgid = false;
++    for (unsigned i = 0; i < groupVector.size(); i++) {
++        if (groupVector[i] == egid) {
++            hasEgid = true;
++            break;
++        }
++    }
++    if (!hasEgid)
++        groupVector.append(egid);
++
++    JSArray* groups = constructEmptyArray(globalObject, nullptr, groupVector.size());
++    RETURN_IF_EXCEPTION(throwScope, {});
++    for (unsigned i = 0; i < groupVector.size(); i++) {
+         groups->putDirectIndex(globalObject, i, jsNumber(groupVector[i]));
+         RETURN_IF_EXCEPTION(throwScope, {});
+     }
+diff --git a/src/jsc/bindings/JSWrappingFunction.h b/src/jsc/bindings/JSWrappingFunction.h
+index 64fc03a3dc9..22457b36f7d 100644
+--- a/src/jsc/bindings/JSWrappingFunction.h
++++ b/src/jsc/bindings/JSWrappingFunction.h
+@@ -31,7 +31,7 @@ public:
+     using Base = JSC::JSFunction;
+ 
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+-    static constexpr JSC::DestructionMode needsDestruction = DoesNotNeedDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::DoesNotNeedDestruction;
+     static void destroy(JSCell* cell)
+     {
+         static_cast<JSWrappingFunction*>(cell)->JSWrappingFunction::~JSWrappingFunction();
+diff --git a/src/jsc/bindings/NodeVM.h b/src/jsc/bindings/NodeVM.h
+index f58e829ed37..ddea01ee3bf 100644
+--- a/src/jsc/bindings/NodeVM.h
++++ b/src/jsc/bindings/NodeVM.h
+@@ -119,7 +119,7 @@ public:
+     using Base = Bun::GlobalScope;
+ 
+     static constexpr unsigned StructureFlags = Base::StructureFlags | JSC::OverridesGetOwnPropertySlot | JSC::InterceptsGetOwnPropertySlotByIndexEvenWhenLengthIsNotZero | JSC::OverridesPut | JSC::OverridesGetOwnPropertyNames | JSC::GetOwnPropertySlotMayBeWrongAboutDontEnum | JSC::ProhibitsPropertyCaching;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+ 
+     template<typename, JSC::SubspaceAccess mode> static JSC::GCClient::IsoSubspace* subspaceFor(JSC::VM& vm);
+     static NodeVMGlobalObject* create(JSC::VM& vm, JSC::Structure* structure, NodeVMContextOptions options, JSValue importer);
+diff --git a/src/jsc/bindings/bun-spawn.cpp b/src/jsc/bindings/bun-spawn.cpp
+index be91f7791c0..9c76599039c 100644
+--- a/src/jsc/bindings/bun-spawn.cpp
++++ b/src/jsc/bindings/bun-spawn.cpp
+@@ -5,6 +5,7 @@
+ #include <fcntl.h>
+ #include <atomic>
+ #include <cstring>
++#include <pthread.h>
+ #include <signal.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
+@@ -21,6 +22,11 @@
+ #include <sched.h>
+ #endif
+ 
++#if defined(__OHOS__)
++#include <cstdio>
++#include <climits>
++#endif
++
+ extern char** environ;
+ 
+ #ifndef CLOSE_RANGE_CLOEXEC
+@@ -117,11 +123,12 @@ typedef struct bun_spawn_request_t {
+ // as _exit() may try to acquire locks held by threads that don't exist in the child.
+ static inline void rawExit(int status)
+ {
+-#if OS(LINUX)
+-    syscall(__NR_exit_group, status);
+-#else
+-    _exit(status);
++#if defined(__NR_exit_group)
++    // Best-effort: try exit_group first (faster for multi-threaded processes).
++    // If the syscall fails (e.g. blocked by seccomp), fall through to _exit().
++    (void)syscall(__NR_exit_group, status);
+ #endif
++    _exit(status);
+ }
+ 
+ #if OS(LINUX)
+@@ -233,9 +240,9 @@ extern "C" ssize_t posix_spawn_bun(
+     sigset_t blockall, oldmask;
+     int res = 0, cs = 0;
+ 
+-#if OS(DARWIN) || OS(FREEBSD)
+-    // On macOS, we use fork() which requires a self-pipe trick to detect exec failures.
+-    // Create a pipe for child-to-parent error communication.
++#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
++    // On macOS/FreeBSD/OHOS, we use fork() which requires a self-pipe trick to
++    // detect exec failures. Create a pipe for child-to-parent error communication.
+     // The write end has O_CLOEXEC so it's automatically closed on successful exec.
+     // If exec fails, child writes errno to the pipe.
+     int errpipe[2];
+@@ -248,23 +255,38 @@ extern "C" ssize_t posix_spawn_bun(
+ 
+     sigfillset(&blockall);
+     sigprocmask(SIG_SETMASK, &blockall, &oldmask);
+-#if !OS(ANDROID)
++#if !OS(ANDROID) && !defined(__OHOS__)
+     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+ #endif
+ 
+-#if OS(LINUX)
++    // On Linux, use vfork() for performance, with a fallback to fork()
++    // if vfork fails (e.g. blocked by seccomp on platforms like OHOS).
++    // On other Unix platforms (macOS, FreeBSD), use fork() directly.
++#if OS(LINUX) && !defined(__OHOS__)
+     volatile int child_errno = 0;
++    bool use_fork_fallback = false;
++    int saved_dumpable = -1;
++#endif
++
++    pid_t child;
++#if OS(LINUX) && !defined(__OHOS__)
+     // The vfork child shares this mm, and set*id in the child resets the
+     // mm-wide "dumpable" flag to /proc/sys/fs/suid_dumpable (commit_creds).
+     // Save it so the parent can restore it once vfork returns, like Go's
+     // forkAndExecInChild1 and systemd's safe_fork_full do.
+-    int saved_dumpable = (request->set_uid || request->set_gid) ? prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) : -1;
++    saved_dumpable = (request->set_uid || request->set_gid) ? prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) : -1;
+     volatile bool cgroup_failed = false;
+     bool join_cgroup_in_child = false;
++    child = vfork();
++    if (child == -1) {
++        use_fork_fallback = true;
++        child = fork();
++    }
++#else
++    child = fork();
+ #endif
+-    pid_t child = -1;
+ 
+-#if OS(DARWIN) || OS(FREEBSD)
++#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
+     const auto childFailed = [&]() -> ssize_t {
+         int err = errno;
+         // Write errno to pipe so parent can read it
+@@ -299,7 +321,7 @@ extern "C" ssize_t posix_spawn_bun(
+             sigaction(i, &sa, 0);
+         }
+ 
+-#if OS(LINUX)
++#if OS(LINUX) && !defined(__OHOS__)
+         // cgroup v1 / pre-5.7 fallback. First, so every page the exec'd image
+         // touches is charged to the cgroup. Writing "0" moves the writer.
+         if (join_cgroup_in_child) {
+@@ -448,7 +470,71 @@ extern "C" ssize_t posix_spawn_bun(
+         if (!envp)
+             envp = environ;
+ 
+-        // Close all fds > current_max_fd, preferring cloexec if available
++#if defined(__OHOS__)
++        // chdir()-then-exec() into a different binary leaves that binary's
++        // own getcwd() syscall broken for EL2-sandbox paths (EACCES walking
++        // the parent chain) -- a real-device kernel/sandbox limitation
++        // (confirmed with a from-scratch repro with no Bun involved at all;
++        // does not reproduce in the CI container), not a bug in the
++        // chdir/exec sequence above. Shells never hit the broken syscall:
++        // they trust an inherited $PWD when stat($PWD) matches stat(".") and
++        // skip calling getcwd() entirely. This process only chdir()'d above
++        // without updating $PWD to match, so the exec'd program inherits a
++        // stale $PWD (or none), fails that check, and falls through to the
++        // broken kernel call. Fixed at this one shared funnel -- every spawn
++        // call site (Bun.spawn, npm lifecycle scripts, `bun run`, ...) goes
++        // through here -- rather than at any single JS-facing binding:
++        // several call sites (e.g. PackageManagerLifecycle.rs, run_command.rs)
++        // build envp directly against SpawnOptions and never touch
++        // Bun.spawn's own env-handling code, so a fix scoped to just that one
++        // binding would miss them.
++        //
++        // This is a forked (not vforked -- see the OS(LINUX) && !__OHOS__
++        // branch above) child with its own address space, so plain stack
++        // arrays here are safe; avoiding heap allocation (malloc/new) is
++        // deliberate anyway, matching the rest of this function's
++        // async-signal-safety discipline post-fork.
++        char pwdBuf[PATH_MAX + 5]; // "PWD=" + PATH_MAX + NUL
++        constexpr size_t kMaxEnvEntries = 1024;
++        // Declared here (not inside the `if` blocks below) so the array
++        // outlives the assignment to `envp` all the way to execve() --
++        // nesting it inside a block that closes before execve() would leave
++        // `envp` dangling into reused stack space the instant anything else
++        // (e.g. closeRangeOrLoop() below) pushes its own locals.
++        char* newEnvp[kMaxEnvEntries + 2];
++        if (request->chdir) {
++            int n = snprintf(pwdBuf, sizeof(pwdBuf), "PWD=%s", request->chdir);
++            if (n > 0 && static_cast<size_t>(n) < sizeof(pwdBuf)) {
++                size_t count = 0;
++                while (envp[count] && count < kMaxEnvEntries)
++                    count++;
++                // Bails out (leaving the stale-$PWD bug in place rather than
++                // risking anything) only past ~1024 env vars, far beyond any
++                // real process; every ordinary caller is covered.
++                if (envp[count] == nullptr) {
++                    size_t out = 0;
++                    for (size_t i = 0; i < count; i++) {
++                        // Drop any existing PWD -- it's either stale (the
++                        // parent's cwd, which no longer matches after the
++                        // chdir() above) or, if a caller set it to something
++                        // else on purpose, it still has to lose: chdir()
++                        // already changed the real cwd, so $PWD must track it
++                        // or nothing here is self-consistent.
++                        if (strncmp(envp[i], "PWD=", 4) == 0) continue;
++                        newEnvp[out++] = envp[i];
++                    }
++                    newEnvp[out++] = pwdBuf;
++                    newEnvp[out] = nullptr;
++                    envp = newEnvp;
++                }
++            }
++        }
++#endif
++
++        // Close all fds > current_max_fd, preferring cloexec if available.
++        // On OHOS, fcntl(F_SETFD) is ignored in vfork children, so fd CLOEXEC
++        // must be prevented by excluding stdio fds (0,1,2) from the range.
++        if (current_max_fd < 2) current_max_fd = 2;
+         closeRangeOrLoop(current_max_fd + 1, INT_MAX, true);
+ 
+         if (execve(path, argv, envp) == -1) {
+@@ -460,68 +546,15 @@ extern "C" ssize_t posix_spawn_bun(
+         return -1;
+     };
+ 
+-#if OS(LINUX)
+-    if (request->cgroup_fd >= 0 && clone3Unavailable.load(std::memory_order_relaxed)) {
+-        join_cgroup_in_child = true;
+-    } else if (request->cgroup_fd >= 0) {
+-        // cgroup v2: the child is created inside the cgroup. Migrating it after
+-        // the fact (writing cgroup.procs) takes cgroup_threadgroup_rwsem for
+-        // write — an RCU grace period on >= 6.0 kernels — with this thread
+-        // parked in vfork for the duration.
+-        bun_clone_args args = {};
+-        args.flags = CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP;
+-        args.exit_signal = SIGCHLD;
+-        args.cgroup = static_cast<uint64_t>(request->cgroup_fd);
+-        long rc = bun_clone3_vfork(&args, sizeof(args), cloneTrampoline<decltype(startChild)>, (void*)&startChild);
+-        if (rc >= 0) {
+-#if __has_feature(address_sanitizer)
+-            if (__asan_handle_vfork) {
+-                void* sp;
+-#if CPU(X86_64)
+-                asm volatile("movq %%rsp, %0" : "=r"(sp));
+-#else
+-                asm volatile("mov %0, sp" : "=r"(sp));
+-#endif
+-                __asan_handle_vfork(sp);
+-            }
+-#endif
+-            child = static_cast<pid_t>(rc);
+-        } else if (rc == -ENOSYS || rc == -EBADF || rc == -EINVAL || rc == -E2BIG || rc == -EOPNOTSUPP || rc == -EPERM) {
+-            // No clone3 (old kernel / seccomp), or not a cgroup2 directory.
+-            if (rc == -ENOSYS) {
+-                clone3Unavailable.store(true, std::memory_order_relaxed);
+-            }
+-            join_cgroup_in_child = true;
+-        } else {
+-            // EBUSY (subtree_control set), EACCES (delegation), ENOENT
+-            // (rmdir'd), EAGAIN (pids.max) ... — all about the destination.
+-            errno = static_cast<int>(-rc);
+-            cgroup_failed = true;
+-        }
+-    }
+-    // Otherwise vfork(): the parent is suspended until the child calls exec
+-    // or _exit, so exec failure is visible via child_errno without the
+-    // self-pipe trick. POSIX restricts vfork children to _exit()/exec*(), but
+-    // Linux permits the setup we need (setsid, ioctl, dup2, ...) before exec.
+-    if (child == -1 && !cgroup_failed) {
+-        child = vfork();
+-        if (child == 0) {
+-            return startChild();
+-        }
+-    }
+-#else
+-    // On macOS, we must use fork() because vfork() is more strictly enforced.
+-    // This code path should only be used for PTY spawns on macOS.
+-    child = fork();
+     if (child == 0) {
+-        // Close read end in child
++#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
+         close(errpipe[0]);
++#endif
+         return startChild();
+     }
+-#endif
+ 
+-#if OS(DARWIN) || OS(FREEBSD)
+-    // macOS fork() path: use self-pipe trick to detect exec failure
++#if OS(DARWIN) || OS(FREEBSD) || defined(__OHOS__)
++    // macOS/FreeBSD/OHOS fork() path: use self-pipe trick to detect exec failure
+     // Parent: close write end
+     close(errpipe[1]);
+ 
+@@ -564,10 +597,17 @@ extern "C" ssize_t posix_spawn_bun(
+     }
+ #else
+     // Linux vfork() path: parent resumes after child calls exec or _exit
+-    // We can detect exec failure via the volatile child_errno variable
++    // We can detect exec failure via the volatile child_errno variable.
++    // When vfork() was not available and fork() was used instead, the
++    // error comes through fork_errpipe.
+     if (child != -1) {
+-        if (child_errno != 0) {
+-            // Child failed to exec - it set child_errno and called _exit()
++        if (use_fork_fallback) {
++            // Fork fallback: no shared memory, so exec failure detection
++            // is best-effort. Assume exec succeeded.
++            res = 0;
++            if (pid) *pid = child;
++        } else if (child_errno != 0) {
++            // Child failed to exec — it set child_errno and called _exit()
+             // Reap the zombie child process
+             wait4(child, NULL, 0, NULL);
+             res = child_errno;
+@@ -579,7 +619,7 @@ extern "C" ssize_t posix_spawn_bun(
+             }
+         }
+     } else {
+-        // vfork() failed
++        // fork/vfork() failed
+         res = errno;
+     }
+     // Negative: joining the cgroup failed, not the spawn proper.
+@@ -595,7 +635,7 @@ extern "C" ssize_t posix_spawn_bun(
+ #endif
+ 
+     sigprocmask(SIG_SETMASK, &oldmask, 0);
+-#if !OS(ANDROID)
++#if !OS(ANDROID) && !defined(__OHOS__)
+     pthread_setcancelstate(cs, 0);
+ #else
+     (void)cs;
+diff --git a/src/jsc/bindings/c-bindings.cpp b/src/jsc/bindings/c-bindings.cpp
+index 481ccddda14..75229bab881 100644
+--- a/src/jsc/bindings/c-bindings.cpp
++++ b/src/jsc/bindings/c-bindings.cpp
+@@ -62,21 +62,35 @@ extern "C" int32_t set_process_priority(int32_t pid, int32_t priority)
+ #if !OS(WINDOWS)
+ extern "C" bool is_executable_file(const char* path)
+ {
+-#if defined(O_EXEC)
+-    // O_EXEC is macOS specific
++#if defined(__OHOS__)
++    // OHOS kernel bug: open(O_EXEC) doesn't check file x permission bit,
++    // so a 0660 file incorrectly succeeds. Use access(X_OK) instead.
++    // But access(X_OK) returns true for directories (x bit = traversal),
++    // so we must also verify it is a regular file, not a directory.
++    struct stat st;
++    if (stat(path, &st) != 0)
++        return false;
++    if (!S_ISREG(st.st_mode))
++        return false;
++    return access(path, X_OK) == 0;
++#elif defined(O_EXEC)
++    // macOS: O_EXEC correctly checks x permission.
+     int fd = open(path, O_EXEC | O_CLOEXEC | O_NONBLOCK | O_NOCTTY, 0);
+     if (fd < 0)
+         return false;
+     close(fd);
+     return true;
+-#endif // defined(O_EXEC)
+-
++#else
++    // Linux (no O_EXEC): use stat to check x bit. Directories also carry an
++    // x bit (traversal permission), so this must also reject non-regular
++    // files the same way the OHOS branch above does.
+     struct stat st;
+     if (stat(path, &st) != 0)
+         return false;
+-
+-    // regular file and user can execute
+-    return S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR);
++    if (!S_ISREG(st.st_mode))
++        return false;
++    return (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
++#endif
+ }
+ #endif
+ 
+@@ -1132,7 +1146,11 @@ extern "C" void Bun__unregisterSignalsForForwarding()
+ #if OS(LINUX) || OS(DARWIN) || OS(FREEBSD)
+ #include <paths.h>
+ 
++#if defined(__OHOS__)
++extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = "/usr/bin:/bin:/system/bin";
++#else
+ extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = _PATH_DEFPATH;
++#endif
+ #elif OS(WINDOWS)
+ extern "C" const char* BUN_DEFAULT_PATH_FOR_SPAWN = "C:\\Windows\\System32;C:\\Windows;";
+ #else
+diff --git a/src/jsc/bindings/sqlite/NodeSqlite.h b/src/jsc/bindings/sqlite/NodeSqlite.h
+index 1fe7e985340..e991e859aa8 100644
+--- a/src/jsc/bindings/sqlite/NodeSqlite.h
++++ b/src/jsc/bindings/sqlite/NodeSqlite.h
+@@ -98,7 +98,7 @@ struct DatabaseSyncOpenConfiguration {
+ class JSDatabaseSync final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+ 
+     DECLARE_INFO;
+@@ -327,7 +327,7 @@ private:
+ class JSStatementSync final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+ 
+     DECLARE_INFO;
+@@ -528,7 +528,7 @@ private:
+ class JSStatementSyncIterator final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+ 
+     DECLARE_INFO;
+@@ -612,7 +612,7 @@ private:
+ class JSNodeSqliteSession final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+ 
+     DECLARE_INFO;
+@@ -731,7 +731,7 @@ private:
+ class JSNodeSqliteLimits final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags | JSC::OverridesGetOwnPropertySlot | JSC::OverridesPut | JSC::OverridesGetOwnPropertyNames | JSC::ProhibitsPropertyCaching;
+ 
+     DECLARE_INFO;
+@@ -781,7 +781,7 @@ private:
+ class JSNodeSqliteTagStore final : public JSC::JSDestructibleObject {
+ public:
+     using Base = JSC::JSDestructibleObject;
+-    static constexpr JSC::DestructionMode needsDestruction = NeedsDestruction;
++    static constexpr JSC::DestructionMode needsDestruction = JSC::DestructionMode::NeedsDestruction;
+     static constexpr unsigned StructureFlags = Base::StructureFlags;
+ 
+     DECLARE_INFO;
+diff --git a/src/jsc/bindings/workaround-missing-symbols.cpp b/src/jsc/bindings/workaround-missing-symbols.cpp
+index 0ee12bafda1..a1682b1b4ca 100644
+--- a/src/jsc/bindings/workaround-missing-symbols.cpp
++++ b/src/jsc/bindings/workaround-missing-symbols.cpp
+@@ -539,3 +539,8 @@ void std::__libcpp_verbose_abort(char const* format, ...) BUN_VERBOSE_ABORT_NOEX
+ #endif
+ 
+ extern "C" __attribute__((weak)) void mi_thread_set_in_threadpool() {}
++
++// Bun's source calls mi_on_thread_idle() to hint mimalloc the thread is idle.
++// Our mimalloc fork (oven-sh/mimalloc, v3.3.2) doesn't provide this symbol
++// on all platforms; provide a weak no-op so the binary loads everywhere.
++extern "C" __attribute__((weak)) void mi_on_thread_idle(void) noexcept {}
+diff --git a/src/jsc/bindings/wtf-bindings.cpp b/src/jsc/bindings/wtf-bindings.cpp
+index 4c6344fe005..c9a75c5085f 100644
+--- a/src/jsc/bindings/wtf-bindings.cpp
++++ b/src/jsc/bindings/wtf-bindings.cpp
+@@ -193,6 +193,25 @@ static int ttySetMode(int fd, int mode, BunTTYState& state, int action)
+     }
+ 
+     rc = uv__tcsetattr(fd, action, &tmp);
++#if defined(__OHOS__)
++    // OHOS refuses tcsetattr on a PTY *master* fd for any action that drains
++    // or flushes the output queue: TCSADRAIN and TCSAFLUSH both fail with
++    // EACCES, while TCSANOW on the very same fd succeeds and the new termios
++    // reads back correctly. (Measured directly: master TCSANOW ok /
++    // TCSADRAIN EACCES / TCSAFLUSH EACCES; slave all three ok. Presumably the
++    // sandbox blocks the TCSBRK/TIOCDRAIN the draining variants issue.)
++    //
++    // Bun.Terminal calls through here with the PTY master, so without this
++    // every setRawMode() throws on-device. Fall back rather than switching to
++    // TCSANOW outright: keep the drain-then-apply ordering wherever the
++    // kernel actually allows it, and only give it up on the fds that would
++    // otherwise fail outright. Losing the drain means pending output can be
++    // reinterpreted under the new settings — acceptable next to setRawMode
++    // being unusable, and it is what a PTY master on this platform permits.
++    if (rc == EACCES) {
++        rc = uv__tcsetattr(fd, TCSANOW, &tmp);
++    }
++#endif
+     if (rc == 0) {
+         state.mode = mode;
+     }
+diff --git a/src/options_types/compile_target.rs b/src/options_types/compile_target.rs
+index e4ca61a31d9..91b2e880e9b 100644
+--- a/src/options_types/compile_target.rs
++++ b/src/options_types/compile_target.rs
+@@ -37,7 +37,9 @@ impl Default for CompileTarget {
+                 tag: Default::default(),
+                 _tag_padding: Default::default(),
+             },
+-            libc: if Environment::IS_MUSL {
++            libc: if Environment::IS_OHOS {
++                Libc::Ohos
++            } else if Environment::IS_MUSL {
+                 Libc::Musl
+             } else if Environment::IS_ANDROID {
+                 Libc::Android
+@@ -58,6 +60,8 @@ pub enum Libc {
+     Musl,
+     /// bionic (Android)
+     Android,
++    /// HarmonyOS (OHOS) — musl-based, distinct npm package
++    Ohos,
+ }
+ 
+ impl Libc {
+@@ -67,6 +71,7 @@ impl Libc {
+             Libc::Default => "",
+             Libc::Musl => "-musl",
+             Libc::Android => "-android",
++            Libc::Ohos => "-ohos",
+         }
+     }
+ }
+@@ -311,6 +316,10 @@ impl CompileTarget {
+                 this.libc = Libc::Android;
+                 found_libc = true;
+                 continue;
++            } else if token == b"ohos" {
++                this.libc = Libc::Ohos;
++                found_libc = true;
++                continue;
+             } else {
+                 return Err(ParseError::UnsupportedTarget);
+             }
+@@ -362,6 +371,7 @@ impl CompileTarget {
+                         && token != b"baseline"
+                         && token != b"musl"
+                         && token != b"android"
++                        && token != b"ohos"
+                         && !(strings::has_prefix(token, b"v1.")
+                             || strings::has_prefix(token, b"v0."))
+                     {
+@@ -421,8 +431,9 @@ impl CompileTarget {
+         // `OperatingSystem` / `Architecture` / `Libc` is a compile error here,
+         // not a runtime panic behind a wildcard arm.
+         let platform: &'static [u8] = match self.libc {
+-            // process.platform: Node reports "android" on Android, not "linux".
++            // process.platform: Node reports "android" on Android, "openharmony" on OHOS.
+             Libc::Android => b"\"android\"",
++            Libc::Ohos => b"\"openharmony\"",
+             Libc::Default | Libc::Musl => match self.os {
+                 OperatingSystem::Mac => b"\"darwin\"",
+                 OperatingSystem::Linux => b"\"linux\"",
+diff --git a/src/runtime/Cargo.toml b/src/runtime/Cargo.toml
+index 386634671a6..8b31cdedb2c 100644
+--- a/src/runtime/Cargo.toml
++++ b/src/runtime/Cargo.toml
+@@ -115,5 +115,8 @@ bun_install_jsc.workspace = true
+ bun_patch_jsc.workspace = true
+ bun_css_jsc.workspace = true
+ 
++[target.'cfg(target_env = "ohos")'.dependencies]
++ohos_sign = { path = "../ohos_sign" }
++
+ [features]
+ default = []
+diff --git a/src/runtime/api.rs b/src/runtime/api.rs
+index 3a3c08eef69..51785a49831 100644
+--- a/src/runtime/api.rs
++++ b/src/runtime/api.rs
+@@ -97,6 +97,11 @@ pub mod bun_subprocess;
+ #[path = "api/bun/js_bun_spawn_bindings.rs"]
+ pub mod js_bun_spawn_bindings;
+ 
++// Gives an exec'd `node` child a working os.userInfo() -- the embedded ohos-compat-shim only covers this process, not a spawned child (see ohos_node_userinfo.rs).
++#[cfg(target_env = "ohos")]
++#[path = "api/bun/ohos_node_userinfo.rs"]
++pub mod ohos_node_userinfo;
++
+ // Bun.Terminal — PTY/ConPTY. JsRef lifecycle + BufferedReader/StreamingWriter
+ // generic owner wiring (~120 jsc refs).
+ #[path = "api/bun/Terminal.rs"]
+diff --git a/src/runtime/api/bun/Terminal.rs b/src/runtime/api/bun/Terminal.rs
+index 1f8349d591c..5a4dac1b86f 100644
+--- a/src/runtime/api/bun/Terminal.rs
++++ b/src/runtime/api/bun/Terminal.rs
+@@ -114,6 +114,15 @@ pub struct Terminal {
+     /// Duplicated master fd for writing (POSIX) / overlapped write pipe end (Windows)
+     write_fd: Cell<Fd>,
+ 
++    /// Exit notification that fired before the JS wrapper / callbacks existed.
++    /// `on_reader_finished` is one-shot (guarded by `READER_DONE`), and both
++    /// `writer.start()` and `reader.start()` can drive it synchronously during
++    /// `init_terminal` — long before `this_value` is set or the `exit` callback
++    /// is registered. Without this the single notification is silently dropped
++    /// and the user's `exit` callback never fires at all. Recorded here and
++    /// replayed at the end of `init_terminal`. See OHOS_TEST_TODO.md T03.
++    deferred_exit: Cell<Option<i32>>,
++
+     /// The slave side of the PTY (used by child processes). Unused on Windows.
+     slave_fd: Cell<Fd>,
+ 
+@@ -417,6 +426,7 @@ impl Terminal {
+             read_fd: Cell::new(pty_result.read_fd),
+             write_fd: Cell::new(pty_result.write_fd),
+             slave_fd: Cell::new(pty_result.slave),
++            deferred_exit: Cell::new(None),
+             #[cfg(windows)]
+             hpcon: Cell::new(Some(pty_result.hpcon)),
+             cols: Cell::new(if cfg!(windows) {
+@@ -500,17 +510,17 @@ impl Terminal {
+                                 .insert(PosixFlags::NONBLOCKING | PosixFlags::POLLABLE);
+                             poll.set_flag(bun_io::FilePollFlag::Nonblocking);
+                         }
++                        // Enroll in epoll_rearm_watchdog: this fd class hit a
++                        // confirmed real-device OHOS kernel epoll defect
++                        // (registration reports success, kernel never
++                        // delivers) -- see OHOS_TEST_STATUS.md 2026-08-20.
++                        r.flags.insert(PosixFlags::EPOLL_REARM_WATCH);
+                     });
+                 }
+                 terminal.update_flags(|f| f.insert(Flags::READER_STARTED));
+             }
+         }
+ 
+-        // Start reading data
+-        // SAFETY: the reader cell is live for the terminal's lifetime; `read`
+-        // is the raw re-entrancy-safe entry (its dispatch runs user JS).
+-        unsafe { IOReader::read(terminal.reader.as_ptr()) };
+-
+         // Get or create the JS wrapper
+         let this_value = existing_js_value.unwrap_or_else(|| js::to_js(parent_ptr, global_object));
+ 
+@@ -533,6 +543,41 @@ impl Terminal {
+             js::gc::set(js::GcValue::Drain, this_value, global_object, cb);
+         }
+ 
++        // Start reading data LAST — after the JS wrapper exists and the
++        // callbacks are registered.
++        //
++        // `read()` can complete synchronously: a PTY whose slave end is
++        // already closed (or a read that errors) drives
++        // on_reader_done/on_reader_error -> on_reader_finished right here,
++        // inline. That path sets READER_DONE, which is a one-shot: every
++        // later call, including the one from the user's own `close()`, hits
++        // the `if READER_DONE { return }` guard at the top and returns
++        // without dispatching.
++        //
++        // With `read()` above the wrapper/callback setup, that inline
++        // completion consumed the single exit notification while
++        // `this_value` was still `JsRef::empty()` and no Exit callback was
++        // registered yet, so it silently dropped at `try_get` /
++        // `gc::get(Exit)` and the user's `exit` callback then never fired at
++        // all. Observed intermittently (~50% under
++        // BUN_JSC_randomIntegrityAuditRate=1.0 after ~30 prior terminals);
++        // instrumentation showed the final terminal entering close_internal
++        // with READER_DONE already true and zero dispatches for the whole
++        // run. See OHOS_TEST_TODO.md T03.
++        // SAFETY: the reader cell is live for the terminal's lifetime; `read`
++        // is the raw re-entrancy-safe entry (its dispatch runs user JS).
++        unsafe { IOReader::read(terminal.reader.as_ptr()) };
++
++        // Replay an exit notification that fired during startup, before the
++        // wrapper and callbacks above existed. `writer.start()`,
++        // `reader.start()` and `read()` can all drive `on_reader_finished`
++        // synchronously; that path is one-shot, so without this replay the
++        // user's `exit` callback would never fire at all.
++        if let Some(code) = terminal.deferred_exit.take() {
++            terminal.this_value.with_mut(|v| v.downgrade());
++            terminal.call_exit_callback(code, None);
++        }
++
+         Ok(CreateResult {
+             // SAFETY: `parent_ptr` is the live `heap::into_raw` pointer above.
+             terminal: unsafe { bun_ptr::BackRef::from_raw_mut(parent_ptr) },
+@@ -819,7 +864,9 @@ pub type OpenPtyFn = unsafe extern "C" fn(
+     winp: *const Winsize,
+ ) -> c_int;
+ 
+-/// Dynamic loading of openpty on Linux (it's in libutil which may not be linked)
++/// Dynamic loading of openpty on Linux (it's in libutil which may not be linked).
++/// OHOS: openpty lives in libc.so; the libc.so entry below + RTLD_DEFAULT
++/// fallback covers it (verified by ohos-preflight i17_openpty_libc 2026-06-15).
+ #[cfg(any(target_os = "linux", target_os = "android"))]
+ mod lib_util {
+     use super::*;
+@@ -840,11 +887,13 @@ mod lib_util {
+         }
+         LOADED.store(true, Relaxed);
+ 
+-        // Try libutil.so first (most common), then libutil.so.1
+-        const LIB_NAMES: [&ZStr; 3] = [
++        // Try libutil.so first (most common), then libutil.so.1,
++        // libc.so.6 (glibc), then libc.so (musl/ohos).
++        const LIB_NAMES: [&ZStr; 4] = [
+             bun_core::zstr!("libutil.so"),
+             bun_core::zstr!("libutil.so.1"),
+             bun_core::zstr!("libc.so.6"),
++            bun_core::zstr!("libc.so"),
+         ];
+         for lib_name in LIB_NAMES {
+             if let Some(h) = sys::dlopen(lib_name, sys::RTLD::LAZY) {
+@@ -856,7 +905,26 @@ mod lib_util {
+     }
+ 
+     pub(super) fn get_open_pty() -> Option<OpenPtyFn> {
+-        sys::dlsym_with_handle!(OpenPtyFn, "openpty", get_handle())
++        // First try the handle from dlopen (specific library)
++        if let Some(f) = sys::dlsym_with_handle!(OpenPtyFn, "openpty", get_handle()) {
++            return Some(f);
++        }
++        // Fallback: RTLD_DEFAULT — covers musl/OHOS where openpty is in libc
++        // but some runtimes may not expose it through a dlopen'd handle.
++        let name = c"openpty";
++        // SAFETY: `dlsym` reads only the handle and the NUL-terminated
++        // literal; a null return (not found) is checked below.
++        let p = unsafe { libc::dlsym(core::ptr::null_mut(), name.as_ptr()) };
++        if p.is_null() {
++            None
++        } else {
++            // SAFETY: irreducible — `OpenPtyFn` is a fn-pointer type; fn
++            // pointers are not `bytemuck::Pod`, so the `*mut c_void` →
++            // `OpenPtyFn` reinterpretation cannot be expressed safely. `p` is
++            // non-null (checked above) and was obtained from `dlsym`, so it is
++            // a valid code address. Mirrors `dlsym_with_handle!`.
++            Some(unsafe { core::mem::transmute_copy::<*mut c_void, OpenPtyFn>(&p) })
++        }
+     }
+ }
+ 
+@@ -883,8 +951,8 @@ fn get_open_pty_fn() -> Option<OpenPtyFn> {
+         return Some(openpty);
+     }
+ 
+-    // On Linux, openpty is in libutil, which may not be linked
+-    // Load it dynamically via dlopen
++    // On Linux/Android/OHOS, openpty is in libutil (glibc) or libc (musl/OHOS).
++    // Load it dynamically via dlopen.
+     #[cfg(any(target_os = "linux", target_os = "android"))]
+     {
+         return lib_util::get_open_pty();
+@@ -1809,8 +1877,17 @@ impl Terminal {
+         // EOF from master - downgrade to weak ref to allow GC.
+         // Skip JS interactions if already finalized (happens when close() is called during finalize)
+         if !self.flags.get().contains(Flags::FINALIZED) {
+-            self.maybe_downgrade_after_eof();
+-            self.call_exit_callback(exit_code, None);
++            if self.this_value.get().is_empty() {
++                // Fired from inside `init_terminal`, before the JS wrapper
++                // exists. Dispatching now would drop the notification (there
++                // is nothing to call), and `READER_DONE` is already set above
++                // so nothing will ever retry. Stash it; `init_terminal`
++                // replays it once the callbacks are registered.
++                self.deferred_exit.set(Some(exit_code));
++            } else {
++                self.maybe_downgrade_after_eof();
++                self.call_exit_callback(exit_code, None);
++            }
+         }
+         self.deref_();
+     }
+diff --git a/src/runtime/api/bun/js_bun_spawn_bindings.rs b/src/runtime/api/bun/js_bun_spawn_bindings.rs
+index d948fb8fd11..2c1a2f51ed6 100644
+--- a/src/runtime/api/bun/js_bun_spawn_bindings.rs
++++ b/src/runtime/api/bun/js_bun_spawn_bindings.rs
+@@ -998,6 +998,72 @@ fn spawn_maybe_sync(
+         }
+     }
+ 
++    // OHOS: chdir()-then-exec() into a different binary leaves that binary's
++    // own getcwd() syscall broken for EL2-sandbox paths (EACCES walking the
++    // parent chain) — this is a real-device-only kernel/sandbox limitation,
++    // not reproducible in the CI container, and not a bug in the chdir/exec
++    // sequence below. Shells never hit the broken syscall in the first place:
++    // they trust an inherited $PWD when `stat($PWD)` matches `stat(".")` and
++    // skip calling getcwd() entirely. Real Node.js on this device has the same
++    // gap (verified: `child_process.spawnSync(cmd, {cwd})` reproduces
++    // identically), so this isn't something upstream already solved — mirror
++    // what a real `cd` does and keep $PWD in sync with an explicit cwd,
++    // scoped to OHOS so no other platform's spawn behavior changes.
++    #[cfg(target_env = "ohos")]
++    if user_specified_cwd {
++        let is_pwd_key = |ptr: CStrPtr| -> bool {
++            if ptr.is_null() {
++                return false;
++            }
++            // SAFETY: every entry in `env_array` at this point is `\0`-terminated
++            // storage owned by `cstr_storage`/`inherited_env_storage` (both
++            // still alive here) or a `c"..."` literal.
++            let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
++            let key_end = strings::index_of_char_usize(bytes, b'=').unwrap_or(bytes.len());
++            &bytes[..key_end] == b"PWD"
++        };
++        // `env: {...}` explicitly given by the caller: a PWD key in there is
++        // their deliberate choice (e.g. testing a tool's behavior when $PWD
++        // lies about cwd) — leave it untouched, don't second-guess it.
++        let user_set_pwd_explicitly = override_env && env_array.iter().any(|&ptr| is_pwd_key(ptr));
++        if !user_set_pwd_explicitly {
++            // Inheriting the parent's environment: any PWD already in
++            // `env_array` came from the parent process, not this spawn call's
++            // intent, and is now stale (cwd changed). It must be dropped
++            // rather than merely appended after: musl/glibc `getenv()` scans
++            // `environ` front-to-back and returns the *first* match, so a
++            // corrected entry pushed at the end would silently lose to the
++            // stale one still sitting earlier in the array.
++            env_array.retain(|&ptr| !is_pwd_key(ptr));
++            let mut buf: Vec<u8> = Vec::with_capacity(cwd.len() + 4);
++            buf.extend_from_slice(b"PWD=");
++            buf.extend_from_slice(cwd);
++            let pwd_line = ZBox::from_vec(buf);
++            env_array.push(pwd_line.as_ptr());
++            cstr_storage.push(pwd_line);
++        }
++    }
++
++    // OHOS: an exec'd `node` child gets the real musl libc, not the ohos-compat-shim symbols linked into *this* executable, so its os.userInfo() throws ENOENT for the app-sandbox uid -- see ohos_node_userinfo.rs.
++    #[cfg(target_env = "ohos")]
++    if let Some(a0) = argv0 {
++        // SAFETY: `a0` at this point always points at NUL-terminated storage owned by `cstr_storage` (get_argv's `argv0_result.argv0`) that outlives this call -- same invariant `is_pwd_key` relies on.
++        let a0_bytes = unsafe { CStr::from_ptr(a0) }.to_bytes();
++        if let Some(inj) = crate::api::ohos_node_userinfo::compute(a0_bytes, &env_array) {
++            // SAFETY: `env_array` entries are NUL-terminated storage owned by `cstr_storage` (is_managed_key's stated contract).
++            env_array
++                .retain(|&ptr| !unsafe { crate::api::ohos_node_userinfo::is_managed_key(ptr) });
++            let node_options = ZBox::from_vec(inj.node_options);
++            env_array.push(node_options.as_ptr());
++            cstr_storage.push(node_options);
++            if let Some(username) = inj.username {
++                let username = ZBox::from_vec(username);
++                env_array.push(username.as_ptr());
++                cstr_storage.push(username);
++            }
++        }
++    }
++
+     env_array.push(core::ptr::null());
+     argv.push(core::ptr::null());
+ 
+diff --git a/src/runtime/api/bun/ohos_node_userinfo.rs b/src/runtime/api/bun/ohos_node_userinfo.rs
+new file mode 100644
+index 00000000000..cc43578658c
+--- /dev/null
++++ b/src/runtime/api/bun/ohos_node_userinfo.rs
+@@ -0,0 +1,548 @@
++//! OHOS-only: app-sandbox uids have no /etc/passwd and an exec'd `node` child misses the embedded compat shim, so give it a working `os.userInfo()` by injecting a preload via `NODE_OPTIONS` (`--require` a content-hash-named file, username via `BUN_OHOS_USERNAME`). Fail-open everywhere.
++
++use core::ffi::{CStr, c_char};
++
++use bun_core::{Once, ZBox, env_var, strings};
++use bun_sys as sys;
++
++// ─────────────────────────────────────────────────────────────────────────
++// The preload itself
++// ─────────────────────────────────────────────────────────────────────────
++
++/// Probe-then-fallback (matching ohos-compat-shim's design): only installs when the real `os.userInfo()` actually throws, so this is an exact no-op anywhere the syscall already works.
++const PRELOAD_JS: &str = r#""use strict";
++// Injected by bun on HarmonyOS — see src/runtime/api/bun/ohos_node_userinfo.rs.
++// Node's os.userInfo() goes straight to uv_os_get_passwd -> getpwuid_r(),
++// which has no /etc/passwd entry for HarmonyOS app-sandbox uids and throws
++// ENOENT. Node reads no environment variable on that path, so patching the
++// function here is the only fix that needs zero changes on the tool's side.
++(function () {
++  try {
++    var os = require("node:os");
++    var real = os.userInfo;
++    if (typeof real !== "function") return;
++    try {
++      real.call(os);
++      return; // real getpwuid_r works here -- nothing to do.
++    } catch (probeErr) {}
++
++    var name =
++      process.env.BUN_OHOS_USERNAME ||
++      process.env.USER ||
++      process.env.LOGNAME ||
++      "unknown"; // last resort matches bun's own os.userInfo() fallback.
++
++    os.userInfo = function userInfo(options) {
++      try {
++        return real.call(os, options);
++      } catch (e) {}
++      var enc = options && typeof options === "object" ? options.encoding : undefined;
++      var encode = function (s) {
++        if (enc === "buffer") return Buffer.from(s, "utf8");
++        if (enc) return Buffer.from(s, "utf8").toString(enc);
++        return s;
++      };
++      var home;
++      try {
++        home = os.homedir();
++      } catch (e) {
++        home = process.env.HOME || "/data/storage/el2/base";
++      }
++      return {
++        uid: typeof process.getuid === "function" ? process.getuid() : -1,
++        gid: typeof process.getgid === "function" ? process.getgid() : -1,
++        username: encode(name),
++        homedir: encode(home),
++        shell: encode(process.env.SHELL || "/bin/sh"),
++      };
++    };
++  } catch (e) {}
++})();
++"#;
++
++fn fnv1a64(bytes: &[u8]) -> u64 {
++    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++    for &b in bytes {
++        h ^= b as u64;
++        h = h.wrapping_mul(0x0000_0100_0000_01b3);
++    }
++    h
++}
++
++// ─────────────────────────────────────────────────────────────────────────
++// argv0 matching
++// ─────────────────────────────────────────────────────────────────────────
++
++fn basename(path: &[u8]) -> &[u8] {
++    match strings::last_index_of_char(path, b'/') {
++        Some(i) => &path[i + 1..],
++        None => path,
++    }
++}
++
++/// `base` is already `basename(argv0)`: `node`/`nodejs`/`nodeNN` (version-suffixed shims; must reject `nodemon`), plus `#!/usr/bin/env node` shebang scripts so a `node` they re-exec inherits NODE_OPTIONS.
++fn is_node_like(base: &[u8]) -> bool {
++    if base == b"node" || base == b"nodejs" {
++        return true;
++    }
++    if let Some(rest) = base.strip_prefix(b"node") {
++        if !rest.is_empty()
++            && rest
++                .iter()
++                .all(|&b| b.is_ascii_digit() || b == b'.' || b == b'-')
++        {
++            return true;
++        }
++    }
++    matches!(
++        base,
++        b"npm" | b"npx" | b"corepack" | b"yarn" | b"pnpm" | b"pnpx"
++    )
++}
++
++// ─────────────────────────────────────────────────────────────────────────
++// Escape hatch
++// ─────────────────────────────────────────────────────────────────────────
++
++/// Checked against **both** this process's env (global kill switch set before bun ran) and `env_array` (the child's env, which an explicit non-inheriting `env:` spawn never lets touch bun's own env) -- either one disables.
++fn is_disabled(env_array: &[*const c_char]) -> bool {
++    if find_env_value(env_array, b"BUN_OHOS_NO_NODE_USERINFO").is_some()
++        || bun_core::getenv_z(bun_core::zstr!("BUN_OHOS_NO_NODE_USERINFO")).is_some()
++    {
++        return true;
++    }
++    // Honor the shim's own toggle (ohos_compat_shim.c's OHOS_COMPAT_SHIM_DISABLE) so disabling the shim's getpwuid_r interposer also disables this.
++    let shim_disable = find_env_value(env_array, b"OHOS_COMPAT_SHIM_DISABLE").or_else(|| {
++        bun_core::getenv_z(bun_core::zstr!("OHOS_COMPAT_SHIM_DISABLE")).map(<[u8]>::to_vec)
++    });
++    if let Some(v) = shim_disable {
++        if strings::split(&v, b",").any(|s| s == b"getpwuid_r") {
++            return true;
++        }
++    }
++    false
++}
++
++// ─────────────────────────────────────────────────────────────────────────
++// Username / home-dir source of truth
++// ─────────────────────────────────────────────────────────────────────────
++
++struct ShimIdentity {
++    /// `getpwuid_r(getuid())` username via the embedded shim's interposed symbol (survives no `$USER`); `None` if the lookup failed or the value can't safely become an env value (`=` or NUL).
++    username: Option<Box<[u8]>>,
++    /// `pw_dir` from the same call, reused as a home-dir candidate (avoids a second getpwuid_r).
++    home: Option<Box<[u8]>>,
++}
++
++fn shim_identity() -> &'static ShimIdentity {
++    static ONCE: Once<ShimIdentity> = Once::new();
++    ONCE.get_or_init(|| {
++        // SAFETY: zeroed POD, same as node_os.rs's homedir() implementation.
++        let mut pw: libc::passwd = bun_core::ffi::zeroed();
++        let mut result: *mut libc::passwd = core::ptr::null_mut();
++        let mut stack_buf = [0u8; 4096];
++        let mut heap_buf: Vec<u8>;
++        let mut buf: &mut [u8] = &mut stack_buf;
++
++        let ret: core::ffi::c_int = loop {
++            // NOTE: must be `getuid()`, not `geteuid()` -- the shim's interposer only takes the OS-account fast path when `uid == getuid()`.
++            // SAFETY: `pw` and `result` are valid writable locations for the
++            // call, `buf` is valid for `buf.len()` bytes, and getpwuid_r
++            // writes only within them (ERANGE growth handled below).
++            let ret = unsafe {
++                libc::getpwuid_r(
++                    sys::c::getuid(),
++                    &raw mut pw,
++                    buf.as_mut_ptr().cast::<c_char>(),
++                    buf.len(),
++                    &raw mut result,
++                )
++            };
++
++            if ret == libc::EINTR as core::ffi::c_int {
++                continue;
++            }
++            if ret == libc::ERANGE as core::ffi::c_int {
++                heap_buf = vec![0u8; buf.len() * 2];
++                buf = &mut heap_buf;
++                continue;
++            }
++            break ret;
++        };
++
++        if ret != 0 || result.is_null() {
++            return ShimIdentity {
++                username: None,
++                home: None,
++            };
++        }
++
++        let username = if !pw.pw_name.is_null() {
++            // SAFETY: getpwuid_r NUL-terminates pw_name into `buf` on success.
++            let bytes = unsafe { CStr::from_ptr(pw.pw_name) }.to_bytes();
++            (!bytes.is_empty()
++                && !strings::contains_char(bytes, b'=')
++                && !strings::contains_char(bytes, 0))
++            .then(|| Box::<[u8]>::from(bytes))
++        } else {
++            None
++        };
++        let home = if !pw.pw_dir.is_null() {
++            // SAFETY: same as pw_name above.
++            let bytes = unsafe { CStr::from_ptr(pw.pw_dir) }.to_bytes();
++            (!bytes.is_empty()).then(|| Box::<[u8]>::from(bytes))
++        } else {
++            None
++        };
++
++        ShimIdentity { username, home }
++    })
++}
++
++// ─────────────────────────────────────────────────────────────────────────
++// Preload file materialization
++// ─────────────────────────────────────────────────────────────────────────
++
++/// Absolute path to the on-disk preload, materializing it on first use and re-verifying on every later call; `None` means "inject nothing".
++fn preload_path() -> Option<&'static [u8]> {
++    // Only the *choice of path* is cacheable for the process lifetime; whether the file is still *there* can change at any time, so the access() re-check must stay outside the one-shot `Once` (an external delete must self-heal, not hand node a dead `--require`).
++    static ONCE: Once<Option<ZBox>> = Once::new();
++    let final_z = ONCE.get_or_init(resolve_and_materialize).as_ref()?;
++    if sys::access(final_z, libc::F_OK).is_err() && !materialize(final_z) {
++        return None;
++    }
++    Some(final_z.as_bytes())
++}
++
++fn resolve_and_materialize() -> Option<ZBox> {
++    let ident = shim_identity();
++    let filename = format!(
++        "bun-ohos-userinfo-{:016x}.cjs",
++        fnv1a64(PRELOAD_JS.as_bytes())
++    );
++    for dir in candidate_dirs(ident) {
++        if let Some(path) = try_dir(&dir, &filename) {
++            return Some(path);
++        }
++    }
++    None
++}
++
++/// Candidate directories, most-intentional first. A NODE_OPTIONS `--require` token can't safely carry a space/quote/backslash/tab, so such candidates are skipped, not escaped -- the hardcoded EL2 fallback never contains any.
++fn candidate_dirs(ident: &ShimIdentity) -> Vec<Vec<u8>> {
++    let mut out = Vec::with_capacity(3);
++    if let Some(install) = env_var::BUN_INSTALL.get() {
++        push_candidate(&mut out, install, b"/ohos");
++    }
++    let home = env_var::HOME.get().or(ident.home.as_deref());
++    if let Some(home) = home {
++        push_candidate(&mut out, home, b"/.bun/ohos");
++    }
++    // HarmonyOS per-HAP sandbox base: always resolvable, no env dependency (same path the shim falls back to for HOME).
++    out.push(b"/data/storage/el2/base/.bun-ohos".to_vec());
++    out
++}
++
++fn push_candidate(out: &mut Vec<Vec<u8>>, base: &[u8], suffix: &[u8]) {
++    if strings::index_of_any(base, b" \"\\\t").is_some() {
++        return;
++    }
++    let mut v = Vec::with_capacity(base.len() + suffix.len());
++    v.extend_from_slice(base);
++    v.extend_from_slice(suffix);
++    out.push(v);
++}
++
++fn try_dir(dir_bytes: &[u8], filename: &str) -> Option<ZBox> {
++    let dir_z = ZBox::from_vec(dir_bytes.to_vec());
++    match sys::mkdir(&dir_z, 0o700) {
++        Ok(()) => {
++            // OHOS tmpfs forces setgid + group-write on new dirs -- chmod back to 0700 so the EEXIST branch's ownership check passes for the next process reusing this dir.
++            let _ = sys::chmod(&dir_z, 0o700);
++        }
++        Err(e) if e.errno == libc::EEXIST as u16 => match sys::lstat(&dir_z) {
++            Ok(st)
++                if sys::kind_from_mode(st.st_mode as sys::Mode) == sys::FileKind::Directory
++                    && st.st_uid == sys::c::getuid() =>
++            {
++                let _ = sys::chmod(&dir_z, 0o700);
++            }
++            // Not a directory we own -- don't write into it.
++            _ => return None,
++        },
++        Err(_) => return None,
++    }
++
++    let mut final_bytes = dir_bytes.to_vec();
++    final_bytes.push(b'/');
++    final_bytes.extend_from_slice(filename.as_bytes());
++    let final_z = ZBox::from_vec(final_bytes);
++
++    // Content-hashed name means existence implies correctness; every spawn re-checks instead of trusting a cached bool, so an external delete self-heals.
++    if sys::access(&final_z, libc::F_OK).is_ok() {
++        return Some(final_z);
++    }
++
++    if materialize(&final_z) {
++        Some(final_z)
++    } else {
++        None
++    }
++}
++
++/// Write-to-temp + `rename()`: `rename()` is atomic within a directory, so a concurrent bun process never sees a half-written file; content is identical by construction, so whichever rename lands last is fine.
++fn materialize(final_z: &ZBox) -> bool {
++    let mut tmp_bytes = final_z.as_bytes().to_vec();
++    tmp_bytes.push(b'.');
++    tmp_bytes.extend_from_slice(std::process::id().to_string().as_bytes());
++    tmp_bytes.extend_from_slice(b".tmp");
++    let tmp_z = ZBox::from_vec(tmp_bytes);
++
++    let fd = match sys::open(
++        &tmp_z,
++        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
++        0o600,
++    ) {
++        Ok(fd) => fd,
++        Err(_) => return false,
++    };
++
++    let ok = write_all(fd, PRELOAD_JS.as_bytes());
++    let _ = sys::close(fd);
++    if !ok {
++        let _ = sys::unlink(&tmp_z);
++        return false;
++    }
++
++    if sys::rename(&tmp_z, final_z).is_err() {
++        let _ = sys::unlink(&tmp_z);
++        return false;
++    }
++    true
++}
++
++fn write_all(fd: sys::Fd, mut buf: &[u8]) -> bool {
++    while !buf.is_empty() {
++        match sys::write(fd, buf) {
++            Ok(0) => return false,
++            Ok(n) => buf = &buf[n..],
++            Err(e) if e.errno == libc::EINTR as u16 => continue,
++            Err(_) => return false,
++        }
++    }
++    true
++}
++
++// ─────────────────────────────────────────────────────────────────────────
++// Public entry point
++// ─────────────────────────────────────────────────────────────────────────
++
++/// What a caller should add to a spawned child's env. `node_options` replaces every existing `NODE_OPTIONS` entry; `username` is `None` when the shim lookup failed (the preload's own `$USER`/`$LOGNAME` fallback then applies, nothing to push).
++pub struct Injection {
++    /// `"NODE_OPTIONS=<merged value>"`, no trailing NUL.
++    pub node_options: Vec<u8>,
++    /// `"BUN_OHOS_USERNAME=<name>"`, no trailing NUL.
++    pub username: Option<Vec<u8>>,
++}
++
++/// Call after argv0 is fully `$PATH`-resolved (not a caller-supplied `options.argv0` override) and before the child's env array is finalized. `env_array` is read-only here; the caller owns removing [`is_managed_key`] entries and storing the returned lines (the two call sites don't share a storage type).
++pub fn compute(argv0: &[u8], env_array: &[*const c_char]) -> Option<Injection> {
++    if !is_node_like(basename(argv0)) {
++        return None;
++    }
++    if is_disabled(env_array) {
++        return None;
++    }
++    let preload = preload_path()?;
++
++    let existing = find_env_value(env_array, b"NODE_OPTIONS").unwrap_or_default();
++    let flag = build_require_flag(preload);
++    if contains_subslice(&existing, &flag) {
++        // Already present (bun -> bun -> node chain, or inherited from the parent) -- don't duplicate --require.
++        return None;
++    }
++
++    let mut node_options =
++        Vec::with_capacity(b"NODE_OPTIONS=".len() + existing.len() + 1 + flag.len());
++    node_options.extend_from_slice(b"NODE_OPTIONS=");
++    if !existing.is_empty() {
++        node_options.extend_from_slice(&existing);
++        node_options.push(b' ');
++    }
++    node_options.extend_from_slice(&flag);
++
++    let username = shim_identity().username.as_ref().map(|name| {
++        let mut line = Vec::with_capacity(b"BUN_OHOS_USERNAME=".len() + name.len());
++        line.extend_from_slice(b"BUN_OHOS_USERNAME=");
++        line.extend_from_slice(name);
++        line
++    });
++
++    Some(Injection {
++        node_options,
++        username,
++    })
++}
++
++/// Keys an [`Injection`] owns; callers must `retain` these out of `env_array` before pushing -- musl/glibc getenv() returns the *first* match, so appended-only entries would silently lose to stale ones earlier in the array.
++///
++/// # Safety
++/// `ptr` must be NUL-terminated storage that outlives the call (the same
++/// invariant every `env_array` entry carries -- see `find_env_value`).
++pub unsafe fn is_managed_key(ptr: *const c_char) -> bool {
++    if ptr.is_null() {
++        return false;
++    }
++    // SAFETY: caller contract -- every entry in a live `env_array` is NUL-terminated storage that outlives this call (same invariant as `is_pwd_key`/`find_env_value`).
++    let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
++    let key_end = strings::index_of_char_usize(bytes, b'=').unwrap_or(bytes.len());
++    matches!(&bytes[..key_end], b"NODE_OPTIONS" | b"BUN_OHOS_USERNAME")
++}
++
++fn find_env_value(env_array: &[*const c_char], key: &[u8]) -> Option<Vec<u8>> {
++    for &ptr in env_array {
++        if ptr.is_null() {
++            continue;
++        }
++        // SAFETY: see `is_managed_key`.
++        let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
++        let key_end = strings::index_of_char_usize(bytes, b'=').unwrap_or(bytes.len());
++        if &bytes[..key_end] == key {
++            // getenv() returns the FIRST match -- mirror that so "existing" reflects what the child would actually observe.
++            return Some(bytes[key_end + 1..].to_vec());
++        }
++    }
++    None
++}
++
++/// Node's NODE_OPTIONS lexer only splits on a space, only `"` quotes, and an unclosed quote makes node exit -- so always quote and always escape `"`/`\` even though candidate dirs already reject such bytes (one code path can't be wrong).
++fn build_require_flag(path: &[u8]) -> Vec<u8> {
++    let mut out = Vec::with_capacity(b"--require ".len() + path.len() + 2);
++    out.extend_from_slice(b"--require ");
++    out.push(b'"');
++    for &b in path {
++        if b == b'"' || b == b'\\' {
++            out.push(b'\\');
++        }
++        out.push(b);
++    }
++    out.push(b'"');
++    out
++}
++
++fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
++    if needle.is_empty() {
++        return true;
++    }
++    if needle.len() > haystack.len() {
++        return false;
++    }
++    strings::index_of(haystack, needle).is_some()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn node_like_matches() {
++        assert!(is_node_like(b"node"));
++        assert!(is_node_like(b"nodejs"));
++        assert!(is_node_like(b"node22"));
++        assert!(is_node_like(b"node20.11"));
++        assert!(is_node_like(b"node-22"));
++        assert!(is_node_like(b"npm"));
++        assert!(is_node_like(b"npx"));
++        assert!(is_node_like(b"corepack"));
++        assert!(is_node_like(b"yarn"));
++        assert!(is_node_like(b"pnpm"));
++        assert!(is_node_like(b"pnpx"));
++    }
++
++    #[test]
++    fn node_like_rejects() {
++        assert!(!is_node_like(b"nodemon"));
++        assert!(!is_node_like(b"bun"));
++        assert!(!is_node_like(b"sh"));
++        assert!(!is_node_like(b""));
++        assert!(!is_node_like(b"node_modules"));
++    }
++
++    /// The escape hatch must be checked against `env_array` (the child's target env, which an explicit `env:` spawn never lets touch bun's own ambient env), not only `std::env`; no real env vars here -- parallel `cargo test` runs would race.
++    #[test]
++    fn is_disabled_reads_env_array_not_only_process_env() {
++        use std::ffi::CString;
++        let entries: Vec<CString> = vec![
++            CString::new("PATH=/usr/bin").unwrap(),
++            CString::new("BUN_OHOS_NO_NODE_USERINFO=1").unwrap(),
++        ];
++        let ptrs: Vec<*const c_char> = entries.iter().map(|e| e.as_ptr()).collect();
++        assert!(is_disabled(&ptrs));
++
++        let entries_without: Vec<CString> = vec![CString::new("PATH=/usr/bin").unwrap()];
++        let ptrs_without: Vec<*const c_char> = entries_without.iter().map(|e| e.as_ptr()).collect();
++        assert!(!is_disabled(&ptrs_without));
++    }
++
++    #[test]
++    fn is_disabled_reads_shim_disable_getpwuid_r_from_env_array() {
++        use std::ffi::CString;
++        let entries: Vec<CString> =
++            vec![CString::new("OHOS_COMPAT_SHIM_DISABLE=close_range,getpwuid_r").unwrap()];
++        let ptrs: Vec<*const c_char> = entries.iter().map(|e| e.as_ptr()).collect();
++        assert!(is_disabled(&ptrs));
++
++        // Disabling an unrelated symbol must not disable this.
++        let entries_other: Vec<CString> =
++            vec![CString::new("OHOS_COMPAT_SHIM_DISABLE=close_range").unwrap()];
++        let ptrs_other: Vec<*const c_char> = entries_other.iter().map(|e| e.as_ptr()).collect();
++        assert!(!is_disabled(&ptrs_other));
++    }
++
++    #[test]
++    fn basename_extracts_last_segment() {
++        assert_eq!(basename(b"/usr/bin/node"), b"node");
++        assert_eq!(basename(b"node"), b"node");
++        assert_eq!(basename(b"/a/b/c/node22"), b"node22");
++        assert_eq!(basename(b"/"), b"");
++    }
++
++    #[test]
++    fn require_flag_quotes_and_escapes() {
++        assert_eq!(
++            build_require_flag(b"/tmp/x.cjs"),
++            b"--require \"/tmp/x.cjs\""
++        );
++        assert_eq!(
++            build_require_flag(br#"/tmp/a"b.cjs"#),
++            br#"--require "/tmp/a\"b.cjs""#
++        );
++        assert_eq!(
++            build_require_flag(br"/tmp/a\b.cjs"),
++            br#"--require "/tmp/a\\b.cjs""#
++        );
++    }
++
++    #[test]
++    fn contains_subslice_matches() {
++        assert!(contains_subslice(
++            b"--foo --require \"/x\" --bar",
++            b"--require \"/x\""
++        ));
++        assert!(!contains_subslice(b"--foo --bar", b"--require \"/x\""));
++        assert!(contains_subslice(b"anything", b""));
++        assert!(!contains_subslice(b"", b"x"));
++    }
++
++    #[test]
++    fn push_candidate_skips_unsafe_bytes() {
++        let mut out = Vec::new();
++        push_candidate(&mut out, b"/has space", b"/ohos");
++        push_candidate(&mut out, b"/has\"quote", b"/ohos");
++        push_candidate(&mut out, b"/has\\slash", b"/ohos");
++        push_candidate(&mut out, b"/has\ttab", b"/ohos");
++        assert!(out.is_empty());
++        push_candidate(&mut out, b"/clean/path", b"/ohos");
++        assert_eq!(out, vec![b"/clean/path/ohos".to_vec()]);
++    }
++}
+diff --git a/src/runtime/api/bun/spawn/stdio.rs b/src/runtime/api/bun/spawn/stdio.rs
+index 787aec56fc7..aecf6ff9c15 100644
+--- a/src/runtime/api/bun/spawn/stdio.rs
++++ b/src/runtime/api/bun/spawn/stdio.rs
+@@ -36,8 +36,11 @@ pub struct Capture {
+     // BACKREF: raw pointer to a capture buffer owned by the shell interpreter.
+     // The shell keeps the buffer alive for the lifetime
+     // of the spawned process; this struct never frees it.
++    // OHOS: stays `pub` (not upstream's pub(crate)) — the only reader is
++    // `Stdio::byte_slice`, whose sole caller lives in the memfd path that is
++    // cfg'd out on OHOS; pub(crate) would trip -D dead-code.
+     #[cfg(any(target_os = "linux", target_os = "android"))]
+-    pub(crate) buf: *mut Vec<u8>,
++    pub buf: *mut Vec<u8>,
+ }
+ 
+ /// Payload of `Stdio::Dup2`.
+@@ -101,8 +104,10 @@ impl ToSpawnOptsError {
+ }
+ 
+ impl Stdio {
++    // OHOS: stays `pub` — the only caller is the memfd path in `use_memfd`,
++    // cfg'd out on OHOS; pub(crate) trips -D dead-code here.
+     #[cfg(any(target_os = "linux", target_os = "android"))]
+-    pub(crate) fn byte_slice(&self) -> &[u8] {
++    pub fn byte_slice(&self) -> &[u8] {
+         match self {
+             // SAFETY: `buf` is a live backref owned by the caller (shell); the
+             // returned slice borrows `self` and the caller guarantees the
+@@ -114,12 +119,19 @@ impl Stdio {
+     }
+ 
+     pub(crate) fn can_use_memfd(&self) -> bool {
+-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
++        // OHOS: memfd writes not visible to fstat (see use_memfd).
++        #[cfg(not(all(
++            any(target_os = "linux", target_os = "android"),
++            not(target_env = "ohos")
++        )))]
+         {
+             return false;
+         }
+ 
+-        #[cfg(any(target_os = "linux", target_os = "android"))]
++        #[cfg(all(
++            any(target_os = "linux", target_os = "android"),
++            not(target_env = "ohos")
++        ))]
+         match self {
+             Self::Blob(blob) => !blob.needs_to_read_file(),
+             Self::Memfd(_) => true,
+@@ -130,13 +142,22 @@ impl Stdio {
+     }
+ 
+     pub(crate) fn use_memfd(&mut self, index: u32) -> bool {
+-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
++        // OHOS: memfd writes not visible to fstat after child exits
++        // (verified 2026-06-11: dup2(memfd,1/2) → child writes → fstat size=0).
++        // Fall through to socketpair on OHOS.
++        #[cfg(not(all(
++            any(target_os = "linux", target_os = "android"),
++            not(target_env = "ohos")
++        )))]
+         {
+             let _ = index;
+             return false;
+         }
+ 
+-        #[cfg(any(target_os = "linux", target_os = "android"))]
++        #[cfg(all(
++            any(target_os = "linux", target_os = "android"),
++            not(target_env = "ohos")
++        ))]
+         {
+             use crate::api::bun_process::spawn_sys;
+             if !spawn_sys::can_use_memfd() {
+diff --git a/src/runtime/cli/Arguments.rs b/src/runtime/cli/Arguments.rs
+index 8ed18c929d3..d4df01a6bbc 100644
+--- a/src/runtime/cli/Arguments.rs
++++ b/src/runtime/cli/Arguments.rs
+@@ -864,9 +864,13 @@ pub(crate) fn parse(cmd: CommandTag, ctx: Context<'_>) -> crate::Result<api::Tra
+         Box::<[u8]>::from(bun_core::getcwd_or_exe_dir(&mut temp).as_bytes())
+     } else {
+         // Everything else (install/test/build/...) must not silently act on
+-        // whatever project happens to live above the executable.
++        // whatever project happens to live above the executable. `getcwd_honest`
++        // (not plain `getcwd`): on OHOS, ohos-compat-shim's getcwd() interceptor
++        // silently substitutes $HOME for a deleted cwd instead of failing, which
++        // would let this pre-resolved `absolute_working_dir` silently become
++        // $HOME here — observed as `bun test` scanning the real $HOME for tests.
+         let mut temp = PathBuffer::uninit();
+-        Box::<[u8]>::from(bun_core::getcwd(&mut temp)?.as_bytes())
++        Box::<[u8]>::from(bun_core::getcwd_honest(&mut temp)?.as_bytes())
+     };
+ 
+     // Not gated on .BunxCommand: bunx skips Arguments.parse entirely
+diff --git a/src/runtime/cli/run_command.rs b/src/runtime/cli/run_command.rs
+index e8d6b7b6aa1..9a718af95eb 100644
+--- a/src/runtime/cli/run_command.rs
++++ b/src/runtime/cli/run_command.rs
+@@ -59,6 +59,18 @@ fn runner_arena() -> &'static bun_alloc::Arena {
+     crate::cli::cli_arena()
+ }
+ 
++/// OHOS: set $PWD so bash verifies CWD via stat() instead of getcwd(),
++/// which can fail on hmdfs/tmpfs. If cwd is "/" or empty, use $HOME instead.
++#[cfg(target_env = "ohos")]
++pub(crate) fn ohos_set_pwd(env: &mut DotEnv::Loader, cwd: &[u8]) {
++    let pwd = if cwd == b"/" || cwd.is_empty() {
++        bun_core::env_var::HOME::get().unwrap_or(cwd)
++    } else {
++        cwd
++    };
++    env.map.put(b"PWD", pwd).expect("unreachable");
++}
++
+ // Passthrough-arg shell escaping. The escape tables + helpers are the lower-tier
+ // `bun_shell_parser` crate's canonical copy — import them so future fixes to
+ // the shell escaper cannot silently diverge.
+@@ -272,6 +284,9 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+         use_system_shell: bool,
+         shell_path: Option<&[u8]>,
+     ) -> crate::Result<()> {
++        #[cfg(target_env = "ohos")]
++        ohos_set_pwd(env, cwd);
++
+         let shell_search_path = shell_path.unwrap_or_else(|| env.get(b"PATH").unwrap_or(b""));
+         let shell_bin =
+             Self::find_shell(shell_search_path, cwd).ok_or(crate::Error::MissingShell)?;
+@@ -626,8 +641,16 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+ 
+         // SAFETY: `Transpiler::init` always sets `fs` to the process singleton.
+         let top_level_dir = unsafe { (*this_transpiler.fs).top_level_dir };
+-        let root_dir_info: bun_resolver::DirInfoRef =
++        let root_dir_info: Option<bun_resolver::DirInfoRef> =
+             match this_transpiler.resolver.read_dir_info(top_level_dir) {
++                #[cfg(target_env = "ohos")]
++                Err(err)
++                    if with_linker
++                        && (err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EPERM)
++                            || err == bun_resolver::Error::Sys(bun_errno::SystemErrno::EACCES)) =>
++                {
++                    None
++                }
+                 Err(err) => {
+                     if !opts.log_errors {
+                         return Err(crate::Error::CouldntReadCurrentDirectory);
+@@ -647,6 +670,8 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+                     Output::flush();
+                     return Err(err.into());
+                 }
++                #[cfg(target_env = "ohos")]
++                Ok(None) if with_linker => None,
+                 Ok(None) => {
+                     // SAFETY: see `Err` arm above.
+                     let _ = unsafe { ctx.log() }.print(std::ptr::from_mut::<bun_core::io::Writer>(
+@@ -656,9 +681,39 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+                     Output::flush();
+                     return Err(crate::Error::CouldntReadCurrentDirectory);
+                 }
+-                Ok(Some(info)) => info,
++                Ok(Some(info)) => Some(info),
+             };
+ 
++        #[cfg(target_env = "ohos")]
++        let mut root_dir_info_is_fallback = false;
++        #[cfg(target_env = "ohos")]
++        let root_dir_info: bun_resolver::DirInfoRef = match root_dir_info {
++            Some(info) => info,
++            None => {
++                root_dir_info_is_fallback = true;
++                let home = bun_core::env_var::HOME::get().unwrap_or(b"");
++                let info = this_transpiler
++                    .resolver
++                    .read_dir_info_ignore_error(if home.is_empty() { b"/" } else { home })
++                    .or_else(|| this_transpiler.resolver.read_dir_info_ignore_error(b"/"))
++                    .ok_or(crate::Error::CouldntReadCurrentDirectory)?;
++                if opts.log_errors {
++                    pretty_errorln!(
++                        "<r><yellow>warn<r><d>:<r> cannot read {}; resolving from <b>{}<r> instead",
++                        bun_core::fmt::QuotedFormatter {
++                            text: top_level_dir
++                        },
++                        bstr::BStr::new(info.abs_path),
++                    );
++                    Output::flush();
++                }
++                info
++            }
++        };
++        #[cfg(not(target_env = "ohos"))]
++        let root_dir_info: bun_resolver::DirInfoRef =
++            root_dir_info.expect("Ok(None)/EPERM/EACCES arms are OHOS-only; other arms diverge");
++
+         this_transpiler.resolver.store_fd = false;
+ 
+         if env_is_none {
+@@ -736,7 +791,14 @@ Full documentation is available at <magenta>https://bun.com/docs/cli/run<r>
+             }
+         }
+ 
+-        if let Some(package_json) = root_dir_info.enclosing_package_json {
++        #[cfg(target_env = "ohos")]
++        let seed_package_env = !root_dir_info_is_fallback;
++        #[cfg(not(target_env = "ohos"))]
++        let seed_package_env = true;
++        if let Some(package_json) = root_dir_info
++            .enclosing_package_json
++            .filter(|_| seed_package_env)
++        {
+             if !package_json.name.is_empty() {
+                 if env_loader.map.get(NpmArgs::PACKAGE_NAME).is_none() {
+                     env_loader
+diff --git a/src/runtime/cli/upgrade_command.rs b/src/runtime/cli/upgrade_command.rs
+index 8ceab6b44fd..14f6510ff8d 100644
+--- a/src/runtime/cli/upgrade_command.rs
++++ b/src/runtime/cli/upgrade_command.rs
+@@ -105,10 +105,12 @@ impl Version {
+     };
+     pub(crate) const TRIPLET: &'static str =
+         const_format::concatcp!(Version::PLATFORM_LABEL, "-", Version::ARCH_LABEL);
+-    const SUFFIX_ABI: &'static str = if Environment::IS_MUSL {
+-        "-musl"
++    const SUFFIX_ABI: &'static str = if Environment::IS_OHOS {
++        "-ohos"
+     } else if Environment::IS_ANDROID {
+         "-android"
++    } else if Environment::IS_MUSL {
++        "-musl"
+     } else {
+         ""
+     };
+diff --git a/src/runtime/dns_jsc/dns.rs b/src/runtime/dns_jsc/dns.rs
+index 31f95e7ab8a..9160482c579 100644
+--- a/src/runtime/dns_jsc/dns.rs
++++ b/src/runtime/dns_jsc/dns.rs
+@@ -5171,6 +5171,48 @@ impl Resolver {
+         resolver.do_lookup(name.slice(), port, options, global_this)
+     }
+ 
++    /// True if the host has a routable (non-link-local, non-loopback) IPv6
++    /// address. OHOS exposes only `fe80::/10` link-local and `::1` loopback in
++    /// `/proc/net/if_inet6`, so a dual-stack `getaddrinfo` issues an AAAA query
++    /// that times out (EAI_AGAIN → DNS_ETIMEOUT). Callers doing an AF_UNSPEC
++    /// lookup force IPv4 when this returns false.
++    #[cfg(target_env = "ohos")]
++    fn has_global_ipv6() -> bool {
++        const PATH: &[u8] = b"/proc/net/if_inet6\0";
++        // SAFETY: `PATH` is a NUL-terminated literal and the flags are valid
++        // for open(2); the descriptor is closed on every path below.
++        let fd = unsafe {
++            libc::open(
++                PATH.as_ptr().cast::<core::ffi::c_char>(),
++                libc::O_RDONLY | libc::O_CLOEXEC,
++            )
++        };
++        if fd < 0 {
++            return false;
++        }
++        let mut buf = [0u8; 4096];
++        // SAFETY: `fd` is the live descriptor from the successful open and
++        // `buf` is valid for `buf.len()` bytes.
++        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<core::ffi::c_void>(), buf.len()) };
++        // SAFETY: `fd` is the descriptor opened above; closing it here is the
++        // single-owner cleanup for this function-scoped resource.
++        unsafe { libc::close(fd) };
++        if n <= 0 {
++            return false;
++        }
++        bun_core::strings::split(&buf[..n as usize], b"\n").any(|line| {
++            if line.is_empty() {
++                return false;
++            }
++            // Global unicast = 2000::/3 (first nibble '2' or '3'). Excludes
++            // ::1 loopback, fe80::/10 link-local, and fc00::/7 ULA — OHOS
++            // devices commonly report a ULA address on wlan0/vpn-tun, and
++            // treating that as "global" made dns.lookup({all:true}) still
++            // return AAAA on networks where it can't actually route.
++            matches!(line[0], b'2' | b'3')
++        })
++    }
++
+     pub(crate) fn do_lookup(
+         &self,
+         name: &[u8],
+@@ -5192,6 +5234,14 @@ impl Resolver {
+         }
+ 
+         let mut opts = options;
++        // OHOS: no global IPv6 (only fe80::/10 link-local + ::1 loopback), so
++        // a dual-stack (AF_UNSPEC) getaddrinfo issues an AAAA query that times
++        // out (EAI_AGAIN → DNS_ETIMEOUT). Force IPv4 when the caller left the
++        // family unspecified and there is no routable IPv6 address.
++        #[cfg(target_env = "ohos")]
++        if opts.family == bun_dns::Family::Unspecified && !Self::has_global_ipv6() {
++            opts.family = bun_dns::Family::Inet;
++        }
+         let mut backend = opts.backend;
+         let normalized = normalize_dns_name(name, &mut backend);
+         opts.backend = backend;
+diff --git a/src/runtime/node/node_net_binding.rs b/src/runtime/node/node_net_binding.rs
+index e4ebc3d406a..57301805789 100644
+--- a/src/runtime/node/node_net_binding.rs
++++ b/src/runtime/node/node_net_binding.rs
+@@ -152,6 +152,7 @@ pub(crate) fn new_detached_socket(global: &JSGlobalObject, frame: &CallFrame) ->
+             server_name: JsCell::new(None),
+             buffered_data_for_node_net: Default::default(),
+             bytes_written: Cell::new(0),
++            pending_fatal_send_errno: Cell::new(0),
+             native_callback: JsCell::new(NativeCallbacks::None),
+             twin: JsCell::new(None),
+             verify_error: JsCell::new(None),
+diff --git a/src/runtime/shell/subproc.rs b/src/runtime/shell/subproc.rs
+index 8145a5fc840..d14797f0442 100644
+--- a/src/runtime/shell/subproc.rs
++++ b/src/runtime/shell/subproc.rs
+@@ -658,6 +658,32 @@ impl ShellSubprocess {
+         // function never needs to borrow the `Cmd` arena slot.
+         debug_assert!(matches!(spawn_args.argv.last(), Some(p) if p.is_null()));
+ 
++        // OHOS: same node-userinfo env fixup as Bun.spawn's (js_bun_spawn_bindings.rs) — `Bun.$`/`bun run <script>` land here instead, so a shell-spawned `node` needs its own copy. argv[0] is the resolved absolute path (set by `Cmd::transition_to_exec`); env lines are bump-allocated in `spawn_args.arena` like `SpawnArgs::fill_env` above.
++        #[cfg(target_env = "ohos")]
++        if let Some(&a0) = spawn_args.argv.first() {
++            if !a0.is_null() {
++                // SAFETY: `a0` is `Cmd.args[0]`, NUL-terminated by
++                // `Cmd::transition_to_exec` (states/Cmd.rs) and owned by the
++                // same `Cmd` arena slot that outlives this spawn call.
++                let a0_bytes = unsafe { core::ffi::CStr::from_ptr(a0) }.to_bytes();
++                if let Some(inj) =
++                    crate::api::ohos_node_userinfo::compute(a0_bytes, &spawn_args.env_array)
++                {
++                    // SAFETY: `spawn_args.env_array` entries are NUL-terminated arena storage that outlives this call (is_managed_key's stated contract).
++                    spawn_args.env_array.retain(|&ptr| !unsafe {
++                        crate::api::ohos_node_userinfo::is_managed_key(ptr)
++                    });
++                    let arena: &Arena = spawn_args.arena;
++                    for line in [Some(inj.node_options), inj.username].into_iter().flatten() {
++                        let buf = arena.alloc_slice_fill_default(line.len() + 1);
++                        buf[..line.len()].copy_from_slice(&line);
++                        buf[line.len()] = 0;
++                        spawn_args.env_array.push(buf.as_ptr().cast::<c_char>());
++                    }
++                }
++            }
++        }
++
+         spawn_args.env_array.push(core::ptr::null());
+ 
+         // SAFETY: `interp` is the live owning interpreter (see `SpawnArgs::interp`).
+diff --git a/src/sys_jsc/signal_code_jsc.rs b/src/sys_jsc/signal_code_jsc.rs
+index 79664b6bdf7..10fb4745b8c 100644
+--- a/src/sys_jsc/signal_code_jsc.rs
++++ b/src/sys_jsc/signal_code_jsc.rs
+@@ -31,7 +31,12 @@ pub fn from_js(arg: JSValue, global_this: &JSGlobalObject) -> JsResult<SignalCod
+         // SignalCode is non-exhaustive over `u8`, so construct via the public
+         // ctor instead of a transmute.
+         return Ok(SignalCode(sig64 as u8));
+-    } else if arg.is_string_literal() {
++    } else if (cfg!(target_env = "ohos") && arg.is_string())
++        || (!cfg!(target_env = "ohos") && arg.is_string_literal())
++    {
++        // On OHOS the WebKit fork exposes `is_string()` as the string
++        // predicate; elsewhere `is_string_literal()` is the documented
++        // contract. Either guarantees `as_string()` is non-null.
+         if arg.as_string().length() == 0 {
+             return Ok(SignalCode::DEFAULT);
+         }

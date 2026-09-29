@@ -1,0 +1,8 @@
+5c9ae9db3d6 release: pre-sign OHOS binaries (signed canonical + unsigned variant)
+6bf3e5c494f feat(ohos): userspace shebang expansion for script spawning
+c3ee182bbc4 [autofix.ci] apply automated fixes
+ecff2d1b5b6 fix(ohos): lazy codesign repair on spawn/dlopen refusal
+88a237b0e35 fix(ohos): codesign validation + fulltest lane runner fallback
+b70c1cfa3d4 fix(ohos_sign): replace parse_header's 4-tuple return with SectionHeaderTable struct
+dd0579916be feat(ohos): harden ohos_sign parse_header with SHT bounds + e_shentsize checks
+a09c4e3714d feat(ohos): code signing — ohos_sign crate + sign-on-dlopen/spawn/install

@@ -1,0 +1,14 @@
+684122346a1 fix(ohos): clear the ohos-target clippy debt in bun_install
+fd1bb0dd5f9 fix(ohos): restore O_TMPFILE manifest cache write fallback
+41ef0aa78ba fix(ohos): migrate legacy lockfile os masks for the OPENHARMONY bit
+5a6bc9ad96b fix(ohos): add OPENHARMONY to the install OperatingSystem match set
+d8f8db5547b fix(ohos): create the bun-node shim under the app-sandbox tmp dir
+ecff2d1b5b6 fix(ohos): lazy codesign repair on spawn/dlopen refusal
+b2c43428922 [autofix.ci] apply automated fixes
+20dfbf53f1d fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+f271d4f3cab fix(ohos): remove dead map_linkat_err function in bun_install
+b189b022931 fix(ohos): bin chmod exec bit + isOHOS test skips + filter_run skips
+7780f3e420c fix(ohos): social4hyq container + ABI alignment + 4 sb install backports (#10)
+bedde481902 fix(ohos): compile primary entry + node-gyp CC/CXX inject (verified) (#8)
+e83adebca58 fix(ohos): compile PIE load base + node-gyp CC/CXX injection
+a09c4e3714d feat(ohos): code signing — ohos_sign crate + sign-on-dlopen/spawn/install

@@ -1,0 +1,18 @@
+ac3f63300b3 [autofix.ci] apply automated fixes
+2a831e46640 test(ohos): skip inventory ledger, libc-detection guards, platform semantics test
+0b280893451 fix(ohos): force uSockets off epoll_pwait2, serialize the ReadFile read loop
+7f99b314fdc fix(ohos): unstick spawn pipe output capture (epoll CTL_DEL dup bug, rearm watchdog, sync wait)
+0c32a69fd82 fix(ohos): report "openharmony" from the C++ process.platform getter and bundle-time inlining
+cf279097ffb fix(ohos): container lane followups — openharmony runner, shebang arg keepalive, ENOSPC, env fixes
+6bf3e5c494f feat(ohos): userspace shebang expansion for script spawning
+c3ee182bbc4 [autofix.ci] apply automated fixes
+ecff2d1b5b6 fix(ohos): lazy codesign repair on spawn/dlopen refusal
+a1b9112d310 fix(ohos): dlopen the musl loader directly for libc in the fulltest harness
+535fb153c7e test: reconcile test tree with the device-validated OHOS v1.4.0 line
+dfb70ae1f58 test: restore upstream v1.4.0 test tree (129 files)
+b2c43428922 [autofix.ci] apply automated fixes
+c3d3a63f8aa fix(lints): sync allRustTargets and dead-code baseline with OHOS changes
+ce76c1855ad test(ohos): clean sync test tree with social4hyq (remove stale files)
+91054212c8d test(ohos): sync test tree + expectations from social4hyq/ohos-bun
+caf392d7237 ci(ohos): add ohos-full-test workflow + OPENHARMONY expectations
+b189b022931 fix(ohos): bin chmod exec bit + isOHOS test skips + filter_run skips

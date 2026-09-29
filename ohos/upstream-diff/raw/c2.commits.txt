@@ -1,0 +1,38 @@
+971502eecd1 fix(ohos): route fs.linkSync through linkat so the compat shim engages
+fc31790a7ca fix(ohos): migrate StandaloneModuleGraph off disallowed std::fs/str APIs
+6d4ab6ed1a7 fix(ohos): adoption batch — cwd truncation, IN_ATTRIB suppression, getgroups egid
+69e43302962 fix(ohos): epoll ADD-EEXIST re-registration and net fatal-send errno latch
+107a8876ae6 fix(ohos): clear the ohos-target clippy debt in the spawn-path crates
+99e910b369e fix(ohos): cfg-gate the Linux-only pipe-writer epoll workarounds, unblocking the Windows build
+83ef68c29c0 fix(ohos): gate openat2_in_root like openat2_beneath (dir routes 404)
+d25a6e0c1b7 [autofix.ci] apply automated fixes
+36dd9b86074 fix(ohos): honest deleted-cwd propagation, rlimit clamp, tmpdir probe, X_OK exec check
+7b85961616d fix(ohos): fall back to plain write/read when pwritev2/preadv2 returns ESPIPE
+38371c22b46 fix(ohos): use system getaddrinfo and force IPv4 when no routable IPv6
+54dc7eef051 fix(ohos): prewarm the always-on waiter thread at VM init
+0b280893451 fix(ohos): force uSockets off epoll_pwait2, serialize the ReadFile read loop
+d624a98d0ea fix(ohos): finish pipe-output capture (memfd→socketpair, waiter-thread default, close_range, $PWD sync)
+7f99b314fdc fix(ohos): unstick spawn pipe output capture (epoll CTL_DEL dup bug, rearm watchdog, sync wait)
+cf279097ffb fix(ohos): container lane followups — openharmony runner, shebang arg keepalive, ENOSPC, env fixes
+6bf3e5c494f feat(ohos): userspace shebang expansion for script spawning
+c3ee182bbc4 [autofix.ci] apply automated fixes
+ecff2d1b5b6 fix(ohos): lazy codesign repair on spawn/dlopen refusal
+88a237b0e35 fix(ohos): codesign validation + fulltest lane runner fallback
+b11d63bbcb9 fix(io): restore EPOLLONESHOT one-shot registration on OHOS
+b2c43428922 [autofix.ci] apply automated fixes
+6e4aadc682a fix(ohos): export all 15 shim symbols in linker.lds
+20dfbf53f1d fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+ea4ddecf9a4 fix(ohos): prefix unused ohos_ppid/ohos_ppid_fd with underscore
+017de635779 fix(ohos): suppress unused one_shot param warning on OHOS target
+26a2cb78151 fix(ohos): statx(2) rejects socket-backed fds with EBADF -- fall back to fstat
+ea07db9a2c4 fix(ohos): don't clear PDEATHSIG when nothing will watch the parent
+ee6251b1710 fix(ohos): disable EPOLLONESHOT on OHOS — HongMeng kernel never disarms one-shot interests
+aad32a625bd feat(ohos): port ohos-compat-shim from social4hyq/ohos-bun
+7780f3e420c fix(ohos): social4hyq container + ABI alignment + 4 sb install backports (#10)
+d55ecd2e83a fix(build): cross-platform fixes for windows-x64 build
+bedde481902 fix(ohos): compile primary entry + node-gyp CC/CXX inject (verified) (#8)
+e83adebca58 fix(ohos): compile PIE load base + node-gyp CC/CXX injection
+1d3713e7682 fix(ohos): resolver EACCES sandbox + napi V8 mangling + close_range skip
+631c38bf7c8 fix(ohos): seccomp/SIGSYS plumbing — Error From impl + signal_code is_string
+a09c4e3714d feat(ohos): code signing — ohos_sign crate + sign-on-dlopen/spawn/install
+6ab080f0b3c feat(ohos): build infra + syscall exclusions (minimal OHOS-buildable)

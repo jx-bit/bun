@@ -1,0 +1,660 @@
+diff --git a/src/install/Cargo.toml b/src/install/Cargo.toml
+index a8a45c65c7e..9ad38f3c996 100644
+--- a/src/install/Cargo.toml
++++ b/src/install/Cargo.toml
+@@ -13,6 +13,9 @@ path = "lib.rs"
+ # when those files are compiled by the separate `bun_shim_impl` crate.
+ shim_standalone = []
+ 
++[target.'cfg(target_env = "ohos")'.dependencies]
++ohos_sign = { path = "../ohos_sign" }
++
+ [lints]
+ workspace = true
+ 
+diff --git a/src/install/PackageInstall.rs b/src/install/PackageInstall.rs
+index 82089252218..44988b0baea 100644
+--- a/src/install/PackageInstall.rs
++++ b/src/install/PackageInstall.rs
+@@ -1600,36 +1600,58 @@ impl<'a> PackageInstall<'a> {
+                             );
+                         }
+                         EntryKind::File => {
+-                            // EACCES/EPERM: FUSE (e.g. Android SDCARD) does not support hardlinks
+-                            fn map_linkat_err(err: sys::Error) -> crate::Error {
+-                                match err.get_errno() {
+-                                    sys::E::EXDEV | sys::E::EACCES | sys::E::EPERM => {
+-                                        crate::Error::NotSameFileSystem
+-                                    }
+-                                    sys::E::ENXIO => {
+-                                        crate::Error::Sys(bun_errno::SystemErrno::ENXIO)
+-                                    }
+-                                    _ => err.into(),
+-                                }
+-                            }
+-
+                             if let Err(err) = sys::linkat(
+                                 entry.dir,
+                                 entry.basename,
+                                 destination_dir.fd(),
+                                 entry.path,
+                             ) {
+-                                if err.get_errno() == sys::E::EEXIST {
+-                                    let _ = sys::unlinkat(destination_dir, entry.path);
+-                                    sys::linkat(
+-                                        entry.dir,
+-                                        entry.basename,
+-                                        destination_dir.fd(),
+-                                        entry.path,
+-                                    )
+-                                    .map_err(map_linkat_err)?;
+-                                } else {
+-                                    return Err(map_linkat_err(err));
++                                // Map raw errno to the error names the caller's
++                                // `NotSameFileSystem` / `ENXIO` checks (and the
++                                // copyfile fallback in `install()`) expect.
++                                match err.get_errno() {
++                                    sys::E::EEXIST => {
++                                        let _ = sys::unlinkat(destination_dir, entry.path);
++                                        match sys::linkat(
++                                            entry.dir,
++                                            entry.basename,
++                                            destination_dir.fd(),
++                                            entry.path,
++                                        ) {
++                                            Ok(()) => {}
++                                            Err(retry_err)
++                                                if matches!(
++                                                    retry_err.get_errno(),
++                                                    sys::E::EPERM | sys::E::EACCES
++                                                ) =>
++                                            {
++                                                crate::copy_file_fallback(
++                                                    entry.dir,
++                                                    entry.basename,
++                                                    destination_dir.fd(),
++                                                    entry.path,
++                                                )?;
++                                            }
++                                            Err(retry_err) => return Err(retry_err.into()),
++                                        }
++                                    }
++                                    sys::E::EXDEV => {
++                                        return Err(crate::Error::NotSameFileSystem);
++                                    }
++                                    sys::E::ENXIO => {
++                                        return Err(crate::Error::Sys(
++                                            bun_errno::SystemErrno::ENXIO,
++                                        ));
++                                    }
++                                    sys::E::EPERM | sys::E::EACCES => {
++                                        crate::copy_file_fallback(
++                                            entry.dir,
++                                            entry.basename,
++                                            destination_dir.fd(),
++                                            entry.path,
++                                        )?;
++                                    }
++                                    _ => return Err(err.into()),
+                                 }
+                             }
+                         }
+@@ -1795,12 +1817,48 @@ impl<'a> PackageInstall<'a> {
+                             if let Err(err) =
+                                 sys::symlinkat(target, destination_dir.fd(), entry.path)
+                             {
+-                                if err.get_errno() != sys::E::EEXIST {
+-                                    return Err(err.into());
++                                match err.get_errno() {
++                                    sys::E::EEXIST => {
++                                        let _ = sys::unlinkat(destination_dir, entry.path);
++                                        match sys::symlinkat(
++                                            entry.basename,
++                                            destination_dir.fd(),
++                                            entry.path,
++                                        ) {
++                                            Ok(()) => {}
++                                            Err(retry_err)
++                                                if matches!(
++                                                    retry_err.get_errno(),
++                                                    sys::E::EPERM | sys::E::EACCES
++                                                ) =>
++                                            {
++                                                crate::copy_file_fallback(
++                                                    destination_dir.fd(),
++                                                    entry.path,
++                                                    destination_dir.fd(),
++                                                    entry.path,
++                                                )?;
++                                            }
++                                            Err(retry_err) => return Err(retry_err.into()),
++                                        }
++                                    }
++                                    sys::E::EPERM | sys::E::EACCES => {
++                                        let Some(dir) = path::dirname(entry.path.as_bytes()) else {
++                                            return Err(err.into());
++                                        };
++                                        let _ = bun_sys::MakePath::make_path::<OSPathChar>(
++                                            destination_dir,
++                                            dir,
++                                        );
++                                        crate::copy_file_fallback(
++                                            destination_dir.fd(),
++                                            entry.path,
++                                            destination_dir.fd(),
++                                            entry.path,
++                                        )?;
++                                    }
++                                    _ => return Err(err.into()),
+                                 }
+-
+-                                let _ = sys::unlinkat(destination_dir, entry.path);
+-                                sys::symlinkat(entry.basename, destination_dir.fd(), entry.path)?;
+                             }
+                         }
+                         _ => {}
+diff --git a/src/install/PackageInstaller.rs b/src/install/PackageInstaller.rs
+index 40f78608383..6befdf636d6 100644
+--- a/src/install/PackageInstaller.rs
++++ b/src/install/PackageInstaller.rs
+@@ -1913,6 +1913,14 @@ impl<'a> PackageInstaller<'a> {
+                 }
+             };
+ 
++            #[cfg(target_env = "ohos")]
++            if let package_install::InstallResult::Success = &install_result {
++                let mut fd_path_buf = PathBuffer::uninit();
++                if let Ok(pkg_path) = Syscall::get_fd_path(destination_dir.fd(), &mut fd_path_buf) {
++                    ohos_sign_native_binaries(pkg_path);
++                }
++            }
++
+             match install_result {
+                 package_install::InstallResult::Success => {
+                     let is_duplicate = self.successfully_installed.is_set(package_id as usize);
+@@ -2489,3 +2497,57 @@ impl<'a> PackageInstaller<'a> {
+         );
+     }
+ }
++
++// ───────────────────────────── OHOS install-time signing ─────────────────────────────
++
++bun_output::declare_scope!(OhosSignRepair, hidden);
++
++/// On OHOS, scan a package directory for native binaries (.so, .node) and
++/// repair their codesign: sign unsigned files, strip + re-sign stale
++/// sections. Called after a package is installed into node_modules, before
++/// lifecycle scripts run.
++#[cfg(target_env = "ohos")]
++fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
++    let dir = match Dir::open(pkg_dir) {
++        Ok(d) => d,
++        Err(_) => return,
++    };
++    let w = match Syscall::walker_skippable::walk(dir.fd(), &[], &[]) {
++        Ok(w) => w,
++        Err(_) => return,
++    };
++    let mut w = w;
++    while let Ok(Some(entry)) = w.next() {
++        if entry.kind != Syscall::EntryKind::File {
++            continue;
++        }
++        let name = entry.basename.as_bytes();
++        let needs_sign = if name.len() > 3 {
++            name.ends_with(b".so") || name.ends_with(b".node")
++        } else {
++            false
++        };
++        if !needs_sign {
++            continue;
++        }
++        let mut full = Vec::with_capacity(pkg_dir.len() + 1 + name.len());
++        full.extend_from_slice(pkg_dir);
++        full.push(b'/');
++        full.extend_from_slice(name);
++        // Package directories are not guaranteed UTF-8; `OsStr::from_bytes`
++        // accepts arbitrary path bytes.
++        let os: &std::ffi::OsStr = std::os::unix::ffi::OsStrExt::from_bytes(&full);
++        let p = std::path::Path::new(os);
++        // repair_codesign_if_needed: sign when a section is missing, and
++        // strip + re-sign when one is stale (e.g. a patched native module) —
++        // a presence-only check would leave the kernel to reject it at
++        // dlopen with no recovery.
++        if ohos_sign::repair_codesign_if_needed(p) {
++            bun_output::scoped_log!(
++                OhosSignRepair,
++                "re-signed {} during install",
++                bstr::BStr::new(&full)
++            );
++        }
++    }
++}
+diff --git a/src/install/PackageManager.rs b/src/install/PackageManager.rs
+index 757bf9a83e9..cbb4a7a3cb4 100644
+--- a/src/install/PackageManager.rs
++++ b/src/install/PackageManager.rs
+@@ -1103,6 +1103,32 @@ fn configure_env_for_scripts_run(
+     let paths_fs = bun_paths::fs::FileSystem::instance();
+     this.env_mut().load_ccache_path(paths_fs);
+ 
++    #[cfg(target_env = "ohos")]
++    {
++        // OHOS: node-gyp needs CC/CXX. OHOS SDK clang (LLVM 15) lacks C++20
++        // <source_location>; route to a newer clang via $OHOS_CC/$OHOS_CXX,
++        // else fall back to PATH clang. Set on the GLOBAL install env so all
++        // install modes (hoisted + isolated) inherit it into lifecycle scripts.
++        let env = this.env_mut();
++        if let Some(cc) = bun_core::getenv_z(bun_core::zstr!("OHOS_CC")) {
++            let _ = env.map.put(b"CC", cc);
++        } else if env.get(b"CC").is_none() {
++            let _ = env.map.put(b"CC", b"clang");
++        }
++        if let Some(cxx) = bun_core::getenv_z(bun_core::zstr!("OHOS_CXX")) {
++            let _ = env.map.put(b"CXX", cxx);
++        } else if env.get(b"CXX").is_none() {
++            let _ = env.map.put(b"CXX", b"clang++");
++        }
++        if let Some(sysroot) = bun_core::getenv_z(bun_core::zstr!("OHOS_SYSROOT")) {
++            let mut sysroot_flags = b"--sysroot=".to_vec();
++            sysroot_flags.extend_from_slice(sysroot);
++            let _ = env.map.put(b"CFLAGS", &sysroot_flags);
++            let _ = env.map.put(b"CXXFLAGS", &sysroot_flags);
++            let _ = env.map.put(b"LDFLAGS", &sysroot_flags);
++        }
++    }
++
+     {
+         // Run node-gyp jobs in parallel.
+         // https://github.com/nodejs/node-gyp/blob/7d883b5cf4c26e76065201f85b0be36d5ebdcc0e/lib/build.js#L150-L184
+diff --git a/src/install/PackageManager/PackageManagerLifecycle.rs b/src/install/PackageManager/PackageManagerLifecycle.rs
+index 63730f9876a..938864b5163 100644
+--- a/src/install/PackageManager/PackageManagerLifecycle.rs
++++ b/src/install/PackageManager/PackageManagerLifecycle.rs
+@@ -392,6 +392,31 @@ impl PackageManager {
+         path.append(original_path.as_slice())?;
+         script_env.put(b"PATH", path.slice())?;
+ 
++        #[cfg(target_env = "ohos")]
++        {
++            // node-gyp/make find C++ via $CC/$CXX. OHOS SDK clang (LLVM 15) lacks
++            // C++20 <source_location>; route to a newer clang via $OHOS_CC/$OHOS_CXX
++            // + $OHOS_SYSROOT. OHOS_CC unconditionally OVERRIDES any pre-existing CC
++            // (the install env defaults CC="clang", which lacks source_location).
++            if let Some(cc) = bun_core::getenv_z(bun_core::zstr!("OHOS_CC")) {
++                let _ = script_env.put(b"CC", cc);
++            } else if script_env.get(b"CC").unwrap_or(b"").is_empty() {
++                let _ = script_env.put(b"CC", b"clang");
++            }
++            if let Some(cxx) = bun_core::getenv_z(bun_core::zstr!("OHOS_CXX")) {
++                let _ = script_env.put(b"CXX", cxx);
++            } else if script_env.get(b"CXX").unwrap_or(b"").is_empty() {
++                let _ = script_env.put(b"CXX", b"clang++");
++            }
++            if let Some(sysroot) = bun_core::getenv_z(bun_core::zstr!("OHOS_SYSROOT")) {
++                let mut sysroot_flags = b"--sysroot=".to_vec();
++                sysroot_flags.extend_from_slice(sysroot);
++                let _ = script_env.put(b"CFLAGS", &sysroot_flags);
++                let _ = script_env.put(b"CXXFLAGS", &sysroot_flags);
++                let _ = script_env.put(b"LDFLAGS", &sysroot_flags);
++            }
++        }
++
+         // Ownership transfers to `LifecycleScriptSubprocess`, which
+         // re-uses it across every `spawn_next_script` in the chain. Move the
+         // owning `NullDelimitedEnvMap` by value so its `K=V\0` buffers outlive
+diff --git a/src/install/bin.rs b/src/install/bin.rs
+index 8d097233cab..b94dca2551f 100644
+--- a/src/install/bin.rs
++++ b/src/install/bin.rs
+@@ -1325,7 +1325,10 @@ impl<'a> Linker<'a> {
+         // hoisted from `defer` block in create_symlink
+         if err.is_none() {
+             let mode = 0o777 & !(UMASK.load(Ordering::Acquire) as Mode);
+-            let _ = sys::lchmod(abs_target, mode);
++            // fchmodat(flags=0) follows the symlink and chmods the target file.
++            // lchmod changes the symlink itself — non-standard on Linux and returns
++            // ENOSYS on OHOS, silently leaving the execute bit unset.
++            let _ = sys::fchmodat(Fd::cwd(), abs_target, mode, 0);
+         }
+     }
+ 
+diff --git a/src/install/isolated_install/Hardlinker.rs b/src/install/isolated_install/Hardlinker.rs
+index 4856f2de0c9..28b924c5e87 100644
+--- a/src/install/isolated_install/Hardlinker.rs
++++ b/src/install/isolated_install/Hardlinker.rs
+@@ -271,6 +271,23 @@ impl Hardlinker {
+                                             self.dest.slice_z(),
+                                         ) {
+                                             sys::Result::Ok(()) => {}
++                                            sys::Result::Err(link_err2)
++                                                if matches!(
++                                                    link_err2.get_errno(),
++                                                    sys::E::EPERM | sys::E::EACCES
++                                                ) =>
++                                            {
++                                                if crate::copy_file_fallback(
++                                                    entry.dir,
++                                                    entry.basename,
++                                                    Fd::cwd(),
++                                                    self.dest.slice_z(),
++                                                )
++                                                .is_err()
++                                                {
++                                                    break 'body Some(link_err2);
++                                                }
++                                            }
+                                             sys::Result::Err(link_err2) => {
+                                                 break 'body Some(link_err2);
+                                             }
+@@ -289,11 +306,44 @@ impl Hardlinker {
+                                             self.dest.slice_z(),
+                                         ) {
+                                             sys::Result::Ok(()) => {}
++                                            sys::Result::Err(link_err2)
++                                                if matches!(
++                                                    link_err2.get_errno(),
++                                                    sys::E::EPERM | sys::E::EACCES
++                                                ) =>
++                                            {
++                                                if crate::copy_file_fallback(
++                                                    entry.dir,
++                                                    entry.basename,
++                                                    Fd::cwd(),
++                                                    self.dest.slice_z(),
++                                                )
++                                                .is_err()
++                                                {
++                                                    break 'body Some(link_err2);
++                                                }
++                                            }
+                                             sys::Result::Err(link_err2) => {
+                                                 break 'body Some(link_err2);
+                                             }
+                                         }
+                                     }
++                                    sys::E::EPERM | sys::E::EACCES => {
++                                        let Some(dest_parent) = self.dest.dirname() else {
++                                            break 'body Some(link_err1);
++                                        };
++                                        let _ = Fd::cwd().make_path(dest_parent);
++                                        if crate::copy_file_fallback(
++                                            entry.dir,
++                                            entry.basename,
++                                            Fd::cwd(),
++                                            self.dest.slice_z(),
++                                        )
++                                        .is_err()
++                                        {
++                                            break 'body Some(link_err1);
++                                        }
++                                    }
+                                     _ => break 'body Some(link_err1),
+                                 },
+                             }
+diff --git a/src/install/isolated_install/Symlinker.rs b/src/install/isolated_install/Symlinker.rs
+index 52c90735abb..96d52215dcf 100644
+--- a/src/install/isolated_install/Symlinker.rs
++++ b/src/install/isolated_install/Symlinker.rs
+@@ -34,6 +34,22 @@ impl Symlinker {
+     // Ok(true) when a link was written.
+     pub(crate) fn ensure_symlink(&mut self, strategy: Strategy) -> bun_sys::Result<bool> {
+         match strategy {
++            Strategy::IgnoreFailure => {
++                return match self.symlink() {
++                    Ok(()) => Ok(true),
++                    Err(symlink_err) => match symlink_err.get_errno() {
++                        Errno::ENOENT => {
++                            let Some(dest_parent) = self.dest.dirname() else {
++                                return Ok(false);
++                            };
++
++                            let _ = Fd::cwd().make_path(dest_parent);
++                            Ok(self.symlink().is_ok())
++                        }
++                        _ => Ok(false),
++                    },
++                };
++            }
+             Strategy::ExpectMissing => {
+                 return match self.symlink() {
+                     Ok(()) => Ok(true),
+@@ -153,4 +169,5 @@ impl Symlinker {
+ pub enum Strategy {
+     ExpectExisting,
+     ExpectMissing,
++    IgnoreFailure,
+ }
+diff --git a/src/install/lib.rs b/src/install/lib.rs
+index 314523ca5ec..6312a153489 100644
+--- a/src/install/lib.rs
++++ b/src/install/lib.rs
+@@ -403,8 +403,9 @@ impl RunCommand {
+     #[cfg(not(windows))]
+     const SHELLS_TO_SEARCH: &'static [&'static [u8]] = &[b"bash", b"sh", b"zsh"];
+ 
+-    /// `/tmp/bun-node-<sha>` (or debug variant). Windows builds compute the path
+-    /// at runtime via GetTempPathW, so this constant is POSIX-only.
++    /// `/tmp/bun-node-<sha>` (or debug variant; under the app sandbox tmp on
++    /// OHOS). Windows builds compute the path at runtime via GetTempPathW, so
++    /// this constant is POSIX-only.
+     ///
+     /// NOTE: the SHA alone does not uniquely identify a binary — two local
+     /// builds at the same commit share this dir. `create_fake_temporary_node_executable`
+@@ -418,6 +419,10 @@ impl RunCommand {
+             "/private/tmp"
+         } else if cfg!(target_os = "android") {
+             "/data/local/tmp"
++        } else if cfg!(target_env = "ohos") {
++            // The OHOS app sandbox cannot write to /tmp; the app-writable
++            // tmp dir is under the EL2 data directory.
++            "/data/storage/el2/base/tmp"
+         } else {
+             "/tmp"
+         };
+@@ -590,13 +595,22 @@ impl RunCommand {
+             // already exists, refuse to use it unless it's a directory we own
+             // with no group/other write bits.
+             match bun_sys::mkdir(DIR_Z, 0o700) {
+-                Ok(()) => {}
++                Ok(()) => {
++                    // OHOS tmpfs forces setgid + group-write on new
++                    // directories; chmod back to 0700 so the EEXIST
++                    // permission check below passes on re-entry.
++                    #[cfg(target_env = "ohos")]
++                    {
++                        let _ = bun_sys::chmod(DIR_Z, 0o700);
++                    }
++                }
+                 Err(e) if e.get_errno() == bun_sys::E::EEXIST => match bun_sys::lstat(DIR_Z) {
+                     Ok(st)
+                         if bun_sys::kind_from_mode(st.st_mode as bun_sys::Mode)
+                             == bun_sys::FileKind::Directory
+                             && st.st_uid == bun_sys::c::getuid()
+-                            && (st.st_mode as bun_sys::Mode) & 0o022 == 0 => {}
++                            && ((st.st_mode as bun_sys::Mode) & 0o022 == 0
++                                || cfg!(target_env = "ohos")) => {}
+                     _ => return Ok(()),
+                 },
+                 Err(_) => return Ok(()),
+@@ -1109,3 +1123,32 @@ pub enum PackageManifestError {
+ }
+ 
+ bun_core::impl_tag_error!(PackageManifestError);
++
++/// Fallback for when `linkat` / `symlinkat` is blocked by SELinux (OHOS) or
++/// similar security policy. Opens the source file, creates the destination
++/// (retrying with unlink on EACCES/EPERM), copies the content, and preserves
++/// the source file's permissions.
++#[cfg(not(windows))]
++pub(crate) fn copy_file_fallback(
++    src_dir: bun_sys::Fd,
++    src_name: &bun_core::ZStr,
++    dest_dir: bun_sys::Fd,
++    dest_path_z: &bun_core::ZStr,
++) -> bun_sys::Result<()> {
++    use bun_sys::{self as sys};
++    let inf = sys::File::openat(src_dir, src_name.as_bytes(), sys::O::RDONLY, 0)?;
++    let dest_path: &[u8] = dest_path_z.as_bytes();
++    let outf = match sys::File::create(dest_dir, dest_path, true) {
++        Ok(f) => f,
++        Err(ref e) if e.get_errno() == sys::E::EACCES || e.get_errno() == sys::E::EPERM => {
++            let _ = sys::unlinkat(dest_dir, dest_path_z);
++            sys::File::create(dest_dir, dest_path, true)?
++        }
++        Err(e) => return Err(e),
++    };
++    sys::copy_file(inf.handle(), outf.handle())?;
++    if let Ok(stat) = sys::fstat(inf.handle()) {
++        let _ = sys::fchmod(outf.handle(), stat.st_mode as _);
++    }
++    Ok(())
++}
+diff --git a/src/install/lifecycle_script_runner.rs b/src/install/lifecycle_script_runner.rs
+index f415b55cf5e..5612ea31e62 100644
+--- a/src/install/lifecycle_script_runner.rs
++++ b/src/install/lifecycle_script_runner.rs
+@@ -519,6 +519,17 @@ impl<'a> LifecycleScriptSubprocess<'a> {
+                 .as_ref()
+                 .expect("script present");
+             let cwd = (*this).scripts.cwd.as_bytes();
++            // OHOS hmdfs may not support getcwd(), which causes the shell to
++            // abort when running lifecycle scripts. Fall back to HOME which
++            // is always on a readable filesystem.
++            #[cfg(target_env = "ohos")]
++            let cwd = {
++                if cwd.is_empty() || cwd == b"/" {
++                    bun_core::env_var::HOME::get().unwrap_or(cwd)
++                } else {
++                    cwd
++                }
++            };
+             (*this).stdout.set_parent(this.cast::<c_void>());
+             (*this).stderr.set_parent(this.cast::<c_void>());
+ 
+diff --git a/src/install/lockfile/bun.lockb.rs b/src/install/lockfile/bun.lockb.rs
+index 42871287e6c..edadb613904 100644
+--- a/src/install/lockfile/bun.lockb.rs
++++ b/src/install/lockfile/bun.lockb.rs
+@@ -450,6 +450,38 @@ pub(crate) fn load(
+         }
+     }
+ 
++    // Upgrade meta.os from the pre-OPENHARMONY ALL value to the current ALL.
++    // Binary lockfiles created before OPENHARMONY was added to
++    // OperatingSystem::ALL_VALUE stored packages with no OS restriction as
++    // LEGACY_ALL = (ALL & !OPENHARMONY). On OHOS bun ALL_VALUE now includes
++    // OPENHARMONY, so LEGACY_ALL != ALL, causing bun.lock serialization to emit
++    // "os: !openharmony" for every unrestricted package. Detect the legacy value
++    // and upgrade it so the invariant holds: no os field ↔ no OS restriction.
++    //
++    // Also heal meta.os == NONE: "matches nothing" is never an intentional
++    // restriction — it means the writer's OperatingSystem map didn't know the
++    // token (Negatable::combine maps all-unrecognized to NONE), e.g.
++    // "openharmony" before OHOS support ("netbsd" is still unmapped). The
++    // original restriction is unrecoverable; default to ALL so the package's
++    // native platform isn't skipped forever. Unrestricted packages are ALL
++    // anyway, and a platform binary installed on the wrong OS is inert (its
++    // postinstall/runtime copes) — unlike a missing one, which breaks the
++    // package on its own platform (observed: @esbuild/openharmony-arm64 from
++    // a pre-OHOS lockb v2 is skipped on OHOS itself, failing esbuild's
++    // postinstall). Same reasoning for meta.arch.
++    {
++        use bun_install::npm::OperatingSystem;
++        const LEGACY_ALL: u16 = OperatingSystem::ALL_VALUE & !OperatingSystem::OPENHARMONY;
++        for meta in lockfile.packages.items_meta_mut() {
++            if meta.os.0 == LEGACY_ALL || meta.os.0 == OperatingSystem::NONE.0 {
++                meta.os = OperatingSystem::ALL;
++            }
++            if meta.arch.0 == bun_install::npm::Architecture::NONE.0 {
++                meta.arch = bun_install::npm::Architecture::ALL;
++            }
++        }
++    }
++
+     res.packages_need_update = packages_load_result.needs_update;
+     res.migrated_from_lockb_v2 = migrate_from_v2;
+ 
+diff --git a/src/install/npm.rs b/src/install/npm.rs
+index 910f39f821f..287e9c0b24d 100644
+--- a/src/install/npm.rs
++++ b/src/install/npm.rs
+@@ -1180,11 +1180,32 @@ pub mod package_manifest {
+             #[cfg(any(target_os = "linux", target_os = "android"))]
+             if is_using_o_tmpfile {
+                 // Attempt #1.
+-                if bun_sys::linkat_tmpfile(file.handle, cache_dir, outpath).is_err() {
++                let link_ok = bun_sys::linkat_tmpfile(file.handle, cache_dir, outpath);
++                if link_ok.is_err() {
+                     // Attempt #2: the file may already exist. Let's unlink and try again.
+                     let _ = bun_sys::unlinkat(cache_dir, outpath);
+-                    bun_sys::linkat_tmpfile(file.handle, cache_dir, outpath)?;
+-                    // There is no attempt #3. This is a cache, so it's not essential.
++                    let link_ok2 = bun_sys::linkat_tmpfile(file.handle, cache_dir, outpath);
++                    // Attempt #3: linkat_tmpfile still failing. On OHOS the compat
++                    // shim's linkat hook now materializes the O_TMPFILE via a
++                    // /proc/self/fd copy, so attempt #1 usually succeeds; this is the
++                    // last resort for any remaining linkat failure. Write to tmp_path
++                    // then rename atomically so quick_exit cannot observe a 0-byte or
++                    // partially-written .npm file ("manifest is invalid" on reload).
++                    // Non-fatal: this is a cache, so a failure is just a lost entry.
++                    if link_ok2.is_err() {
++                        if let Ok(tmp_file) = File::openat(
++                            tmpdir,
++                            tmp_path,
++                            bun_sys::O::WRONLY | bun_sys::O::CREAT | bun_sys::O::TRUNC,
++                            0o664,
++                        ) {
++                            if tmp_file.write_all(&buffer).is_ok() {
++                                let _ = bun_sys::renameat(tmpdir, tmp_path, cache_dir, outpath);
++                            } else {
++                                let _ = bun_sys::unlinkat(tmpdir, tmp_path);
++                            }
++                        }
++                    }
+                 }
+                 return Ok(());
+             }
+diff --git a/src/install_types/resolver_hooks.rs b/src/install_types/resolver_hooks.rs
+index 53afb6708e4..cdf19c92ba4 100644
+--- a/src/install_types/resolver_hooks.rs
++++ b/src/install_types/resolver_hooks.rs
+@@ -804,7 +804,8 @@ impl OperatingSystem {
+     pub(crate) const OPENBSD: u16 = 1 << 5;
+     pub(crate) const SUNOS: u16 = 1 << 6;
+     pub const WIN32: u16 = 1 << 7;
+-    pub(crate) const ANDROID: u16 = 1 << 8;
++    pub const ANDROID: u16 = 1 << 8;
++    pub const OPENHARMONY: u16 = 1 << 9;
+ 
+     pub const ALL_VALUE: u16 = Self::AIX
+         | Self::DARWIN
+@@ -813,10 +814,17 @@ impl OperatingSystem {
+         | Self::OPENBSD
+         | Self::SUNOS
+         | Self::WIN32
+-        | Self::ANDROID;
+-
+-    #[cfg(all(target_os = "linux", not(target_os = "android")))]
++        | Self::ANDROID
++        | Self::OPENHARMONY;
++
++    #[cfg(all(
++        target_os = "linux",
++        not(target_os = "android"),
++        not(target_env = "ohos")
++    ))]
+     pub const CURRENT: Self = Self(Self::LINUX);
++    #[cfg(target_env = "ohos")]
++    pub const CURRENT: Self = Self(Self::OPENHARMONY);
+     #[cfg(target_os = "android")]
+     pub const CURRENT: Self = Self(Self::ANDROID);
+     #[cfg(target_os = "macos")]
+@@ -854,6 +862,7 @@ impl OperatingSystem {
+ negatable_names! { OperatingSystem: u16, OPERATING_SYSTEM_NAMES => [
+     b"aix" => AIX, b"linux" => LINUX, b"sunos" => SUNOS, b"win32" => WIN32,
+     b"darwin" => DARWIN, b"android" => ANDROID, b"freebsd" => FREEBSD, b"openbsd" => OPENBSD,
++    b"openharmony" => OPENHARMONY,
+ ] }
+ 
+ // ──────────────────────────────────────────────────────────────────────────

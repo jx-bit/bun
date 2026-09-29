@@ -1,0 +1,3562 @@
+diff --git a/patches/lolhtml/crate-type.patch b/patches/lolhtml/crate-type.patch
+new file mode 100644
+index 00000000000..925f86182a9
+--- /dev/null
++++ b/patches/lolhtml/crate-type.patch
+@@ -0,0 +1,11 @@
++--- a/c-api/Cargo.toml
+++++ b/c-api/Cargo.toml
++@@ -24,7 +24,7 @@ lto = true
++ 
++ [lib]
++ name = "lolhtml"
++-crate-type = ["staticlib", "cdylib", "rlib"]
+++crate-type = ["staticlib", "rlib"]
++ 
++ [package.metadata.capi.header]
++ name = "lol_html"
+diff --git a/patches/zstd/ohos-qsort-r.patch b/patches/zstd/ohos-qsort-r.patch
+new file mode 100644
+index 00000000000..b5fb3d5dea3
+--- /dev/null
++++ b/patches/zstd/ohos-qsort-r.patch
+@@ -0,0 +1,38 @@
++--- a/lib/dictBuilder/cover.c	2026-05-08 19:22:53.704000000 +0800
+++++ b/lib/dictBuilder/cover.c	2026-05-08 19:22:53.732000000 +0800
++@@ -29,6 +29,35 @@
++ #endif
++ #endif
++ 
+++/* OHOS musl lacks qsort_r entirely -- implement via selection sort with
+++ * dynamically sized swap buffer (avoids stack overflow for large elements). */
+++#if defined(__OHOS__)
+++#include <stdlib.h>
+++#include <string.h>
+++typedef int (*_zstd_qsort_r_cmp)(const void *, const void *, void *);
+++static void _zstd_qsort_r_impl(void *base, size_t nmemb, size_t size,
+++                                _zstd_qsort_r_cmp compar, void *arg) {
+++    char *b = (char *)base;
+++    char *tmp;
+++    size_t i, j;
+++    if (nmemb < 2 || size == 0) return;
+++    tmp = (char *)malloc(size);
+++    if (!tmp) return;
+++    for (i = 0; i < nmemb; i++) {
+++        for (j = i + 1; j < nmemb; j++) {
+++            if (compar(b + j * size, b + i * size, arg) < 0) {
+++                memcpy(tmp, b + i * size, size);
+++                memcpy(b + i * size, b + j * size, size);
+++                memcpy(b + j * size, tmp, size);
+++            }
+++        }
+++    }
+++    free(tmp);
+++}
+++#define qsort_r(base, nmemb, size, compar, arg) _zstd_qsort_r_impl(base, nmemb, size, compar, arg)
+++#endif
+++
+++
++ #include <stdio.h>  /* fprintf */
++ #include <stdlib.h> /* malloc, free, qsort_r */
++ 
+diff --git a/rust-toolchain.toml b/rust-toolchain.toml
+index ce6cb21d9fc..18990374bfe 100644
+--- a/rust-toolchain.toml
++++ b/rust-toolchain.toml
+@@ -20,6 +20,7 @@ channel = "nightly-2026-07-20"
+ components = ["rust-src", "rustfmt", "clippy", "miri"]
+ targets = [
+   "aarch64-unknown-linux-gnu",
++  "aarch64-unknown-linux-ohos",
+   "x86_64-unknown-linux-gnu",
+   "aarch64-unknown-linux-musl",
+   "x86_64-unknown-linux-musl",
+diff --git a/scripts/build.ts b/scripts/build.ts
+index 46e05970d6f..bcd8c18e740 100644
+--- a/scripts/build.ts
++++ b/scripts/build.ts
+@@ -474,6 +474,10 @@ function parseArgs(argv: string[]): CliArgs {
+     "winsysroot",
+     "linuxSysroot",
+     "freebsdSysroot",
++    "ohosSysroot",
++    "ohosSdkRoot",
++    "ohosCrossLibs",
++    "ohosIcuDir",
+   ]);
+ 
+   for (let i = 0; i < argv.length; i++) {
+diff --git a/scripts/build/bun.ts b/scripts/build/bun.ts
+index fc1a7481d7b..6fa2824758c 100644
+--- a/scripts/build/bun.ts
++++ b/scripts/build/bun.ts
+@@ -81,8 +81,13 @@ function systemLibs(cfg: Config): string[] {
+     // Linux local WebKit: link system ICU (prebuilt bundles its own).
+     // Assumes system ICU is in default lib paths — true on most distros.
+     // Android: no system ICU; the local WebKit build must bundle it.
++    // OHOS: use cross-compiled ICU from ohosIcuDir.
+     if (cfg.webkit === "local" && cfg.abi !== "android") {
+-      libs.push("-licudata", "-licui18n", "-licuuc");
++      if (cfg.ohos && cfg.ohosIcuDir) {
++        libs.push(`-L${cfg.ohosIcuDir}/lib`, "-licudata", "-licui18n", "-licuuc");
++      } else {
++        libs.push("-licudata", "-licui18n", "-licuuc");
++      }
+     }
+   }
+ 
+@@ -277,8 +282,14 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
+   const cFlagsFull = [...flags.cflags, ...includeFlags, ...defineFlags];
+ 
+   // ─── Step 4: PCH ───
+-  // CI full mode (unused by the pipeline) skips the PCH; cpp-only/archive-link use it.
+-  const usePch = !cfg.ci || cfg.mode !== "full";
++  // The PCH force-includes root-pch.h, and TUs rely on its JSC declarations —
++  // e.g. BunStreamSource.cpp includes BunClientData.h (which has no includes of
++  // its own) before any JSC header. The old `!cfg.ci || cfg.mode !== "full"`
++  // skip assumed CI full mode was unused by the pipeline; the cross-compile
++  // lanes run exactly that combination, so their TUs lost the JSC declarations
++  // and failed to compile. The PCH is now unconditional; per-TU opt-outs live
++  // in noPchSources below.
++  const usePch = true;
+   let pchOut: { pch: string; wrapperHeader: string } | undefined;
+ 
+   if (usePch) {
+diff --git a/scripts/build/codegen.ts b/scripts/build/codegen.ts
+index 36566f1e9ca..f6c721959eb 100644
+--- a/scripts/build/codegen.ts
++++ b/scripts/build/codegen.ts
+@@ -85,13 +85,17 @@ function codegenTarget(cfg: Config): { platform: string; arch: string } {
+   const platform =
+     cfg.abi === "android"
+       ? "android"
+-      : cfg.os === "darwin"
+-        ? "darwin"
+-        : cfg.os === "windows"
+-          ? "win32"
+-          : cfg.os === "freebsd"
+-            ? "freebsd"
+-            : "linux";
++      : cfg.ohos
++        ? // process.platform is user-facing: "openharmony", not the kernel's
++          // linux. create-hash-table.ts maps this back to LINUX for OS() #ifs.
++          "openharmony"
++        : cfg.os === "darwin"
++          ? "darwin"
++          : cfg.os === "windows"
++            ? "win32"
++            : cfg.os === "freebsd"
++              ? "freebsd"
++              : "linux";
+   const arch = cfg.x64 ? "x64" : "arm64";
+   return { platform, arch };
+ }
+diff --git a/scripts/build/config.ts b/scripts/build/config.ts
+index 671839b78c7..f9891efa291 100644
+--- a/scripts/build/config.ts
++++ b/scripts/build/config.ts
+@@ -7,7 +7,7 @@
+  */
+ 
+ import { execSync } from "node:child_process";
+-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+ import { homedir, arch as hostArch, platform as hostPlatform } from "node:os";
+ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+ import { NODEJS_ABI_VERSION, NODEJS_V8_VERSION, NODEJS_VERSION } from "./deps/nodejs-headers.ts";
+@@ -17,7 +17,7 @@ import { resolveMacosSdkPath } from "./macos-sdk.ts";
+ import { clangTargetArch, toolchainOverride } from "./tools.ts";
+ import { cyan, dim, green } from "./tty.ts";
+ 
+-export type OS = "linux" | "darwin" | "windows" | "freebsd";
++export type OS = "linux" | "darwin" | "windows" | "freebsd" | "ohos";
+ export type Arch = "x64" | "aarch64";
+ export type Abi = "gnu" | "musl" | "android";
+ export type BuildType = "Debug" | "Release" | "RelWithDebInfo" | "MinSizeRel";
+@@ -76,8 +76,11 @@ export interface Config {
+   darwin: boolean;
+   windows: boolean;
+   freebsd: boolean;
++  ohos: boolean;
+   /** linux || darwin || freebsd */
+   unix: boolean;
++  /** darwin || freebsd — kqueue-based event loop */
++  kqueue: boolean;
+   x64: boolean;
+   arm64: boolean;
+ 
+@@ -133,7 +136,7 @@ export interface Config {
+   asan: boolean;
+   assertions: boolean;
+   logs: boolean;
+-  /** x64-only: target nehalem (no AVX). Default true on x64 — the only x64 build we ship. */
++  /** x64-only: target nehalem (no AVX) instead of haswell. */
+   baseline: boolean;
+   canary: boolean;
+   /** MinSizeRel → optimize for size. */
+@@ -196,6 +199,9 @@ export interface Config {
+ 
+   // ─── Toolchain (resolved absolute paths) ───
+   cc: string;
++  /** Host-native C compiler for build-time codegen (no --target/--sysroot).
++   *  Same as cc for native builds; bare clang/cc for cross-compiles like OHOS. */
++  hostCc: string;
+   cxx: string;
+   /**
+    * Compiler for build-time host tools (dep_host_cc codegen helpers).
+@@ -236,10 +242,10 @@ export interface Config {
+   /** Parsed `LLVM version:` from `rustc -vV`. Captured once; feeds workarounds.ts. */
+   rustLlvmVersion: string | undefined;
+   strip: string;
+-  /** llvm-nm, for `DirectBuild.forbidUndefined`; undefined skips those checks. */
+-  nm: string | undefined;
+   /** Set when the target is darwin. Undefined on non-darwin targets. */
+   dsymutil: string | undefined;
++  /** llvm-nm, for `DirectBuild.forbidUndefined`; undefined skips those checks. */
++  nm: string | undefined;
+   /** Self-host bun for codegen (bun install, bun build). */
+   bun: string;
+   /** npm, set only when `packageManager` is "npm". */
+@@ -278,7 +284,7 @@ export interface Config {
+   rc: string | undefined;
+   /** Windows: llvm-mt for nested cmake (CMAKE_MT). May be absent in some LLVM distros. */
+   mt: string | undefined;
+-  /** x64: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
++  /** Windows-x64: nasm for BoringSSL's NASM-syntax assembly. */
+   nasm: string | undefined;
+ 
+   // ─── macOS SDK (darwin only, undefined elsewhere) ───
+@@ -307,8 +313,24 @@ export interface Config {
+    * undefined on native Windows builds (VS dev shell supplies the SDK).
+    */
+   winsysroot: string | undefined;
++  /** Android NDK root. undefined when abi != "android". */
++  androidNdk: string | undefined;
++  /** Android API level (the N in `__ANDROID_API__=N`). undefined when abi != "android". */
++  androidApiLevel: number | undefined;
+   /** NDK compiler-rt/libunwind dir: `<ndk>/toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux`. */
+   androidNdkRuntimeDir: string | undefined;
++  /** FreeBSD release version targeted (e.g. "14.3"). undefined when os != "freebsd". */
++  freebsdVersion: string | undefined;
++
++  // ─── OHOS cross-compilation (ohos only, undefined elsewhere) ───
++  /** Sysroot path for OHOS NDK. */
++  ohosSysroot: string | undefined;
++  /** OHOS SDK root path. */
++  ohosSdkRoot: string | undefined;
++  /** Cross-compiled libc++/libunwind path. */
++  ohosCrossLibs: string | undefined;
++  /** Cross-compiled ICU path. */
++  ohosIcuDir: string | undefined;
+ 
+   // ─── Versioning ───
+   /** Bun's own version (from package.json). */
+@@ -354,11 +376,6 @@ export interface PartialConfig {
+   ci?: boolean;
+   buildkite?: boolean;
+   webkit?: WebKitMode;
+-  /**
+-   * `name=path[,name=path...]` — build these deps from a local checkout
+-   * (e.g. `mimalloc=~/code/mimalloc`). `~` expands to $HOME; relative paths
+-   * resolve against the repo root. See `Config.localDeps`.
+-   */
+   localDeps?: string;
+   /** `bun` (default) or `npm`. See `Config.packageManager`. */
+   packageManager?: PackageManager;
+@@ -374,6 +391,16 @@ export interface PartialConfig {
+   freebsdVersion?: string;
+   /** Linux glibc sysroot (pinned old glibc/libstdc++). Only used when linux && abi=gnu. */
+   linuxSysroot?: string;
++  /** OHOS sysroot path. Only used when os=ohos. */
++  ohosSysroot?: string;
++  /** OHOS SDK root. Auto-detected if not provided. */
++  ohosSdkRoot?: string;
++  /** OHOS cross-compiled LLVM runtime libs (libc++/libc++abi/libunwind). Auto-detected if not provided. */
++  ohosCrossLibs?: string;
++  /** OHOS cross-compiled ICU directory. Auto-detected if not provided. */
++  ohosIcuDir?: string;
++  /** Override cross-compilation target triple (e.g. "aarch64-linux-ohos"). */
++  crossTarget?: string;
+   /**
+    * macOS SDK path (a MacOSX*.sdk directory). Only used when cross-compiling
+    * for darwin from a non-darwin host; native darwin builds use xcrun.
+@@ -445,9 +472,8 @@ export interface Toolchain {
+    * can't read Mach-O, so darwin cross-compiles swap this in as `cfg.strip`.
+    */
+   llvmStrip: string | undefined;
+-  /** llvm-nm; undefined skips the per-dep undefined-symbol checks (source.ts). */
+-  nm: string | undefined;
+   dsymutil: string | undefined;
++  nm: string | undefined;
+   bun: string;
+   /** Found only when the build installs with npm. */
+   npm?: string | undefined;
+@@ -480,7 +506,11 @@ export interface Toolchain {
+    * source.ts) sidesteps the need.
+    */
+   mt: string | undefined;
+-  /** x64 targets: nasm for BoringSSL's win-x64 assembly and libjpeg-turbo's x86_64 SIMD. */
++  /**
++   * Windows only: nasm. BoringSSL's win-x64 assembly is NASM syntax;
++   * clang's integrated assembler can't read it. win-aarch64 uses gas
++   * .S files instead, so this is x64-only in practice.
++   */
+   nasm: string | undefined;
+ }
+ 
+@@ -490,7 +520,7 @@ export interface Toolchain {
+ export function detectHost(): Host {
+   const plat = hostPlatform();
+   const os: OS =
+-    plat === "linux"
++    plat === "linux" || plat === "openharmony"
+       ? "linux"
+       : plat === "darwin"
+         ? "darwin"
+@@ -706,6 +736,24 @@ function linkNdkRuntimesIntoClang(cc: string, ndk: string, host: Host, triple: s
+   }
+ }
+ 
++function parseLocalDeps(spec: string | undefined, cwd: string): Record<string, string> {
++  const out = Object.create(null) as Record<string, string>;
++  if (spec === undefined || spec === "") return out;
++  for (const entry of spec.split(",")) {
++    const eq = entry.indexOf("=");
++    if (eq <= 0 || eq === entry.length - 1) {
++      throw new BuildError(`--local-deps: expected name=path, got '${entry}'`, {
++        hint: "Example: --local-deps=mimalloc=~/code/mimalloc",
++      });
++    }
++    const name = entry.slice(0, eq);
++    let path = entry.slice(eq + 1);
++    if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
++    out[name] = resolve(cwd, path);
++  }
++  return out;
++}
++
+ /**
+  * Resolve a PartialConfig into a full Config.
+  *
+@@ -724,13 +772,15 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+   // skip this (the host clang-cl's default arch is just the host's).
+   const compilerArch = os === "windows" && host.os === "windows" ? clangTargetArch(toolchain.cc) : undefined;
+   const arch = partial.arch ?? compilerArch ?? host.arch;
+-  const abi: Abi | undefined = os === "linux" ? (partial.abi ?? detectLinuxAbi()) : undefined;
++  const abi: Abi | undefined = os === "linux" ? (partial.abi ?? detectLinuxAbi()) : os === "ohos" ? "musl" : undefined;
+ 
+   const linux = os === "linux";
+   const darwin = os === "darwin";
+   const windows = os === "windows";
+   const freebsd = os === "freebsd";
+-  const unix = linux || darwin || freebsd;
++  const ohos = os === "ohos";
++  const unix = linux || darwin || freebsd || ohos;
++  const kqueue = darwin || freebsd;
+   const x64 = arch === "x64";
+   const arm64 = arch === "aarch64";
+   // Darwin target on a non-darwin host (Linux CI box building macOS
+@@ -786,6 +836,15 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+   // build:asan always set ENABLE_ASSERTIONS=ON for this reason.
+   const assertions = partial.assertions ?? (debug || asan);
+ 
++  // Resolved early because the LTO defaults below need it (the windows
++  // -baseline WebKit prebuilt has no -lto variant). Defaults to `x64` so
++  // x64 builds pick the Nehalem baseline (pre-2013 CPUs) unless overridden;
++  // other arches (aarch64/ohos) default to false.
++  const baseline = partial.baseline ?? x64;
++
++  // LTO: default on for CI release non-asan non-assertions builds on Linux
++  // and on darwin cross-compiles. Windows is NOT in the default even though
++  // the windows x64 cross toolchain fully supports ThinLTO + cross-language
+   // LTO: default on for CI release non-asan non-assertions builds across
+   // linux, darwin-cross, and windows-cross. All three use ThinLTO (the JSC
+   // ThinLTO miscompile was fixed upstream). The -lto WebKit prebuilts only
+@@ -872,7 +931,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+   // Logs: on by default in debug non-test
+   const logs = partial.logs ?? debug;
+ 
+-  const baseline = partial.baseline ?? x64;
++  // (`baseline` is resolved earlier, next to the LTO defaults.)
+   const canary = partial.canary ?? true;
+   const canaryRevision = canary ? "1" : "0";
+ 
+@@ -1046,6 +1105,31 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+     }
+   }
+ 
++  // ─── OHOS ───
++  let ohosSysroot: string | undefined;
++  let ohosSdkRoot: string | undefined;
++  let ohosCrossLibs: string | undefined;
++  let ohosIcuDir: string | undefined;
++  if (ohos) {
++    ohosSdkRoot = partial.ohosSdkRoot ? resolve(cwd, partial.ohosSdkRoot) : findOhosSdkRoot();
++    if (!ohosSdkRoot) {
++      throw new BuildError("OHOS build requires --ohos-sdk-root=<path> or setup-ohos-sdk in home", {
++        hint: "Install OHOS SDK from https://gitee.com/openharmony and point --ohos-sdk-root to the SDK root.",
++      });
++    }
++    ohosSysroot = partial.ohosSysroot ? resolve(cwd, partial.ohosSysroot) : resolve(ohosSdkRoot, "ohos/native/sysroot");
++    if (!existsSync(ohosSysroot)) {
++      throw new BuildError(`OHOS sysroot not found at ${ohosSysroot}`);
++    }
++    ohosCrossLibs = partial.ohosCrossLibs
++      ? resolve(cwd, partial.ohosCrossLibs)
++      : resolve(cwd, "build", "ohos-cross-libs");
++    ohosIcuDir = partial.ohosIcuDir ? resolve(cwd, partial.ohosIcuDir) : resolve(cwd, "build", "ohos-icu", "target");
++    // Populate generic cross-compile fields so downstream plumbing sees OHOS settings
++    sysroot = ohosSysroot;
++    crossTarget = partial.crossTarget ?? "aarch64-linux-ohos";
++  }
++
+   // ─── Cross-compilation (Windows) ───
+   // Same pattern as Android/FreeBSD, with the MSVC spin: the host LLVM's
+   // clang-cl/lld-link/llvm-lib/llvm-rc are used (tools.ts picks them by
+@@ -1091,7 +1175,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+   const pkgJsonPath = resolve(cwd, "package.json");
+   const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string };
+   const version = pkgJson.version;
+-  const revision = getGitRevision(cwd, debug && !ci ? buildDir : undefined);
++  const revision = getGitRevision(cwd);
+ 
+   // Defaults from versions.ts. Override via --webkit-version=<hash> etc.
+   // to test a branch before bumping the pinned default.
+@@ -1129,7 +1213,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+     crossTarget = `${arm64 ? "arm64" : "x86_64"}-apple-macosx`;
+     osxDeploymentTarget = partial.osxDeploymentTarget ?? MIN_OSX_DEPLOYMENT_TARGET;
+     // rust-only mode never compiles C/C++ or links, so it doesn't need the
+-    // SDK — skip resolution so a rust-only build doesn't download
++    // SDK — skip resolution to keep the shared CI rust box from downloading
+     // a ~730 MB sysroot it never reads.
+     if ((partial.mode ?? "full") !== "rust-only") {
+       osxSysroot = resolveMacosSdkPath(partial.macosSdk, cacheDir, cwd);
+@@ -1178,7 +1262,9 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+     darwin,
+     windows,
+     freebsd,
++    ohos,
+     unix,
++    kqueue,
+     x64,
+     arm64,
+     host,
+@@ -1221,8 +1307,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+     cacheDir,
+     vendorDir,
+     cc: toolchain.cc,
++    hostCc: ohos ? findHostCc() : (toolchain.hostCc ?? toolchain.cc),
+     cxx: toolchain.cxx,
+-    hostCc: toolchain.hostCc ?? toolchain.cc,
+     hostCxx: toolchain.hostCxx ?? toolchain.cxx,
+     clangVersion: toolchain.clangVersion,
+     clangResourceDir: toolchain.clangResourceDir,
+@@ -1241,8 +1327,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+           ? `/usr/bin/${crossTarget}-strip`
+           : (toolchain.llvmStrip ?? toolchain.strip)
+         : toolchain.strip),
+-    nm: toolchain.nm,
+     dsymutil: toolchain.dsymutil,
++    nm: toolchain.nm,
+     bun: toolchain.bun,
+     npm: packageManager === "npm" ? toolchain.npm : undefined,
+     jsRuntime: toolchain.jsRuntime,
+@@ -1273,7 +1359,14 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
+     crossTarget,
+     sysroot,
+     winsysroot,
++    androidNdk,
++    androidApiLevel,
+     androidNdkRuntimeDir,
++    freebsdVersion,
++    ohosSysroot,
++    ohosSdkRoot,
++    ohosCrossLibs,
++    ohosIcuDir,
+     version,
+     revision,
+     nodejsVersion,
+@@ -1422,31 +1515,6 @@ export function findRepoRoot(): string {
+   }
+ }
+ 
+-/**
+- * Parse `--local-deps=name=path[,name=path...]` into name → absolute path.
+- * Names are checked against `allDeps` later (bun.ts) where the dep list is
+- * in scope; here we only validate shape and resolve paths.
+- */
+-function parseLocalDeps(spec: string | undefined, cwd: string): Record<string, string> {
+-  // Null prototype: any name (even `__proto__`) is stored as a plain entry and
+-  // reaches the unknown-dep check in validateBunConfig.
+-  const out = Object.create(null) as Record<string, string>;
+-  if (spec === undefined || spec === "") return out;
+-  for (const entry of spec.split(",")) {
+-    const eq = entry.indexOf("=");
+-    if (eq <= 0 || eq === entry.length - 1) {
+-      throw new BuildError(`--local-deps: expected name=path, got '${entry}'`, {
+-        hint: "Example: --local-deps=mimalloc=~/code/mimalloc",
+-      });
+-    }
+-    const name = entry.slice(0, eq);
+-    let path = entry.slice(eq + 1);
+-    if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
+-    out[name] = resolve(cwd, path);
+-  }
+-  return out;
+-}
+-
+ /**
+  * Get the current git revision (HEAD sha).
+  *
+@@ -1483,29 +1551,17 @@ function readRustToolchainChannel(cwd: string): string | undefined {
+   return m?.[1];
+ }
+ 
+-function getGitRevision(cwd: string, pinDir: string | undefined): string {
++function getGitRevision(cwd: string): string {
+   // CI env first — authoritative and zero-cost.
+   const envSha = process.env.BUILDKITE_COMMIT ?? process.env.GITHUB_SHA ?? process.env.GIT_SHA;
+   if (envSha !== undefined && envSha.length > 0) {
+     return envSha;
+   }
+-  // Local debug builds pin the sha at first configure: it is a const in `bun_core`, so tracking HEAD would recompile every Rust crate on each commit/checkout/pull.
+-  const pinFile = pinDir === undefined ? undefined : resolve(pinDir, "git-revision");
+-  if (pinFile !== undefined && existsSync(pinFile)) {
+-    const pinned = readFileSync(pinFile, "utf8").trim();
+-    if (/^[0-9a-f]{40}$/.test(pinned)) return pinned;
+-  }
+-  let sha: string;
+   try {
+-    sha = execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
++    return execSync("git rev-parse HEAD", { cwd, encoding: "utf8" }).trim();
+   } catch {
+     return "unknown";
+   }
+-  if (pinFile !== undefined) {
+-    mkdirSync(pinDir!, { recursive: true });
+-    writeFileSync(pinFile, sha + "\n");
+-  }
+-  return sha;
+ }
+ 
+ /**
+@@ -1540,6 +1596,30 @@ export function bunExeName(cfg: Config): string {
+   return "bun-profile";
+ }
+ 
++function findHostCc(): string {
++  // OHOS cross-compilation requires the system GCC (not LLVM clang) because
++  // GCC supplies crtbegin.o/crtend.o and compatible crt startup files/link
++  // behavior that the OHOS toolchain expects. This may fail on systems where
++  // /usr/bin/gcc is symlinked to clang (e.g., some container images).
++  for (const name of ["/usr/bin/gcc", "/usr/bin/cc", "/bin/gcc", "/bin/cc"]) {
++    if (existsSync(name)) return name;
++  }
++  return "cc"; // fallback
++}
++
++function findOhosSdkRoot(): string | undefined {
++  // Environment variable takes priority (standard for cross-compilation toolchains).
++  const envRoot = process.env.OHOS_SDK_ROOT;
++  if (envRoot && existsSync(resolve(envRoot, "ohos/native/sysroot"))) {
++    return envRoot;
++  }
++  const candidates = [resolve(homedir(), "setup-ohos-sdk"), resolve(homedir(), "ohos-sdk"), "/opt/ohos-sdk"];
++  for (const dir of candidates) {
++    if (existsSync(resolve(dir, "ohos/native/sysroot"))) return dir;
++  }
++  return undefined;
++}
++
+ /**
+  * Whether this config produces a stripped `bun` alongside `bun-profile`.
+  *
+@@ -1565,7 +1645,9 @@ export function formatConfig(cfg: Config, exe: string): string {
+     `  ${label("target")} ${cfg.os}-${cfg.arch}${cfg.abi !== undefined ? "-" + cfg.abi : ""}`,
+     `  ${label("build type")} ${cfg.buildType}`,
+     `  ${label("build dir")} ${relBuildDir}`,
+-    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}${cfg.debug && !cfg.ci ? " (pinned; rm <build dir>/git-revision to refresh)" : ""}`,
++    // Revision makes it obvious why configure re-ran after a commit
++    // (the sha changes → the build's -Dsha equivalent changes → build.ninja differs).
++    `  ${label("revision")} ${cfg.revision === "unknown" ? "unknown" : cfg.revision.slice(0, 10)}`,
+   ];
+   const features: string[] = [];
+   if (cfg.lto) features.push("lto");
+@@ -1586,15 +1668,10 @@ export function formatConfig(cfg: Config, exe: string): string {
+   for (const name of Object.keys(cfg.localDeps)) features.push(`local:${name}`);
+   if (cfg.packageManager !== "bun") features.push(`package-manager:${cfg.packageManager}`);
+   if (cfg.mode !== "full") features.push(`mode:${cfg.mode}`);
+-  // Version pin overrides — show an identifying value so you catch "forgot
+-  // to revert my WebKit test branch" before the build goes weird. Strip the
+-  // autobuild- prefix so preview tags show their sha instead of the prefix.
+-  if (cfg.webkitVersion !== versionDefaults.webkitVersion) {
+-    const v = cfg.webkitVersion.startsWith("autobuild-")
+-      ? cfg.webkitVersion.slice("autobuild-".length)
+-      : cfg.webkitVersion;
+-    features.push(`webkit-version:${/^[0-9a-f]{40}$/.test(v) ? v.slice(0, 10) : v}`);
+-  }
++  // Version pin overrides — show a short hash so you catch "forgot to
++  // revert my WebKit test branch" before the build goes weird.
++  if (cfg.webkitVersion !== versionDefaults.webkitVersion)
++    features.push(`webkit-version:${cfg.webkitVersion.slice(0, 10)}`);
+   if (cfg.nodejsVersion !== versionDefaults.nodejsVersion) features.push(`nodejs:${cfg.nodejsVersion}`);
+   lines.push(`  ${label("features")} ${features.length > 0 ? c.cyan(features.join(", ")) : c.dim("(none)")}`);
+   return lines.join("\n");
+diff --git a/scripts/build/deps/cares.ts b/scripts/build/deps/cares.ts
+index 38ac7cb52f4..944c61eb1db 100644
+--- a/scripts/build/deps/cares.ts
++++ b/scripts/build/deps/cares.ts
+@@ -172,7 +172,7 @@ const POSIX = def1([
+   "HAVE_CLOCK_GETTIME_MONOTONIC", "HAVE_FCNTL_O_NONBLOCK",
+   "HAVE_GETIFADDRS", "HAVE_GETTIMEOFDAY", "HAVE_IF_INDEXTONAME",
+   "HAVE_IF_NAMETOINDEX", "HAVE_INET_NTOP", "HAVE_INET_PTON",
+-  "HAVE_IOCTL", "HAVE_IOCTL_FIONBIO", "HAVE_IOCTL_SIOCGIFADDR", "HAVE_MEMMEM",
++  "HAVE_IOCTL", "HAVE_IOCTL_FIONBIO", "HAVE_IOCTL_SIOCGIFADDR",
+   "HAVE_PIPE", "HAVE_POLL", "HAVE_STRCASECMP", "HAVE_STRNCASECMP", "HAVE_WRITEV",
+ ]);
+ 
+@@ -183,7 +183,7 @@ const LINUX = def1([
+   "HAVE_MSG_NOSIGNAL", "HAVE_PIPE2",
+ ]);
+ 
+-// glibc + musl have these; bionic only has the non-_r variants.
++// glibc + musl have these; bionic and OHOS musl only have the non-_r variants.
+ // prettier-ignore
+ const LINUX_NETDB_R = def1([
+   "HAVE_GETSERVBYPORT_R", "HAVE_GETSERVBYNAME_R",
+@@ -288,8 +288,10 @@ function configH(cfg: Config): string {
+     platform = `${POSIX}\n${FREEBSD}`;
+     types = POSIX_SOCKET_TYPES;
+   } else {
+-    const abiExtra = cfg.abi === "android" ? ANDROID : LINUX_NETDB_R;
+-    platform = `${POSIX}\n${LINUX}\n${abiExtra}`;
++    const abiExtra = cfg.abi === "android" ? ANDROID : cfg.ohos ? "" : LINUX_NETDB_R;
++    // memmem is a GNU extension not available in OHOS musl.
++    const memmem = cfg.ohos ? "" : "#define HAVE_MEMMEM 1\n";
++    platform = `${POSIX}\n${LINUX}\n${memmem}${abiExtra}`;
+     types = POSIX_SOCKET_TYPES;
+   }
+   return `/* Generated by scripts/build/deps/cares.ts for ${cfg.os}-${cfg.arch} */
+diff --git a/scripts/build/deps/mimalloc.ts b/scripts/build/deps/mimalloc.ts
+index 5e491a9abde..c35e112cb1d 100644
+--- a/scripts/build/deps/mimalloc.ts
++++ b/scripts/build/deps/mimalloc.ts
+@@ -69,6 +69,16 @@ export const mimalloc: Dependency = {
+     // bun_alloc's lazy arena opt out the same way on their side.
+     if (cfg.linux) defines.MI_DEFAULT_ALLOW_THP = 0;
+ 
++    // Skip prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, ...) after each mmap.
++    // It needs CONFIG_ANON_VMA_NAME (5.17+); on kernels without it every
++    // call returns EINVAL — pure syscall overhead on the startup path.
++    // Whether the call is even compiled depends on whether the build
++    // toolchain's <sys/prctl.h> defines PR_SET_VMA, which made strace
++    // output diverge between toolchains. Disable it outright; the VMA
++    // label is debugging sugar we don't rely on.
++    // OHOS seccomp blocks prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME).
++    if (cfg.linux || cfg.ohos) defines.MI_NO_SET_VMA_NAME = 1;
++
+     if (cfg.abi === "musl") defines.MI_LIBC_MUSL = 1;
+     if (override) defines.MI_MALLOC_OVERRIDE = true;
+ 
+diff --git a/scripts/build/deps/webkit.ts b/scripts/build/deps/webkit.ts
+index 7e8ddecce2a..d3f2042fc35 100644
+--- a/scripts/build/deps/webkit.ts
++++ b/scripts/build/deps/webkit.ts
+@@ -39,6 +39,7 @@ export const WEBKIT_VERSION = "2e2aa2290fac856d6f451ceacb58f7f5b44dd057";
+  *   like the old cmake — avoids debug/release mixing.
+  */
+ 
++import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { join, resolve } from "node:path";
+ import type { Config } from "../config.ts";
+@@ -66,7 +67,7 @@ function prebuiltSuffix(cfg: Config): string {
+ }
+ 
+ function prebuiltUrl(cfg: Config): string {
+-  const os = cfg.windows ? "windows" : cfg.darwin ? "macos" : cfg.freebsd ? "freebsd" : "linux";
++  const os = cfg.windows ? "windows" : cfg.darwin ? "macos" : cfg.freebsd ? "freebsd" : cfg.ohos ? "ohos" : "linux";
+   const arch = cfg.arm64 ? "arm64" : "amd64";
+   const name = `bun-webkit-${os}-${arch}${prebuiltSuffix(cfg)}`;
+   const version = cfg.webkitVersion;
+@@ -97,7 +98,9 @@ function prebuiltDestDir(cfg: Config): string {
+           ? "-macos"
+           : cfg.abi === "android"
+             ? "-android"
+-            : "";
++            : cfg.ohos
++              ? "-ohos"
++              : "";
+   const archKey = cfg.arm64 ? "-arm64" : "";
+   return resolve(cfg.cacheDir, `webkit-${version16}${osKey}${archKey}${prebuiltSuffix(cfg)}`);
+ }
+@@ -137,7 +140,7 @@ function prebuiltIcuLibs(cfg: Config): string[] {
+     const d = cfg.debug ? "d" : "";
+     return [`lib/sicudt${d}.lib`, `lib/sicuin${d}.lib`, `lib/sicuuc${d}.lib`];
+   }
+-  if (cfg.linux || cfg.freebsd) {
++  if (cfg.linux || cfg.freebsd || cfg.ohos) {
+     return ["lib/libicudata.a", "lib/libicui18n.a", "lib/libicuuc.a"];
+   }
+   return []; // darwin: system ICU
+@@ -190,6 +193,57 @@ export const webkit: Dependency = {
+   versionMacro: "WEBKIT",
+ 
+   source: cfg => {
++    // OHOS local build: fall through to the local cmake path below.
++    // OHOS prebuilt: use locally installed bun-webkit (formula) instead of
++    // downloading. The build environment pre-populates the cache from
++    // OHOS_WEBKIT_ROOT.
++    if (cfg.ohos && cfg.webkit === "prebuilt") {
++      const destDir = prebuiltDestDir(cfg);
++      const identity = `${cfg.webkitVersion}${prebuiltSuffix(cfg)}`;
++      const identityPath = join(destDir, ".identity");
++      const ohosRoot = process.env.OHOS_WEBKIT_ROOT;
++      // Check if cache was pre-populated by the formula; skip if identity matches.
++      if (!existsSync(identityPath) || readFileSync(identityPath, "utf-8").trim() !== identity) {
++        if (!ohosRoot) {
++          throw new Error(
++            "OHOS build requires OHOS_WEBKIT_ROOT env var pointing to bun-webkit installation.\n" +
++              "  Install with: brew install bun-webkit",
++          );
++        }
++        mkdirSync(destDir, { recursive: true });
++        mkdirSync(join(destDir, "lib"), { recursive: true });
++        mkdirSync(join(destDir, "include"), { recursive: true });
++        for (const lib of ["libJavaScriptCore.a", "libWTF.a", "libbmalloc.a"]) {
++          symlinkSync(join(ohosRoot, "lib", lib), join(destDir, "lib", lib));
++        }
++        // bun-webkit does not bundle ICU (OHOS uses icu4c@78 separately).
++        // prebuiltIcuLibs() returns lib/libicu*.a relative to destDir, so the
++        // link command expects them in the webkit cache dir. Symlink from the
++        // ohos-icu scaffold (cfg.ohosIcuDir, default build/ohos-icu/target).
++        if (cfg.ohosIcuDir) {
++          for (const lib of ["libicudata.a", "libicui18n.a", "libicuuc.a"]) {
++            const icuSrc = join(cfg.ohosIcuDir!, "lib", lib);
++            if (existsSync(icuSrc)) {
++              symlinkSync(icuSrc, join(destDir, "lib", lib));
++            }
++          }
++        }
++        const inc = join(ohosRoot, "include", "webkit");
++        symlinkSync(join(inc, "JavaScriptCore"), join(destDir, "include", "JavaScriptCore"));
++        symlinkSync(join(inc, "wtf"), join(destDir, "include", "wtf"));
++        symlinkSync(join(inc, "bmalloc"), join(destDir, "include", "bmalloc"));
++        const cmakeCfg = join(inc, "cmakeconfig.h");
++        if (existsSync(cmakeCfg)) cpSync(cmakeCfg, join(destDir, "include", "cmakeconfig.h"));
++        writeFileSync(identityPath, identity);
++      }
++      return {
++        kind: "prebuilt",
++        identity,
++        destDir,
++        url: ohosRoot ? `file://${ohosRoot}` : `file:///dev/null`, // Already set up; fetch checks identity first
++      };
++    }
++
+     if (cfg.webkit === "prebuilt") {
+       const src: Source = {
+         kind: "prebuilt",
+@@ -250,7 +304,7 @@ export const webkit: Dependency = {
+     // -no-pie rides along in CMAKE_C_FLAGS so try_compile() probes link on
+     // PIE-default distros — without it the driver still passes -pie and the
+     // -fno-pic probe object fails R_X86_64_32S relocation, killing FindThreads.
+-    if (cfg.unix && cfg.abi !== "android") optFlags.push("-fno-pic", "-fno-pie", "-no-pie");
++    if (cfg.unix && cfg.abi !== "android" && !cfg.ohos) optFlags.push("-fno-pic", "-fno-pie", "-no-pie");
+     if (cfg.lto) optFlags.push("-flto=thin");
+     if (cfg.pgoGenerate) optFlags.push(`-fprofile-generate=${cfg.pgoGenerate}`);
+     if (cfg.pgoUse) {
+@@ -318,12 +372,30 @@ export const webkit: Dependency = {
+             CMAKE_FIND_ROOT_PATH_MODE_INCLUDE: "BOTH",
+           }
+         : {}),
++      ...(cfg.ohos
++        ? {
++            CMAKE_SYSTEM_NAME: "Linux",
++            CMAKE_SYSTEM_PROCESSOR: "aarch64",
++            CMAKE_C_COMPILER: cfg.cc,
++            CMAKE_CXX_COMPILER: cfg.cxx,
++            CMAKE_TRY_COMPILE_TARGET_TYPE: "STATIC_LIBRARY",
++            CMAKE_FIND_ROOT_PATH: cfg.ohosSysroot,
++            CMAKE_PREFIX_PATH: cfg.ohosIcuDir,
++            ICU_ROOT: cfg.ohosIcuDir,
++            CMAKE_THREAD_LIBS_INIT: "-lpthread",
++            CMAKE_HAVE_THREADS_LIBRARY: "1",
++            CMAKE_DL_LIBS: "",
++            CMAKE_FIND_ROOT_PATH_MODE_PACKAGE: "BOTH",
++            CMAKE_FIND_ROOT_PATH_MODE_LIBRARY: "BOTH",
++            CMAKE_FIND_ROOT_PATH_MODE_INCLUDE: "BOTH",
++          }
++        : {}),
+       // Match bun's -fno-pic: WebKit's CMake defaults POSITION_INDEPENDENT_CODE
+       // to ON for static-archive targets, which puts ~550 KB of vtables into
+       // .data.rel.ro. We link -no-pie so this is dead weight in the RW
+       // PT_LOAD. Android (PIE) overrides via the -fPIC in optFlags above
+       // never being suppressed there.
+-      ...(cfg.abi !== "android" ? { CMAKE_POSITION_INDEPENDENT_CODE: "OFF" } : {}),
++      ...(cfg.abi !== "android" && !cfg.ohos ? { CMAKE_POSITION_INDEPENDENT_CODE: "OFF" } : {}),
+       PORT: "JSCOnly",
+       ENABLE_STATIC_JSC: "ON",
+       USE_THIN_ARCHIVES: "OFF",
+@@ -388,6 +460,66 @@ export const webkit: Dependency = {
+       };
+     }
+ 
++    if (cfg.ohos) {
++      const { ohosSysroot, ohosCrossLibs, ohosIcuDir, cc, cxx } = cfg;
++      const targetFlag = `--target=aarch64-linux-ohos`;
++      const sysrootFlag = ohosSysroot ? `--sysroot=${ohosSysroot}` : "";
++      const icuInclude = ohosIcuDir ? `-I${ohosIcuDir}/include` : "";
++      if (ohosCrossLibs) {
++        args.CMAKE_CXX_FLAGS = [
++          optFlagStr,
++          targetFlag,
++          sysrootFlag,
++          "-D__MUSL__",
++          "-mbranch-protection=none",
++          "-mno-outline-atomics",
++          `-nostdinc++ -I${ohosCrossLibs}/libcxx/include/v1`,
++          `-I${ohosCrossLibs}/libcxxabi/include`,
++          icuInclude,
++          "-fno-c++-static-destructors",
++          "-std=gnu++23",
++        ]
++          .filter(Boolean)
++          .join(" ");
++        args.CMAKE_C_FLAGS = [
++          optFlagStr,
++          targetFlag,
++          sysrootFlag,
++          "-D__MUSL__",
++          "-mbranch-protection=none",
++          "-mno-outline-atomics",
++          icuInclude,
++        ]
++          .filter(Boolean)
++          .join(" ");
++        // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
++        // crtendS.o). clang --target=aarch64-linux-ohos auto-adds them, failing
++        // the link. -nostartfiles skips only crt begin/end (keeps compiler-rt
++        // + libc auto-add). Pass explicit musl Scrt1.o/crti.o/crtn.o instead.
++        // NOT -nodefaultlibs — that would also drop libclang_rt.builtins.a
++        // (compiler-rt, which we self-compiled and installed to resource dir).
++        const ohosSysrootLib = `${cfg.ohosSysroot}/usr/lib/aarch64-linux-ohos`;
++        const ohosLinkFlags = `-nostartfiles ${ohosSysrootLib}/Scrt1.o ${ohosSysrootLib}/crti.o ${ohosSysrootLib}/crtn.o -L${ohosCrossLibs}/libcxx/lib -L${ohosCrossLibs}/libcxxabi/lib -L${ohosCrossLibs}/libunwind/lib -L${ohosSysrootLib} -lc++ -lc++abi -lunwind -lc`;
++        args.CMAKE_EXE_LINKER_FLAGS = ohosLinkFlags;
++        args.CMAKE_SHARED_LINKER_FLAGS = ohosLinkFlags;
++      }
++      if (ohosIcuDir) {
++        // hostBin is sibling of ohosIcuDir's parent: ohosIcuDir="<prefix>/target" → hostBin="<prefix>/host/bin"
++        const hostBin = resolve(ohosIcuDir, "..", "host", "bin");
++        for (const [key, exe] of [
++          ["ICU_GENDATA_EXECUTABLE", "genrb"],
++          ["ICU_GENCCODE_EXECUTABLE", "genccode"],
++          ["ICU_GENCMN_EXECUTABLE", "gencmn"],
++          ["ICU_PKGDATA_EXECUTABLE", "pkgdata"],
++        ] as const) {
++          const exePath = resolve(hostBin, exe);
++          if (existsSync(exePath)) {
++            args[key] = exePath;
++          }
++        }
++      }
++    }
++
+     return spec;
+   },
+ 
+@@ -434,6 +566,13 @@ export const webkit: Dependency = {
+         resolve(icuRoot, "lib", "libicudata.a"),
+       );
+     }
++    if (cfg.ohos && cfg.ohosIcuDir) {
++      libs.push(
++        resolve(cfg.ohosIcuDir, "lib", "libicudata.a"),
++        resolve(cfg.ohosIcuDir, "lib", "libicui18n.a"),
++        resolve(cfg.ohosIcuDir, "lib", "libicuuc.a"),
++      );
++    }
+ 
+     const includes = [
+       // ABSOLUTE — resolved here because they're in the build dir, not src.
+diff --git a/scripts/build/deps/zstd.ts b/scripts/build/deps/zstd.ts
+index 8bf87f03562..8763d33b3bf 100644
+--- a/scripts/build/deps/zstd.ts
++++ b/scripts/build/deps/zstd.ts
+@@ -41,6 +41,11 @@ export const zstd: Dependency = {
+     commit: ZSTD_COMMIT,
+   }),
+ 
++  patches: (cfg: import("../config.ts").Config) => {
++    if (cfg.ohos) return ["patches/zstd/ohos-qsort-r.patch"];
++    return [];
++  },
++
+   build: cfg => {
+     const sources = [...SOURCES];
+     const defines: Record<string, number | true> = {
+diff --git a/scripts/build/flags.ts b/scripts/build/flags.ts
+index 0b377562026..b78289fa376 100644
+--- a/scripts/build/flags.ts
++++ b/scripts/build/flags.ts
+@@ -67,10 +67,20 @@ export const cpuTargetFlags: Flag[] = [
+     when: c => c.windows && c.arm64,
+     desc: "ARM64 Windows: clang-cl prefix required (/clang: passes to clang)",
+   },
++  {
++    flag: ["-march=armv8-a", "-mtune=cortex-a53"],
++    when: c => c.ohos && c.arm64,
++    desc: "OHOS aarch64: ARMv8.0 baseline (no crypto, no SVE, no dotprod, no LSE)",
++  },
+   {
+     flag: "-march=nehalem",
+-    when: c => c.x64,
+-    desc: "x64: Nehalem (2008) — no AVX, broadest compatibility",
++    when: c => c.x64 && c.baseline,
++    desc: "x64 baseline: Nehalem (2008) — no AVX, broadest compatibility",
++  },
++  {
++    flag: "-march=haswell",
++    when: c => c.x64 && !c.baseline,
++    desc: "x64 default: Haswell (2013) — AVX2, BMI2 available",
+   },
+ ];
+ 
+@@ -203,6 +213,54 @@ export const globalFlags: Flag[] = [
+     desc: "macOS cross: address-significance table for the linker's safe ICF",
+   },
+ 
++  // ─── OHOS cross-compilation ───
++  {
++    flag: c => [
++      `--target=aarch64-linux-ohos`,
++      `--sysroot=${c.ohosSysroot!}`,
++      `-D__MUSL__`,
++      `-D__OHOS__`,
++      `-mbranch-protection=none`,
++      `-mno-outline-atomics`,
++    ],
++    when: c => c.ohos && c.arm64,
++    desc: "OHOS target triple + sysroot + musl libc (no PAC/BTI/outline-atomics for OHOS device compat)",
++  },
++  {
++    flag: "-Wno-macro-redefined",
++    when: c => c.ohos,
++    desc: "OHOS: suppress WebKit cmakeconfig vs PlatformHave.h HAVE_INT128_T conflict",
++  },
++  {
++    flag: c => [
++      `-nostdinc++`,
++      `-I${c.ohosCrossLibs}/libcxx/include/v1`,
++      `-I${c.ohosCrossLibs}/libcxxabi/include`,
++      `-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE`,
++      `-D_LIBCPP_HAS_NO_LOCALIZATION`,
++    ],
++    when: c => c.ohos && !!c.ohosCrossLibs,
++    lang: "cxx",
++    desc: "OHOS: use musl-compatible LLVM 22 libc++ headers",
++  },
++  {
++    flag: c => [`-I${c.ohosIcuDir!}/include`],
++    when: c => c.ohos && !!c.ohosIcuDir,
++    desc: "OHOS: use cross-compiled ICU headers (sysroot ICU is incomplete); no U_DISABLE_RENAMING to match ICU lib symbol versions",
++  },
++  {
++    flag: "-fno-c++-static-destructors",
++    when: c => c.ohos,
++    lang: "cxx",
++    desc: "OHOS: match libc++ build config",
++  },
++  // OHOS PIE (compile-time) — must be in globalFlags so compiler sees it; -pie stays in linkerFlags
++  {
++    flag: "-fPIE",
++    when: c => c.ohos,
++    desc: "OHOS PIE: position-independent executable (applied to C and C++ since OHOS requires PIE for all code)",
++  },
++
+   // ─── CPU target ───
+   ...cpuTargetFlags,
+   {
+@@ -300,10 +358,16 @@ export const globalFlags: Flag[] = [
+   {
+     // Nix LLVM doesn't support zstd — but we target standard distros.
+     // Nix users can override via profile if needed.
++    // OHOS host LLVM 22.1.7 ships without zstd; emit uncompressed -g3.
+     flag: ["-g3", "-gz=zstd"],
+-    when: c => c.unix && c.debug,
++    when: c => c.unix && c.debug && !c.ohos,
+     desc: "Full debug info, zstd-compressed",
+   },
++  {
++    flag: "-g3",
++    when: c => c.unix && c.debug && c.ohos,
++    desc: "Full debug info, uncompressed (OHOS host LLVM lacks zstd)",
++  },
+   {
+     flag: ["-g", "-gz=zstd"],
+     when: c => c.unix && c.release && !c.lto,
+@@ -495,8 +559,27 @@ export const globalFlags: Flag[] = [
+     // WebKit macos -lto prebuilts and rustc's -Clinker-plugin-lto bitcode are
+     // both ThinLTO-summaried, so this makes the whole link one uniform
+     // ThinLTO graph with cross-module importing across C++/Rust/JSC
+-    // boundaries. All platforms now use ThinLTO (the linux JSC ThinLTO
+-    // miscompile was fixed in the WebKit prebuilt).
++    // boundaries. Darwin only for now — see the -flto=full entry below.
++    flag: "-flto=thin",
++    when: c => c.darwin && c.lto,
++    desc: "Thin link-time optimization",
++  },
++  {
++    // Linux stays on full LTO: the LLVM 22 ThinLTO backend pipeline
++    // (rust-lld) miscompiles JavaScriptCore on linux at every opt level
++    // above --lto-O0 — a JIT-tier correctness bug plus several bundler hangs
++    // in the test suite, on both x64 and aarch64, with cross-module
++    // importing disabled, ICF ruled out, and WPD ruled out. The same
++    // bitcode through ld64.lld on darwin is fine. Full LTO uses a different
++    // (regular-LTO) pass pipeline over one merged module and has shipped
++    // green for months. Cost: the link is serial (~14 min vs ~1.5 min).
++    // Rust<->C++ cross-language inlining still happens: the Rust side emits
++    // one fat, summary-less bitcode module (CARGO_PROFILE_RELEASE_LTO=fat
++    // under -Clinker-plugin-lto — see rust.ts) that joins the same
++    // regular-LTO partition as the C++, so nothing goes through the
++    // miscompiling ThinLTO backends. Revisit ThinLTO once the bad pass is
++    // isolated — the repro is `bun -e 'require("axobject-query")'` failing
++    // in the DFG tier.
+     flag: "-flto=thin",
+     when: c => c.unix && c.lto,
+     desc: "Thin link-time optimization",
+@@ -536,7 +619,11 @@ export const globalFlags: Flag[] = [
+     // (typeidCompatibleVTable entries) and whole-program devirtualization
+     // runs in index-based mode via --lto-whole-program-visibility at link
+     // time. 0 is also the default for rustc, for Apple targets, and for the
+-    // WebKit -lto prebuilts, so this is the configuration that can't drift.
++    // WebKit macos/windows -lto prebuilts, so this is the configuration that
++    // can't drift. Windows: -fwhole-program-vtables is never passed there
++    // (see above) so 0 is already the default — kept explicit so the
++    // ThinLTO graph can't drift if that ever changes. Not linux: full LTO
++    // (no per-module summaries, so the flag is meaningless there).
+     flag: "-fno-split-lto-unit",
+     when: c => c.lto,
+     desc: "Index-based WPD: keep type metadata in the ThinLTO summaries, no regular-LTO half",
+@@ -596,6 +683,12 @@ export const bunOnlyFlags: Flag[] = [
+     lang: "cxx",
+     desc: "C++23 with GNU extensions (required to match WebKit's ABI on Linux/FreeBSD)",
+   },
++  {
++    flag: "-std=gnu++23",
++    when: c => c.ohos,
++    lang: "cxx",
++    desc: "C++23 with GNU extensions (match new WebKit prebuilt ABI for OHOS compat)",
++  },
+   {
+     flag: "-std=c++23",
+     when: c => c.darwin,
+@@ -665,7 +758,7 @@ export const bunOnlyFlags: Flag[] = [
+   },
+   {
+     flag: ["-fno-pic", "-fno-pie"],
+-    when: c => c.unix && c.abi !== "android",
++    when: c => c.unix && c.abi !== "android" && !c.ohos,
+     desc: "No position-independent code (we're a final executable)",
+   },
+   {
+@@ -695,6 +788,23 @@ export const bunOnlyFlags: Flag[] = [
+     when: c => c.unix,
+     desc: "Treat most warnings as errors; suppress known-noisy ones",
+   },
++  {
++    // Any cross-compile with --target set (linux gnu/musl cross, darwin cross,
++    // freebsd cross, android cross): clang strictly checks
++    // -Wundefined-var-template even though the template static's definition
++    // lives in the WebKit prebuilt static lib (resolved at link time). JSC
++    // headers declare s_info as a template static and define it in a .cpp;
++    // bun's own bindings (e.g. JSBuffer.cpp) reference it directly, so the PCH
++    // system_header pragma doesn't suppress the warning there. Native builds
++    // (host==target, no crossTarget) and clang-cl (windows cross, which uses a
++    // different driver that doesn't trip this) are excluded. -Werror escalates
++    // it. Note: the condition is crossTarget-based, not arch-mismatch-based —
++    // aarch64-linux → arm64-darwin is a cross-compile (same arch, different
++    // OS) and needs this just as much as aarch64 → x86_64-linux.
++    flag: "-Wno-undefined-var-template",
++    when: c => c.crossTarget !== undefined && !c.windows,
++    desc: "Cross-compile (non-windows): suppress -Wundefined-var-template (WebKit template statics resolved at link)",
++  },
+   {
+     // Debug adds -Werror=unused; release omits it (vars used only in ASSERT)
+     flag: ["-Werror=unused", "-Wno-unused-function"],
+@@ -864,23 +974,20 @@ export const linkerFlags: Flag[] = [
+     // only fires for classes explicitly annotated [[clang::lto_visibility]],
+     // i.e. never. A static executable that only dlopens C-ABI addons (NAPI)
+     // satisfies the whole-program assumption. ld64.lld has no named option
+-    // for this; -mllvm reaches the underlying cl::opt directly.
++    // for this; -mllvm reaches the underlying cl::opt directly. Darwin only:
++    // linux is on full LTO where this was never enabled.
+     flag: ["-Wl,-mllvm,-whole-program-visibility"],
+     when: c => c.darwin && c.lto,
+     desc: "Enable index-based whole-program devirtualization at link time",
+   },
+   {
+-    // ELF spelling of the entry above. The WebKit -lto prebuilts carry the
+-    // !type/!vcall_visibility metadata (built with -fwhole-program-vtables),
+-    // so this upgrades JSC/WTF's exported classes to hidden LTO visibility
+-    // and lets WPD fire on them, not just on our -fvisibility=hidden classes.
+-    flag: ["-Wl,--lto-whole-program-visibility"],
+-    when: c => c.unix && !c.darwin && c.lto,
+-    desc: "Enable index-based whole-program devirtualization at link time (lld ELF)",
++    flag: ["-flto=thin", "-fwhole-program-vtables", "-fforce-emit-vtables"],
++    when: c => c.darwin && c.lto,
++    desc: "LTO at link time (matches compile-side -flto=thin)",
+   },
+   {
+     flag: ["-flto=thin", "-fwhole-program-vtables", "-fforce-emit-vtables"],
+-    when: c => c.unix && c.lto,
++    when: c => c.unix && !c.darwin && c.lto,
+     desc: "LTO at link time (matches compile-side -flto=thin)",
+   },
+   {
+@@ -1163,6 +1270,80 @@ export const linkerFlags: Flag[] = [
+     desc: "Sort startup-hot functions to the front of __text (cuts resident binary pages)",
+   },
+ 
++  // ─── OHOS ───
++  {
++    flag: c => [`--target=aarch64-linux-ohos`, `--sysroot=${c.ohosSysroot!}`],
++    when: c => c.ohos,
++    desc: "OHOS target triple + sysroot at link time",
++  },
++  {
++    flag: "-Wl,--allow-multiple-definition",
++    when: c => c.ohos,
++    desc: "OHOS: allow iostream stub duplicate; mimalloc override disabled",
++  },
++  {
++    flag: c =>
++      [
++        // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
++        // crtendS.o). clang auto-adds them, failing bun link. -nostartfiles
++        // skips crt begin/end (keeps compiler-rt + libc). Explicit musl crt.
++        // NOT -nodefaultlibs (would drop compiler-rt — see webkit.ts).
++        "-nostartfiles",
++        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/Scrt1.o`,
++        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crti.o`,
++        `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crtn.o`,
++        `-L${c.ohosCrossLibs!}/libcxx/lib`,
++        `-L${c.ohosCrossLibs!}/libcxxabi/lib`,
++        `-L${c.ohosCrossLibs!}/libunwind/lib`,
++        `-L${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos`,
++        c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
++        "-lc++",
++        "-lc++abi",
++        "-l:libunwind.a", // static: no libunwind.so.1 exists on devices/CI image
++        "-lc",
++      ].filter(f => f !== ""),
++    when: c => c.ohos,
++    desc: "OHOS: link __n1 libc++ + libc++abi + libunwind + musl crt (-nostartfiles)",
++  },
++  {
++    flag: [
++      "-Wl,--as-needed",
++      "-Wl,-z,stack-size=8192000",
++      "-Wl,-z,lazy",
++      "-Wl,-z,norelro",
++      "-Wl,-O2",
++      "-Wl,--sort-section=name",
++      "-Wl,--hash-style=both",
++      "-Wl,--build-id=sha1",
++    ],
++    when: c => c.ohos,
++    desc: "OHOS linker tuning: 8MB stack (debug compression skipped — host LLVM lacks zlib)",
++  },
++  {
++    flag: ["-pie", "-Wl,-dynamic-linker=/system/lib/ld-musl-aarch64.so.1"],
++    when: c => c.ohos,
++    desc: "OHOS PIE: dynamic linking (allows fork/clone through seccomp)",
++  },
++  {
++    flag: "-Wl,--noinhibit-exec",
++    when: c => c.ohos,
++    desc: "OHOS: LLD alignment warnings → ignore (SCTLR_EL1.A is 0 on aarch64)",
++  },
++  {
++    // OHOS: mirror the Linux link block — full dynamic-list + version script.
++    // symbols.dyn exports v8/napi/uv symbols; linker.lds controls visibility.
++    // The OHOS shim symbols in linker.lds are UND on Linux → needs
++    // --undefined-version (added in the Linux block below).
++    flag: c => [
++      "-Wl,-Bsymbolic-functions",
++      "-rdynamic",
++      `-Wl,--dynamic-list=${c.cwd}/src/symbols.dyn`,
++      `-Wl,--version-script=${c.cwd}/src/linker.lds`,
++    ],
++    when: c => c.ohos,
++    desc: "OHOS: dynamic symbol list + version script (mirror linux block; exposes napi_/node_api_ for .node dlopen)",
++  },
++
+   // ─── Linux ───
+   {
+     flag: c => [`--target=${c.crossTarget!}`, `--sysroot=${c.sysroot!}`],
+@@ -1170,10 +1351,10 @@ export const linkerFlags: Flag[] = [
+     desc: "linux sysroot link (gnu: ubuntu:20.04+gcc-13; musl: alpine)",
+   },
+   {
+-    // Wrap glibc symbols whose default version on the sysroot's glibc (2.31)
+-    // is > 2.17. Each __wrap_X in workaround-missing-symbols.cpp pins to the
++    // Wrap glibc symbols whose default version on a modern build host is
++    // > 2.17. Each __wrap_X in workaround-missing-symbols.cpp pins to the
+     // 2.2.5/2.17 compat version (or a raw syscall) so the binary's verneed
+-    // never exceeds the floor.
++    // never exceeds the floor regardless of the host's glibc.
+     flag: [
+       "exp",
+       "exp2",
+@@ -1285,7 +1466,7 @@ export const linkerFlags: Flag[] = [
+   },
+   {
+     flag: ["-fno-pic", "-Wl,-no-pie"],
+-    when: c => c.linux && c.abi !== "android",
++    when: c => c.linux && c.abi !== "android" && !c.ohos,
+     desc: "No PIE (we don't need ASLR; simpler codegen)",
+   },
+   {
+@@ -1392,6 +1573,9 @@ export const linkerFlags: Flag[] = [
+       "-rdynamic",
+       `-Wl,--dynamic-list=${c.cwd}/src/symbols.dyn`,
+       `-Wl,--version-script=${c.cwd}/src/linker.lds`,
++      // linker.lds contains OHOS shim symbols (syscall, close_range, etc.)
++      // that are UND on Linux. lld errors without this flag.
++      "-Wl,--undefined-version",
+     ],
+     when: c => c.linux,
+     desc: "Dynamic symbol list + version script",
+@@ -1434,13 +1618,13 @@ export const linkerFlags: Flag[] = [
+     //   LLVM_ENABLE_ZLIB or did not find zlib at build time`.
+     // We only fall onto rust-lld for cross-language LTO when rustc's LLVM is
+     // newer than the system clang/lld (see config.ts `cfg.ld` selection); in
+-    // that case the link-time flag is dropped and llvm-objcopy compresses
+-    // post-link instead (shims.ts elfDebugCompressPostlinkCommand) — an
+-    // uncompressed bun-profile is ~2x larger and every `--compile` test
+-    // copies it, so leaving it uncompressed times CI out.
++    // that case, drop the flag rather than fail the link. Larger debug
++    // sections in `bun-profile` is a build-size cost, not a correctness one —
++    // and only on agents where the LLVM versions diverge. The system lld path
++    // (linux/freebsd llvm-* packages) keeps compressing.
+     flag: "-Wl,--compress-debug-sections=zlib",
+-    when: c => (c.linux || c.freebsd) && c.ld !== c.rustLld,
+-    desc: "Compress ELF debug sections (post-link via llvm-objcopy with rust-lld — built without zlib)",
++    when: c => (c.linux || c.freebsd) && c.ld !== c.rustLld && !c.ohos,
++    desc: "Compress ELF debug sections (skipped with rust-lld and OHOS host LLVM — both built without zlib)",
+   },
+   {
+     flag: "-Wl,--gc-sections",
+@@ -1794,7 +1978,7 @@ export function computeDepFlags(cfg: Config): { cflags: string[]; cxxflags: stri
+ /**
+  * Just the -march/-mcpu/-mtune flags. For deps (WebKit) whose own build system
+  * sets -O/-g/sanitizer flags but never sets a CPU target, so without this they
+- * end up targeting generic x86-64 while the rest of bun targets nehalem.
++ * end up targeting generic x86-64 while the rest of bun targets haswell.
+  */
+ export function computeCpuTargetFlags(cfg: Config): string[] {
+   const out: string[] = [];
+diff --git a/scripts/build/rust.ts b/scripts/build/rust.ts
+index 5e4fa5c5f0a..be5099833e7 100644
+--- a/scripts/build/rust.ts
++++ b/scripts/build/rust.ts
+@@ -55,6 +55,7 @@ export function rustTriple(os: OS, arch: Arch, abi: Abi | undefined): string {
+   if (os === "darwin") return `${rustArch}-apple-darwin`;
+   if (os === "windows") return `${rustArch}-pc-windows-msvc`;
+   if (os === "freebsd") return `${rustArch}-unknown-freebsd`;
++  if (os === "ohos") return `${rustArch}-unknown-linux-ohos`;
+   // linux
+   assert(abi !== undefined, "linux build missing abi");
+   if (abi === "android") return `${rustArch}-linux-android`;
+@@ -95,13 +96,19 @@ export const allRustTargets = [
+   "aarch64-pc-windows-msvc",
+   "x86_64-unknown-freebsd",
+   "aarch64-unknown-freebsd",
++  "aarch64-unknown-linux-ohos",
+ ] as const;
+ 
+ /**
+  * Tier 3 targets — rustup ships no prebuilt `rust-std` for these, so
+  * `rustup target add` would fail and cargo needs `-Zbuild-std` (which in turn
+- * needs the `rust-src` component). As of nightly-2026-05, the only Tier 3
++ * needs the `rust-src` component). As of nightly-2026-07-20, the only Tier 3
+  * triple in CI's matrix is aarch64-freebsd.
++ *
++ * Note: aarch64-unknown-linux-ohos was previously listed here as Tier 3,
++ * but it was promoted to Tier 2 (with Host Tools) upstream — it has prebuilt
++ * `rust-std` (verified: static.rust-lang.org/dist/2026-07-20/rust-std-nightly-aarch64-unknown-linux-ohos.tar.gz
++ * returns HTTP 200). See https://doc.rust-lang.org/nightly/rustc/platform-support/openharmony.html
+  */
+ export function rustTargetIsTier3(triple: string): boolean {
+   return triple === "aarch64-unknown-freebsd";
+@@ -417,6 +424,9 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
+   // issue 30205), turning benign at-exit state into reported leaks.
+   if (!cfg.asan) rustflags.push("-Zshare-generics=y");
+   rustflags.push(...rustCpuTargetFlags(cfg));
++  // OHOS: sign the binary at link time via --code-sign (requires the OHOS
++  // signing linker, provided by the OHOS SDK's llvm/bin/ld.lld).
++  if (cfg.ohos) rustflags.push("-Clink-arg=--code-sign");
+   // `bun_core::build_options::ENABLE_ASAN = cfg!(bun_asan)` — must agree with
+   // the C++ `ASAN_ENABLED` macro so Global::exit() picks the same libc exit
+   // path (`exit` vs `quick_exit`) that c-bindings.cpp registered Bun__onExit on.
+diff --git a/scripts/build/shims.ts b/scripts/build/shims.ts
+index a2b28b029e9..296e68a4174 100644
+--- a/scripts/build/shims.ts
++++ b/scripts/build/shims.ts
+@@ -137,6 +137,34 @@ function needsMuslCrtDecompress(cfg: Config): boolean {
+ /** CRT objects clang's linux driver may pass. crt1/Scrt1 both covered so PIE-default changes don't matter. */
+ const MUSL_CRT_OBJECTS = ["Scrt1.o", "crt1.o", "crti.o", "crtn.o"];
+ 
++/**
++ * HarmonyOS app sandboxes SIGSYS-kill several seccomp-filtered syscalls
++ * (close_range, fchmodat2 — the kill fires before any errno fallback can
++ * run) and return sandbox-specific errno from a few libc calls
++ * (getpwuid_r, tmpfile, getcwd). ohos-compat-shim handles all of these
++ * with a probe-then-fallback interposer, historically LD_PRELOAD'd by the
++ * harmonybrew formula wrapper scripts. Linking a vendored copy
++ * (shims/ohos_compat_shim.c) straight into the executable removes the
++ * wrapper requirement — for bun itself AND for every `bun build --compile`
++ * output, which embeds this runtime. Tracked in workarounds.ts
++ * ("ohos-compat-shim-embed").
++ */
++function needsOhosCompatShim(cfg: Config): boolean {
++  return cfg.ohos;
++}
++
++/**
++ * The shim's interposed symbols are re-exported from the executable via the
++ * global list in src/linker.lds so dlopen'd native modules (.node/.so)
++ * resolve them from the main binary too — the executable is first in the
++ * loader's global lookup order, which matches LD_PRELOAD interposition
++ * semantics. NOTE: the version script's `local: *` overrides
++ * --export-dynamic-symbol/--dynamic-list in lld (verified empirically on
++ * LLD 21), so linker.lds is the only working export mechanism here.
++ * linkat/symlinkat/splice interposers are default-on and can be disabled
++ * per-symbol via OHOS_COMPAT_SHIM_DISABLE, same as the preload .so.
++ */
++
+ /**
+  * Register shim compile rules. Call once from rules.ts alongside the
+  * other registerXxxRules() calls.
+@@ -155,6 +183,15 @@ export function registerShimRules(n: Ninja, cfg: Config): void {
+     });
+   }
+ 
++  if (needsOhosCompatShim(cfg)) {
++    // Plain object compiled for the target; $flags carries the per-shim
++    // --target/sysroot flags from emitShims().
++    n.rule("shim_cc", {
++      command: `${q(cfg.cc)} $flags -O2 -c $in -o $out`,
++      description: "shim $out",
++    });
++  }
++
+   if (needsMachoPostlink(cfg)) {
+     // Host tool — compiled for the BUILD machine (no --target/-isysroot),
+     // since it runs as part of the link/strip commands on this host.
+@@ -200,6 +237,26 @@ export function emitShims(n: Ninja, cfg: Config): ShimLinkOpts {
+     implicitInputs.push(...machoPostlinkImplicitInputs(cfg));
+   }
+ 
++  if (needsOhosCompatShim(cfg)) {
++    const src = resolve(cfg.cwd, "scripts", "build", "shims", "ohos_compat_shim.c");
++    const out = resolve(cfg.buildDir, "ohos_compat_shim.o");
++    n.build({
++      outputs: [out],
++      rule: "shim_cc",
++      inputs: [src],
++      vars: {
++        // Same target/sysroot as the regular OHOS cc flags (flags.ts);
++        // -fPIC because the .o's symbols land in the PIE's dynamic table.
++        flags: [`--target=aarch64-linux-ohos`, `--sysroot=${cfg.ohosSysroot!}`, "-fPIC"].join(" "),
++      },
++    });
++    // A plain .o is always fully linked (no archive member selection), so
++    // its definitions interpose libc's regardless of position in the line.
++    // Dynamic-table export happens via src/linker.lds (see comment above).
++    ldflags.push(out);
++    implicitInputs.push(out);
++  }
++
+   if (cfg.darwin && cfg.asan) {
+     // macOS 26.4 ASAN dyld deadlock — see shims/asan-dyld-shim.c.
+     const src = resolve(cfg.cwd, "scripts", "build", "shims", "asan-dyld-shim.c");
+diff --git a/scripts/build/shims/ohos_compat_shim.c b/scripts/build/shims/ohos_compat_shim.c
+new file mode 100644
+index 00000000000..12a73d87d48
+--- /dev/null
++++ b/scripts/build/shims/ohos_compat_shim.c
+@@ -0,0 +1,1748 @@
++/*
++ * ohos_compat_shim.c — LD_PRELOAD compatibility shim for HarmonyOS-sandboxed
++ * aarch64/musl processes.
++ *
++ * HarmonyOS's application sandbox seccomp-filters several Linux syscalls that
++ * OpenHarmony itself (and the upstream kernel) supports, and returns
++ * unexpected errno values from a few libc calls that assume a traditional
++ * /etc/passwd-backed uid or a writable P_tmpdir. This library intercepts the
++ * *libc-symbol* level of those calls and falls back to a userspace
++ * implementation when the real one fails in the HarmonyOS-specific way.
++ *
++ * IMPORTANT — SCOPE: this only works for calls that resolve through a
++ * dynamically-linked libc symbol (syscall(), getpwuid_r(), tmpfile(), ...).
++ * Code that issues the syscall via inline assembly (e.g. Bun's rustix
++ * `linux_raw` backend for openat2/epoll_pwait2) never touches these symbols
++ * and cannot be reached by LD_PRELOAD interposition — see
++ * docs/ohos-preload-shim-feasibility.md for the full matrix. Nothing here
++ * replaces a source-level port; it only helps *prebuilt* dynamic-musl
++ * binaries survive the sandbox without a rebuild.
++ *
++ * Design rule for every intercepted symbol: resolve the real implementation
++ * via dlsym(RTLD_NEXT, ...) first and prefer it. Only fall back when the real
++ * call fails with the specific HarmonyOS-sandbox symptom (SIGSYS / ENOENT /
++ * EPERM as documented per-symbol below). For getpwuid_r/tmpfile/getcwd this
++ * makes the shim a safe no-op on any target where the real call already
++ * works — confirmed on-device. close_range is the one exception: on-device
++ * testing found that close_range() unconditionally raises SIGSYS on real
++ * HarmonyOS hardware for every parameter combination tried, independent of
++ * whether this (or any) library is preloaded — matching ohos-preflight's
++ * own a10_close_range probe (OH-container pass, HM-device fail) from the
++ * start. So the probe-then-fallback path below always lands on the
++ * fallback on this class of device; see the detailed note above
++ * close_range's probe for the full story (including a testing-methodology
++ * lesson: verify baseline behavior with `env -u LD_PRELOAD`, never trust a
++ * shell's ambient environment).
++ *
++ * close_range()/syscall(SYS_close_range) handling is adapted from
++ * https://github.com/hqzing/close-range-shim (MIT), which established this
++ * probe-then-fallback pattern for the same HarmonyOS seccomp behavior.
++ *
++ * Build: see ../Makefile (OHOS NDK clang, -shared -fPIC -ldl).
++ * Usage: LD_PRELOAD=/path/to/libohos_compat.so <program> ...
++ *
++ * Runtime toggles (comma-separated symbol names):
++ *   OHOS_COMPAT_SHIM_DISABLE — turn OFF a default-on interceptor
++ *                              (close_range, getpwuid_r, tmpfile, getcwd,
++ *                               fchmodat2, linkat, symlinkat, splice,
++ *                               epoll_pipe, getaddrinfo)
++ *
++ * Deliberately NOT implemented: pthread_cancel (musl stub is a no-op;
++ * emulating cancellation needs cooperative checkpoints in the target
++ * program, which a preload shim cannot inject). See README TODO.
++ */
++
++#define _GNU_SOURCE
++#include <dirent.h>
++#include <dlfcn.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <poll.h>
++#include <limits.h>
++#include <pthread.h>
++#include <pwd.h>
++#include <sched.h>
++#include <setjmp.h>
++#include <signal.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/epoll.h>
++#include <sys/ioctl.h>
++#include <sys/resource.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <time.h>
++#include <unistd.h>
++
++#if !defined(__aarch64__)
++#error "ohos_compat_shim.c: only supports aarch64 (HarmonyOS/OHOS target)"
++#endif
++
++/* /tmp is read-only in the OHOS sandbox; default TMPDIR so the program's own
++ * mkstemp/getenv temp calls land on a writable, auto-cleaned path. Preserves
++ * any user- or wrapper-set TMPDIR. */
++__attribute__((constructor))
++static void ohos_shim_init_tmpdir(void)
++{
++	if (!getenv("TMPDIR"))
++		setenv("TMPDIR", "/data/storage/el2/base/cache", 1);
++}
++
++/* ------------------------------------------------------------------ */
++/*  Runtime toggle parsing                                            */
++/* ------------------------------------------------------------------ */
++
++/* Returns 1 if `name` appears in the comma-separated list env var `var`. */
++static int env_list_has(const char *var, const char *name)
++{
++	const char *list = getenv(var);
++	if (!list || !*list)
++		return 0;
++
++	size_t name_len = strlen(name);
++	const char *p = list;
++	while (*p) {
++		const char *comma = strchr(p, ',');
++		size_t seg_len = comma ? (size_t)(comma - p) : strlen(p);
++		if (seg_len == name_len && strncmp(p, name, name_len) == 0)
++			return 1;
++		if (!comma)
++			break;
++		p = comma + 1;
++	}
++	return 0;
++}
++
++/*
++ * shim_disabled() are called from every interceptor
++ * entry point — including syscall(), which every non-close_range syscall in
++ * the process also routes through. A naive getenv()+scan on every single
++ * call would tax the hottest path in the library for no reason: the toggle
++ * env vars can't change under a running process, so parse them into a
++ * bitmask exactly once (idempotent even if two threads race into this
++ * before the mask is set — same env, same result, no lock needed) and turn
++ * every subsequent check into a cheap strcmp + bitwise AND.
++ */
++enum {
++	SD_CLOSE_RANGE = 1 << 0,
++	SD_GETPWUID_R  = 1 << 1,
++	SD_TMPFILE     = 1 << 2,
++	SD_GETCWD      = 1 << 3,
++	SD_FCHMODAT2   = 1 << 4,
++	SD_LINKAT      = 1 << 5,
++	SD_SYMLINKAT   = 1 << 6,
++	SD_SPLICE      = 1 << 7,
++	SD_EPOLL_PIPE  = 1 << 8,
++	SD_GETADDRINFO = 1 << 9,
++};
++
++static int g_disable_mask = -1;
++
++static void parse_toggle_masks(void)
++{
++	if (g_disable_mask >= 0)
++		return;
++
++	int d = 0;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "close_range"))
++		d |= SD_CLOSE_RANGE;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "getpwuid_r"))
++		d |= SD_GETPWUID_R;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "tmpfile"))
++		d |= SD_TMPFILE;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "getcwd"))
++		d |= SD_GETCWD;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "fchmodat2"))
++		d |= SD_FCHMODAT2;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "linkat"))
++		d |= SD_LINKAT;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "symlinkat"))
++		d |= SD_SYMLINKAT;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "splice"))
++		d |= SD_SPLICE;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "epoll_pipe"))
++		d |= SD_EPOLL_PIPE;
++	if (env_list_has("OHOS_COMPAT_SHIM_DISABLE", "getaddrinfo"))
++		d |= SD_GETADDRINFO;
++	g_disable_mask = d; /* set last: non-negative value doubles as "done" */
++}
++
++static int shim_disabled(const char *name)
++{
++	parse_toggle_masks();
++	if (strcmp(name, "close_range") == 0)
++		return !!(g_disable_mask & SD_CLOSE_RANGE);
++	if (strcmp(name, "getpwuid_r") == 0)
++		return !!(g_disable_mask & SD_GETPWUID_R);
++	if (strcmp(name, "tmpfile") == 0)
++		return !!(g_disable_mask & SD_TMPFILE);
++	if (strcmp(name, "getcwd") == 0)
++		return !!(g_disable_mask & SD_GETCWD);
++	if (strcmp(name, "fchmodat2") == 0)
++		return !!(g_disable_mask & SD_FCHMODAT2);
++	if (strcmp(name, "linkat") == 0)
++		return !!(g_disable_mask & SD_LINKAT);
++	if (strcmp(name, "symlinkat") == 0)
++		return !!(g_disable_mask & SD_SYMLINKAT);
++	if (strcmp(name, "splice") == 0)
++		return !!(g_disable_mask & SD_SPLICE);
++	if (strcmp(name, "epoll_pipe") == 0)
++		return !!(g_disable_mask & SD_EPOLL_PIPE);
++	if (strcmp(name, "getaddrinfo") == 0)
++		return !!(g_disable_mask & SD_GETADDRINFO);
++	return 0;
++}
++
++/* ------------------------------------------------------------------ */
++/*  close_range flags (kernel UAPI, may be missing from older headers) */
++/* ------------------------------------------------------------------ */
++#ifndef CLOSE_RANGE_UNSHARE
++# define CLOSE_RANGE_UNSHARE  (1U << 1)
++#endif
++#ifndef CLOSE_RANGE_CLOEXEC
++# define CLOSE_RANGE_CLOEXEC  (1U << 2)
++#endif
++#ifndef __NR_close_range
++# define __NR_close_range 436
++#endif
++#ifndef __NR_fchmodat2
++# define __NR_fchmodat2 452
++#endif
++
++/* ==================================================================== */
++/*  1. close_range() / syscall(SYS_close_range, ...)                    */
++/*     Probe-once + SIGSYS catch + userspace fallback via /proc/self/fd */
++/*     enumeration — pattern adapted from close-range-shim (MIT)        */
++/*     https://github.com/hqzing/close-range-shim.                      */
++/*                                                                       */
++/*  IMPORTANT — confirmed on-device with a guarded standalone repro,    */
++/*  not just reading docs: syscall(SYS_close_range, ...) unconditionally */
++/*  raises SIGSYS on this HarmonyOS device's real kernel, for every      */
++/*  parameter combination tried (a plain valid call, first>last,         */
++/*  garbage flags alike) — independent of whether this shim, or ANY      */
++/*  other library, is LD_PRELOAD-ed. This matches ohos-preflight's own   */
++/*  a10_close_range probe (OH-container pass, HM-device fail) exactly;   */
++/*  there is no more complicated "loading a third-party .so changes      */
++/*  what's allowed" story here — an earlier draft of this comment        */
++/*  claimed there was, based on a test run where the shell's ambient     */
++/*  LD_PRELOAD had been silently left pointing at a *different*,         */
++/*  narrower preload library by unrelated earlier testing, making every  */
++/*  "baseline" run in that session actually shimmed by something else.   */
++/*  Lesson, not a platform finding: verify with `env -u LD_PRELOAD`,     */
++/*  never trust a shell's ambient state to be clean.                     */
++/*                                                                        */
++/*  Practical effect: on this class of device, the probe below always    */
++/*  lands on CR_PROBE_FALLBACK — there is no "real syscall succeeds"     */
++/*  path to take here, though the code still supports one for other      */
++/*  devices/OS versions where close_range might actually work (matching  */
++/*  ohos-preflight's OH-container track, where this probe passes).       */
++/*  OHOS_COMPAT_SHIM_DISABLE=close_range does NOT reproduce true         */
++/*  no-shim baseline behavior in the sense of "the operation still       */
++/*  works" — the real call SIGSYS's every time regardless, so this       */
++/*  reproduces "preloaded but unprotected, no probe", which crashes.     */
++/*  See README's Known Platform Behavior section.                        */
++/* ==================================================================== */
++
++enum { CR_PROBE_UNKNOWN, CR_PROBE_WORKS, CR_PROBE_FALLBACK };
++static int cr_probe_state = CR_PROBE_UNKNOWN;
++/* Thread-local: multiple threads can independently be inside a guarded
++ * SIGSYS-catching attempt at once (proven by test/functional.c's
++ * pthread-based CLOSE_RANGE_UNSHARE test) — a shared jmp_buf across
++ * threads would let one thread's siglongjmp corrupt another's stack. */
++static __thread sigjmp_buf cr_sigsys_jmp;
++
++static void cr_sigsys_handler(int sig)
++{
++	(void)sig;
++	siglongjmp(cr_sigsys_jmp, 1);
++}
++
++typedef long (*real_syscall_fn)(long, ...);
++static real_syscall_fn real_syscall = NULL;
++
++/* Resolve and call the real (next-in-chain) syscall() with up to 6 args.
++ * Always passes 6 positional args regardless of how many the real
++ * syscall actually uses — harmless, matches how syscall() is normally
++ * called with a variable argument count. */
++static long cr_real_syscall(long n, long a0, long a1, long a2, long a3,
++			    long a4, long a5)
++{
++	if (!real_syscall)
++		real_syscall = (real_syscall_fn)dlsym(RTLD_NEXT, "syscall");
++	if (!real_syscall) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return real_syscall(n, a0, a1, a2, a3, a4, a5);
++}
++
++/* Attempt a real raw-syscall delegate call guarded by a fresh SIGSYS catch,
++ * rather than trusting any cached "this syscall number works" state
++ * blindly. Generic over syscall number — shared by every raw-syscall-level
++ * interceptor in this file (currently close_range and fchmodat2; see each
++ * symbol's own section for why a per-call guard, not just a one-time
++ * process probe, is necessary). On-device testing found that even a
++ * *different argument combination* of an already-probed-safe syscall
++ * number can independently SIGSYS (e.g. CLOSE_RANGE_UNSHARE crashed an
++ * unprotected call after a flags=0 probe had already reported success),
++ * so this is deliberately called around every attempt that hasn't itself
++ * been individually probed, not just once per process. Returns 1 with
++ * *out_ret set if the syscall returned normally (0 or -1, doesn't matter
++ * which); returns 0 if it was caught via SIGSYS instead (*out_ret
++ * untouched). */
++static int shim_guarded_syscall(long nr, long a0, long a1, long a2, long a3,
++				long a4, long a5, long *out_ret)
++{
++	struct sigaction old_sa, sa;
++	sigemptyset(&sa.sa_mask);
++	sa.sa_flags = 0;
++	sa.sa_handler = cr_sigsys_handler;
++	sigaction(SIGSYS, &sa, &old_sa);
++
++	int ok;
++	if (sigsetjmp(cr_sigsys_jmp, 1) == 0) {
++		*out_ret = cr_real_syscall(nr, a0, a1, a2, a3, a4, a5);
++		ok = 1;
++	} else {
++		ok = 0;
++	}
++
++	sigaction(SIGSYS, &old_sa, NULL);
++	return ok;
++}
++
++static void cr_probe_syscall(void)
++{
++	int fd = open("/dev/null", O_RDONLY);
++	if (fd < 0) {
++		cr_probe_state = CR_PROBE_FALLBACK;
++		return;
++	}
++
++	long ret;
++	if (shim_guarded_syscall(__NR_close_range, (long)fd, (long)fd, 0L, 0, 0, 0, &ret) &&
++	    ret == 0 && fcntl(fd, F_GETFD) == -1 && errno == EBADF)
++		cr_probe_state = CR_PROBE_WORKS;
++	else
++		cr_probe_state = CR_PROBE_FALLBACK;
++	close(fd);
++}
++
++/* Userspace fallback: enumerate actually-open fds via /proc/self/fd instead
++ * of a linear scan to RLIMIT_NOFILE (typically 1024-65536) — matters because
++ * Bun's real call pattern is close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) (see
++ * bun/src/jsc/bindings/BunProcess.cpp) — a range that clamps to
++ * RLIMIT_NOFILE-1, so a linear scan would mean tens of thousands of
++ * close()/fcntl() calls on fds that were never open. Pattern matches
++ * ohos-preflight's own validated solutions/a10_close_range.c. Precondition:
++ * first <= last and flags is already validated — both call sites below
++ * (close_range() and the syscall() override) check this before ever
++ * reaching here, matching upstream Linux's close_range(2) semantics
++ * (fs/file.c SYSCALL_DEFINE3) up front rather than relying on this
++ * function to re-derive it. */
++static int cr_do_fallback(unsigned int first, unsigned int last, unsigned int flags)
++{
++	struct rlimit rl;
++	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && last >= rl.rlim_cur)
++		last = rl.rlim_cur > 0 ? (unsigned int)rl.rlim_cur - 1 : 0;
++
++	if (flags & CLOSE_RANGE_UNSHARE) {
++		/* unshare(CLONE_FILES) itself was found to unconditionally
++		 * SIGSYS on this device — independent of close_range's own
++		 * gating, and reproduced even completely unshimmed. There is
++		 * no real fd-table-privatizing fallback available: closing
++		 * fds in the *shared* table instead would silently break the
++		 * isolation CLOSE_RANGE_UNSHARE callers rely on (other
++		 * threads/whatever this table is shared with would lose
++		 * those fds too), which is worse than an honest failure. So
++		 * catch the SIGSYS and report ENOSYS/EPERM rather than either
++		 * crashing or silently doing the wrong thing. */
++		struct sigaction old_sa, sa;
++		sigemptyset(&sa.sa_mask);
++		sa.sa_flags = 0;
++		sa.sa_handler = cr_sigsys_handler;
++		sigaction(SIGSYS, &sa, &old_sa);
++
++		int ret, crashed = 0;
++		if (sigsetjmp(cr_sigsys_jmp, 1) == 0) {
++			ret = unshare(CLONE_FILES);
++		} else {
++			crashed = 1;
++			ret = -1;
++		}
++
++		sigaction(SIGSYS, &old_sa, NULL);
++
++		if (crashed) {
++			errno = ENOSYS;
++			return -1;
++		}
++		if (ret == -1 && errno != EINVAL)
++			return -1;
++	}
++
++	DIR *d = opendir("/proc/self/fd");
++	int dirfd_ = d ? dirfd(d) : -1;
++	if (!d) {
++		/* Extreme fallback if /proc isn't mounted/visible: linear scan,
++		 * same as ohos-preflight's own documented fallback-of-the-
++		 * fallback. Slow, but correct. */
++		if (flags & CLOSE_RANGE_CLOEXEC) {
++			for (unsigned int i = first; i <= last; i++)
++				fcntl((int)i, F_SETFD, FD_CLOEXEC);
++		} else {
++			for (unsigned int i = first; i <= last; i++)
++				close((int)i);
++		}
++		return 0;
++	}
++
++	struct dirent *e;
++	while ((e = readdir(d))) {
++		if (e->d_name[0] < '0' || e->d_name[0] > '9')
++			continue;
++		unsigned int fd = (unsigned int)atoi(e->d_name);
++		if (fd < first || fd > last || (int)fd == dirfd_)
++			continue;
++		if (flags & CLOSE_RANGE_CLOEXEC)
++			fcntl((int)fd, F_SETFD, FD_CLOEXEC);
++		else
++			close((int)fd);
++	}
++	closedir(d);
++	return 0;
++}
++
++/* Validate against upstream Linux's close_range(2) semantics (fs/file.c:
++ * SYSCALL_DEFINE3(close_range, ...) — `if (flags & ~(...)) return -EINVAL`,
++ * `if (fd > max_fd) return -EINVAL`) BEFORE ever asking the real kernel or
++ * touching the fallback. Two things forced this to be upfront validation
++ * rather than "just ask the real syscall and pass its answer through":
++ *
++ *   1. On-device testing found this device's kernel does NOT enforce
++ *      `first > last` -> EINVAL the way upstream Linux does — it silently
++ *      returns success for e.g. close_range(4, 3, 0). Deferring to "real"
++ *      behavior here would leak that platform quirk to every caller
++ *      instead of the standards-conformant behavior a consumer coded
++ *      against Linux (like Bun) actually expects.
++ *   2. Forwarding genuinely invalid flags (e.g. all bits set) to the raw
++ *      syscall on this device raises an *unhandled* SIGSYS and kills the
++ *      process — worse than a graceful EINVAL. Rejecting bad flags here
++ *      means we never issue that syscall at all.
++ */
++static int cr_validate_args(unsigned int first, unsigned int last, unsigned int flags)
++{
++	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC)) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (first > last) {
++		errno = EINVAL;
++		return -1;
++	}
++	return 0;
++}
++
++/* Shared dispatch for both entry points below (once args are validated).
++ * flags==0 is the one exact combination cr_probe_syscall() already proved
++ * safe, so it takes the cheap unguarded path once WORKS is cached; any
++ * other flags value gets its own guarded attempt (see
++ * shim_guarded_syscall) since e.g. CLOSE_RANGE_UNSHARE was found to
++ * independently SIGSYS on this device even after a flags=0 probe
++ * succeeded — and a SIGSYS there downgrades the cached state to FALLBACK
++ * so later calls skip straight to the safe path instead of re-discovering
++ * the same crash. */
++static int cr_dispatch(unsigned int first, unsigned int last, unsigned int flags)
++{
++	if (__builtin_expect(cr_probe_state == CR_PROBE_UNKNOWN, 0))
++		cr_probe_syscall();
++
++	if (cr_probe_state == CR_PROBE_WORKS) {
++		if (flags == 0) {
++			long ret = cr_real_syscall(__NR_close_range, (long)first,
++						  (long)last, 0, 0, 0, 0);
++			if (ret == 0 || errno != ENOSYS)
++				return (int)ret;
++		} else {
++			long ret;
++			if (shim_guarded_syscall(__NR_close_range, (long)first, (long)last,
++						 (long)flags, 0, 0, 0, &ret)) {
++				if (ret == 0 || errno != ENOSYS)
++					return (int)ret;
++			} else {
++				cr_probe_state = CR_PROBE_FALLBACK;
++			}
++		}
++	}
++	return cr_do_fallback(first, last, flags);
++}
++
++int close_range(unsigned int first, unsigned int last, unsigned int flags)
++{
++	/* Disabled means "don't intercept" — defer entirely to the real
++	 * syscall, same as if this shim weren't loaded at all, including
++	 * skipping our own EINVAL validation above. No probe, no fallback
++	 * safety net: if the real call gets SIGSYS'd, so does the caller,
++	 * exactly matching genuine no-shim behavior. */
++	if (shim_disabled("close_range")) {
++		return (int)cr_real_syscall(__NR_close_range, (long)first,
++					    (long)last, (long)flags, 0, 0, 0);
++	}
++	if (cr_validate_args(first, last, flags) != 0)
++		return -1;
++	return cr_dispatch(first, last, flags);
++}
++
++/* Forward-declared: fc2_dispatch() is implemented in fchmodat2's own
++ * section below (after syscall(), which needs to call it here). */
++static int fc2_dispatch(int dirfd, const char *path, mode_t mode, int flags);
++
++/* Forward-declared: ep_shim_ctl_done() lives in the epoll_pipe section
++ * below — it runs the registry bookkeeping after a successful real
++ * epoll_ctl(), no matter which entry symbol carried the call. */
++static int ep_shim_ctl_done(int rc, int epfd, int op, int fd,
++			    struct epoll_event *ev);
++
++/* syscall() override — dispatches the small set of raw-syscall-numbers
++ * this file intercepts (currently close_range and fchmodat2 — see each
++ * one's own section); every other number passes straight through to the
++ * real (RTLD_NEXT) syscall() unmodified. */
++long syscall(long number, ...)
++{
++	va_list ap;
++	long a0, a1, a2, a3, a4, a5;
++
++	va_start(ap, number);
++	a0 = va_arg(ap, long);
++	a1 = va_arg(ap, long);
++	a2 = va_arg(ap, long);
++	a3 = va_arg(ap, long);
++	a4 = va_arg(ap, long);
++	a5 = va_arg(ap, long);
++	va_end(ap);
++
++	if (number == __NR_close_range && !shim_disabled("close_range")) {
++		unsigned int first = (unsigned int)a0;
++		unsigned int last = (unsigned int)a1;
++		unsigned int flags = (unsigned int)a2;
++		if (cr_validate_args(first, last, flags) != 0)
++			return -1;
++		return cr_dispatch(first, last, flags);
++	}
++
++	if (number == __NR_fchmodat2 && !shim_disabled("fchmodat2")) {
++		return fc2_dispatch((int)a0, (const char *)a1, (mode_t)a2, (int)a3);
++	}
++
++	/* Bun's Rust event loop (src/sys/linux_syscall.rs) issues epoll_ctl
++	 * as a raw syscall(SYS_epoll_ctl, ...) rather than the libc symbol,
++	 * so the epoll_ctl() override below never sees those calls. Route
++	 * them through the same registry bookkeeping here. cr_real_syscall
++	 * is libc's syscall(): libc-convention return, errno set on -1. */
++	if (number == __NR_epoll_ctl && !shim_disabled("epoll_pipe")) {
++		return ep_shim_ctl_done(
++			(int)cr_real_syscall(__NR_epoll_ctl, a0, a1, a2, a3, 0, 0),
++			(int)a0, (int)a1, (int)a2, (struct epoll_event *)a3);
++	}
++
++	return cr_real_syscall(number, a0, a1, a2, a3, a4, a5);
++}
++
++/* ==================================================================== */
++/*  1.5. fchmodat2() — syscall 452, chmod with AT_* flags (mainly         */
++/*       AT_SYMLINK_NOFOLLOW). No libc wrapper exists for this in this   */
++/*       musl (too new; same situation close_range was in) — callers use */
++/*       syscall(SYS_fchmodat2, ...) directly, e.g. Bun's `add` command   */
++/*       setting permissions. Confirmed on-device: raises an unhandled   */
++/*       SIGSYS on real HarmonyOS hardware regardless of arguments, same */
++/*       failure mode as close_range (not a graceful ENOSYS) — verified  */
++/*       with a standalone guarded repro before writing this. Falls back */
++/*       to the classic fchmodat(), forwarding AT_SYMLINK_NOFOLLOW —     */
++/*       this musl honours it (measured below). Simpler than             */
++/*       close_range: no evidence different flag values change the       */
++/*       SIGSYS outcome here (there's no second underlying syscall like  */
++/*       unshare() to independently trip), so one process-wide probe is  */
++/*       trusted rather than re-guarding every call.                     */
++/* ==================================================================== */
++
++enum { FC2_PROBE_UNKNOWN, FC2_PROBE_WORKS, FC2_PROBE_FALLBACK };
++static int fc2_probe_state = FC2_PROBE_UNKNOWN;
++
++static void fc2_probe(int dirfd, const char *path)
++{
++	long ret;
++	struct stat st;
++	if (fstatat(dirfd, path, &st, 0) != 0) {
++		fc2_probe_state = FC2_PROBE_FALLBACK;
++		return;
++	}
++	if (shim_guarded_syscall(__NR_fchmodat2, dirfd, (long)path,
++				 (long)(st.st_mode & 07777), 0, 0, 0, &ret) &&
++	    ret == 0)
++		fc2_probe_state = FC2_PROBE_WORKS;
++	else
++		fc2_probe_state = FC2_PROBE_FALLBACK;
++}
++
++static int fc2_dispatch(int dirfd, const char *path, mode_t mode, int flags)
++{
++	if (__builtin_expect(fc2_probe_state == FC2_PROBE_UNKNOWN, 0))
++		fc2_probe(dirfd, path);
++
++	if (fc2_probe_state == FC2_PROBE_WORKS) {
++		long ret;
++		if (shim_guarded_syscall(__NR_fchmodat2, dirfd, (long)path, (long)mode,
++					 flags, 0, 0, &ret)) {
++			if (ret == 0 || errno != ENOSYS)
++				return (int)ret;
++		} else {
++			fc2_probe_state = FC2_PROBE_FALLBACK;
++		}
++	}
++
++	/* Fallback: classic fchmodat(), forwarding AT_SYMLINK_NOFOLLOW.
++	 *
++	 * This used to drop the flag, on the assumption that classic fchmodat()
++	 * could not honour it. Measured on this device, it can:
++	 *
++	 *   regular file + NOFOLLOW -> rc=0, mode applied
++	 *   directory    + NOFOLLOW -> rc=0, mode applied
++	 *   symlink      + NOFOLLOW -> rc=-1 ENOTSUP, target untouched
++	 *
++	 * which is exactly Linux's contract (a symlink's own mode bits are
++	 * meaningless, so chmod on one is refused). Dropping the flag was
++	 * therefore not just lossy but unsafe: it turned "do not follow this
++	 * symlink" into "follow it", so a chmod aimed at a link landed on
++	 * whatever the link pointed at. bun's installer relies on the refusal
++	 * to avoid chmod-ing a file outside the package via a symlinked bin
++	 * target (test/cli/install/symlink-path-traversal.test.ts).
++	 *
++	 * Other fchmodat2-only flags (AT_EMPTY_PATH) stay dropped: classic
++	 * fchmodat() would reject them outright and no caller here uses them. */
++	return fchmodat(dirfd, path, mode, flags & AT_SYMLINK_NOFOLLOW);
++}
++
++/* ==================================================================== */
++/*  2. getpwuid_r() — HarmonyOS HAP uids (2002xxxx) aren't in /etc/passwd */
++/*     Real impl returns ENOENT/0-with-NULL-result; synthesize a minimal */
++/*     passwd record matching Node's os.userInfo() needs. When the query */
++/*     is for the caller's own uid, prefer the real OS-account name from */
++/*     libos_account_ndk.so (OH_OsAccount_GetName, API 12+), then env    */
++/*     vars, then a uid-derived placeholder. Queries for any other uid   */
++/*     pass the real ENOENT through — the synthesized record is only     */
++/*     valid for the current account.                                    */
++/* ==================================================================== */
++
++#ifndef LOGIN_NAME_MAX
++#define LOGIN_NAME_MAX 256
++#endif
++
++typedef int (*getpwuid_r_fn)(uid_t, struct passwd *, char *, size_t, struct passwd **);
++
++/* Lazily resolve OH_OsAccount_GetName; cache the handle and symbol for the
++ * process lifetime (getpwuid_r() is called repeatedly, e.g. by Node's
++ * os.userInfo()). Returns NULL when the library or symbol is unavailable,
++ * so callers transparently fall back to env-var synthesis. */
++typedef int (*ohos_get_name_fn)(char *, size_t);
++
++static ohos_get_name_fn ohos_get_name_resolve(void)
++{
++	static void *handle = NULL;
++	static ohos_get_name_fn fn = NULL;
++	if (!handle) {
++		handle = dlopen("libos_account_ndk.so", RTLD_NOW | RTLD_LOCAL);
++		if (handle)
++			fn = (ohos_get_name_fn)dlsym(handle, "OH_OsAccount_GetName");
++	}
++	return fn;
++}
++
++int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
++	      struct passwd **result)
++{
++	static getpwuid_r_fn real = NULL;
++	if (!real)
++		real = (getpwuid_r_fn)dlsym(RTLD_NEXT, "getpwuid_r");
++
++	if (!shim_disabled("getpwuid_r") && real) {
++		int rc = real(uid, pwd, buf, buflen, result);
++		if (rc == 0 && *result != NULL)
++			return 0; /* real lookup succeeded, use it */
++		if (rc != 0 && rc != ENOENT)
++			return rc; /* a different real error, don't mask it */
++	} else if (real) {
++		return real(uid, pwd, buf, buflen, result);
++	}
++
++	if (shim_disabled("getpwuid_r")) {
++		*result = NULL;
++		return ENOENT;
++	}
++
++	/* Only synthesize for the caller's own uid — the fallback record IS the
++	 * current OS account, so handing it out for an arbitrary uid would mask
++	 * the ENOENT that callers rely on (Node's process.initgroups() numeric
++	 * pre-resolve expects ERR_UNKNOWN_CREDENTIAL for unknown uids). */
++	if (uid != getuid() && uid != geteuid()) {
++		*result = NULL;
++		return ENOENT;
++	}
++
++	/* Fallback: synthesize from the OS-account name (only valid for the
++	 * caller's own uid — the account API has no uid parameter), then
++	 * environment, mirroring ohos-preflight/solutions/i9_getpwuid_r.c.
++	 * A set-but-empty var (e.g. `export LOGNAME=`) is treated the same
++	 * as unset. */
++	const char *username = NULL;
++	char account_name[LOGIN_NAME_MAX];
++	if (uid == getuid()) {
++		ohos_get_name_fn get_name = ohos_get_name_resolve();
++		if (get_name && get_name(account_name, sizeof(account_name)) == 0)
++			username = account_name;
++	}
++	if (!username) {
++		username = getenv("LOGNAME");
++		if (username && !*username)
++			username = NULL;
++	}
++	if (!username) {
++		username = getenv("USER");
++		if (username && !*username)
++			username = NULL;
++	}
++	const char *homedir = getenv("HOME");
++	if (homedir && !*homedir)
++		homedir = NULL;
++	if (!homedir)
++		homedir = "/data/storage/el2/base";
++	const char *shell = getenv("SHELL");
++	if (shell && !*shell)
++		shell = NULL;
++	if (!shell)
++		shell = "/bin/false";
++
++	char uid_buf[32];
++	if (!username) {
++		snprintf(uid_buf, sizeof(uid_buf), "u%u", (unsigned)uid);
++		username = uid_buf;
++	}
++
++	size_t need = strlen(username) + 1 + strlen(homedir) + 1 + strlen(shell) + 1;
++	if (buflen < need) {
++		*result = NULL;
++		return ERANGE;
++	}
++
++	char *p = buf;
++	pwd->pw_name = p;
++	p = stpcpy(p, username) + 1;
++	pwd->pw_dir = p;
++	p = stpcpy(p, homedir) + 1;
++	pwd->pw_shell = p;
++	stpcpy(p, shell);
++
++	pwd->pw_passwd = (char *)"";
++	pwd->pw_uid = uid;
++	pwd->pw_gid = getegid();
++	pwd->pw_gecos = pwd->pw_name;
++
++	*result = pwd;
++	return 0;
++}
++
++/* ==================================================================== */
++/*  2b. getaddrinfo() — HarmonyOS's AI_ADDRCONFIG wrongly filters IPv4   */
++/*     loopback: on a host with no global IPv4, "localhost" resolves to  */
++/*     ::1 only, so Happy-Eyeballs callers (autoSelectFamily) have no    */
++/*     IPv4 address to fall back to when ::1 refuses. When the real      */
++/*     call with AI_ADDRCONFIG yields only IPv6-loopback results, redo   */
++/*     the query without AI_ADDRCONFIG and append the AF_INET entries.   */
++/*     (bun T49; verified against OHOS_TEST_STATUS.md's probe chain.)    */
++/* ==================================================================== */
++
++typedef int (*getaddrinfo_fn)(const char *, const char *,
++			      const struct addrinfo *, struct addrinfo **);
++
++/* glibc getaddrinfo rejects names with characters outside the DNS/hostname
++ * alphabet locally (EAI_NONAME); HarmonyOS's resolver forwards them to the
++ * network where they hang until timeout (~4s observed). That kills tests and
++ * code that rely on a fast local reject (bun's udp_socket "bind fails" case
++ * does it 200 times). Match glibc: fail fast, no network round-trip. */
++static int hostname_has_invalid_chars(const char *node)
++{
++	for (const unsigned char *p = (const unsigned char *)node; *p; p++) {
++		unsigned char c = *p;
++		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++		    (c >= '0' && c <= '9') || c == '.' || c == '-' ||
++		    c == '_' || c == '%' || c == ':')
++			continue;
++		return 1;
++	}
++	return 0;
++}
++
++int getaddrinfo(const char *node, const char *service,
++		const struct addrinfo *hints, struct addrinfo **res)
++{
++	static getaddrinfo_fn real = NULL;
++	if (!real)
++		real = (getaddrinfo_fn)dlsym(RTLD_NEXT, "getaddrinfo");
++	if (!real) {
++		errno = ENOSYS;
++		return EAI_SYSTEM;
++	}
++
++	if (!shim_disabled("getaddrinfo") && node && *node &&
++	    hostname_has_invalid_chars(node))
++		return EAI_NONAME;
++
++	int rc = real(node, service, hints, res);
++
++	if (getenv("OHOS_GAI_DEBUG"))
++		fprintf(stderr,
++			"[gai-shim] node=%s flags=0x%x family=%d socktype=%d rc=%d\n",
++			node ? node : "(null)", hints ? hints->ai_flags : -1,
++			hints ? hints->ai_family : -1, hints ? hints->ai_socktype : -1,
++			rc);
++
++	if (shim_disabled("getaddrinfo") || rc != 0 || !hints || !node ||
++	    !(hints->ai_flags & AI_ADDRCONFIG))
++		return rc;
++
++	/* Only the broken case: every returned address is IPv6 loopback
++	 * (and there is at least one). Anything else passes through. */
++	int n = 0, all_v6_loopback = 1;
++	struct addrinfo *tail = NULL;
++	for (struct addrinfo *ai = *res; ai; ai = ai->ai_next) {
++		n++;
++		tail = ai;
++		if (ai->ai_family != AF_INET6 ||
++		    ai->ai_addrlen < sizeof(struct sockaddr_in6) ||
++		    !IN6_IS_ADDR_LOOPBACK(
++			    &((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr)) {
++			all_v6_loopback = 0;
++			break;
++		}
++	}
++	if (n == 0 || !all_v6_loopback) {
++		if (getenv("OHOS_GAI_DEBUG"))
++			fprintf(stderr, "[gai-shim] merge skipped: n=%d all_v6_lb=%d\n",
++				n, all_v6_loopback);
++		return rc;
++	}
++
++	struct addrinfo hints2 = *hints;
++	hints2.ai_flags &= ~AI_ADDRCONFIG;
++	/* Force AF_INET for the retry: an AF_UNSPEC no-ADDRCONFIG query on this
++	 * resolver can still come back v6-only (it is stateful), but an explicit
++	 * AF_INET query for a loopback name is answered from /etc/hosts. */
++	hints2.ai_family = AF_INET;
++	struct addrinfo *res2 = NULL;
++	if (real(node, service, &hints2, &res2) != 0) {
++		if (getenv("OHOS_GAI_DEBUG"))
++			fprintf(stderr, "[gai-shim] retry failed\n");
++		return rc; /* retry failed: keep the original (broken) answer */
++	}
++	if (getenv("OHOS_GAI_DEBUG"))
++		fprintf(stderr, "[gai-shim] retry ok, merging\n");
++
++	/* Move AF_INET nodes from res2 onto the tail of *res (preserving the
++	 * loopback-first order), then free what remains of res2. */
++	for (struct addrinfo **pp = &res2; *pp;) {
++		struct addrinfo *ai = *pp;
++		if (ai->ai_family == AF_INET) {
++			*pp = ai->ai_next;   /* unlink from res2 */
++			ai->ai_next = NULL;
++			tail->ai_next = ai;  /* append to *res */
++			tail = ai;
++		} else {
++			pp = &ai->ai_next;
++		}
++	}
++	if (res2)
++		freeaddrinfo(res2);
++	return rc;
++}
++
++/* ==================================================================== */
++/*  3. tmpfile() — P_tmpdir is unwritable in the HarmonyOS app sandbox;  */
++/*     fall back to an unlinked file under $HOME.                       */
++/* ==================================================================== */
++
++typedef FILE *(*tmpfile_fn)(void);
++
++FILE *tmpfile(void)
++{
++	static tmpfile_fn real = NULL;
++	if (!real)
++		real = (tmpfile_fn)dlsym(RTLD_NEXT, "tmpfile");
++
++	if (!shim_disabled("tmpfile") && real) {
++		FILE *f = real();
++		if (f)
++			return f;
++		/* fall through to userspace fallback below */
++	} else if (real) {
++		return real();
++	}
++
++	if (shim_disabled("tmpfile"))
++		return NULL;
++
++	const char *dir = getenv("TMPDIR");
++	if (!dir)
++		dir = getenv("HOME");
++	if (!dir)
++		dir = "/data/storage/el2/base";
++
++	char tmpl[PATH_MAX];
++	int n = snprintf(tmpl, sizeof(tmpl), "%s/ohos-compat-tmp-XXXXXX", dir);
++	if (n < 0 || (size_t)n >= sizeof(tmpl)) {
++		errno = ENAMETOOLONG;
++		return NULL;
++	}
++
++	int fd = mkstemp(tmpl);
++	if (fd < 0)
++		return NULL;
++	unlink(tmpl); /* auto-cleanup on close/exit, matches tmpfile() semantics */
++
++	FILE *f = fdopen(fd, "w+");
++	if (!f) {
++		int saved_errno = errno;
++		close(fd);
++		errno = saved_errno;
++		return NULL;
++	}
++	return f;
++}
++
++/* ==================================================================== */
++/*  4. getcwd() — cwd removed out from under the process (lifecycle      */
++/*     scripts, `rm -rf` of a worktree) returns ENOENT on both OH and    */
++/*     HM; fall back to $HOME so callers get a valid path instead of     */
++/*     erroring out entirely. Default ON, opt-out via                   */
++/*     OHOS_COMPAT_SHIM_DISABLE=getcwd.                                 */
++/* ==================================================================== */
++
++/* Copy a NUL-terminated cwd candidate into the caller's buffer (or a freshly
++ * malloc'd one when buf==NULL, per getcwd(3)'s GNU auto-allocate extension),
++ * honoring the size/ERANGE contract. Returns buf/out on success, NULL+ERANGE
++ * on a too-small caller buffer, NULL+ENOMEM on malloc failure. */
++static char *cwd_copy_out(const char *src, char *buf, size_t size)
++{
++	size_t need = strlen(src) + 1;
++	if (buf) {
++		if (size < need) {
++			errno = ERANGE;
++			return NULL;
++		}
++		memcpy(buf, src, need);
++		return buf;
++	}
++	size_t alloc_size = size ? size : need;
++	if (alloc_size < need) {
++		errno = ERANGE;
++		return NULL;
++	}
++	char *out = malloc(alloc_size);
++	if (!out)
++		return NULL;
++	memcpy(out, src, need);
++	return out;
++}
++
++typedef char *(*getcwd_fn)(char *, size_t);
++
++char *getcwd(char *buf, size_t size)
++{
++	static getcwd_fn real = NULL;
++	if (!real)
++		real = (getcwd_fn)dlsym(RTLD_NEXT, "getcwd");
++
++	char *r = real ? real(buf, size) : NULL;
++	if (r || shim_disabled("getcwd"))
++		return r;
++	/* Only engage the fallback on "couldn't resolve the cwd" errors (EACCES:
++	 * an ancestor lacks +x on hmdfs/tmpfs; ENOENT: cwd rmdir'd). Argument/
++	 * buffer errors (EINVAL size=0, ERANGE buf-too-small, EFAULT) must pass
++	 * through untouched so callers see the real errno. */
++	if (errno != EACCES && errno != ENOENT)
++		return r;
++	/* getcwd()'s userspace parent-walk (readdir("..") up to /) needs +x on
++	 * every ancestor; HarmonyOS sandbox dirs on hmdfs/tmpfs and rmdir'd
++	 * cwds trip it with EACCES/ENOENT. The kernel still knows the real cwd:
++	 * /proc/self/cwd is resolved server-side via d_path() with NO userspace
++	 * permission check, so it succeeds exactly where getcwd()'s walk fails
++	 * and yields the REAL cwd — what bash and lifecycle scripts actually
++	 * need, not a $HOME guess. (This is what lets bun drop its ohos_set_pwd
++	 * / cd-prefix workarounds once the shim is preloaded.) */
++	char proc_buf[PATH_MAX];
++	ssize_t n = readlink("/proc/self/cwd", proc_buf, sizeof(proc_buf) - 1);
++	if (n > 0) {
++		proc_buf[n] = '\0';
++		struct stat st;
++		/* Trust the kernel-reported path unless it is provably gone: stat
++		 * ENOENT means the cwd was rmdir'd (a dangling path is worse than
++		 * $HOME), so fall through. Any other stat outcome (success, or an
++		 * EACCES on an ancestor that doesn't invalidate the path) keeps it. */
++		if (stat(proc_buf, &st) == 0 || errno != ENOENT)
++			return cwd_copy_out(proc_buf, buf, size);
++	}
++
++	/* Last resort: somewhere valid so the caller doesn't hard-crash. */
++	const char *home = getenv("HOME");
++	if (!home)
++		home = "/data/storage/el2/base";
++	return cwd_copy_out(home, buf, size);
++}
++
++/* ==================================================================== */
++/*  5. linkat()/symlinkat() — sandboxed target dirs return EPERM/EACCES  */
++/*     for hardlinks; fall back to a byte copy (linkat) or, for          */
++/*     symlinkat, a copy of the link *target file* when it exists.      */
++/*     Semantically lossy (loses hardlink/symlink identity — a later     */
++/*     symlink target cannot be copied). Default ON since 0.2.0 (bun          */
++/*     install needs hardlinks and the sandbox blocks the real linkat         */
++/*     for all apps). Disable individually via                                */
++/*     OHOS_COMPAT_SHIM_DISABLE=linkat,symlinkat if true link semantics       */
++/*     matter for your workload.                                              */
++static int copy_fd_contents(int src_fd, int dst_fd)
++{
++	char buf[65536];
++	ssize_t n;
++	while ((n = read(src_fd, buf, sizeof(buf))) > 0) {
++		ssize_t off = 0;
++		while (off < n) {
++			ssize_t w = write(dst_fd, buf + off, (size_t)(n - off));
++			if (w < 0) {
++				if (errno == EINTR)
++					continue;
++				return -1;
++			}
++			off += w;
++		}
++	}
++	return (n < 0) ? -1 : 0;
++}
++
++/* Copy src_fd to newdirfd/newpath atomically: write a hidden sibling temp
++ * file, then renameat() into place. The previous direct O_CREAT|O_EXCL +
++ * copy made the destination visible at 0 bytes the moment it was created,
++ * so a concurrent quick_exit (bun install aborting on a resolution error
++ * while a worker thread is still flushing its npm manifest cache) left
++ * permanently corrupt 0-byte cache entries ("manifest is invalid" on the
++ * next load — bun-install-registry prereleases-* tests). With tmp+rename
++ * the destination appears complete or not at all; a quick_exit mid-copy
++ * only litters a hidden temp file.
++ *
++ * EEXIST semantics: real linkat fails if newpath exists. renameat would
++ * silently replace it, so pre-check with fstatat; the tiny TOCTOU window
++ * between check and rename is inherent to an emulation and harmless for
++ * the cache-writer workloads this shim serves (they unlink+retry anyway). */
++static int copy_fd_to_path_atomic(int src_fd, int newdirfd, const char *newpath,
++				  mode_t mode)
++{
++	/* The temp file MUST live in newpath's own directory: renameat is
++	 * same-filesystem only, and an absolute newpath with a bare temp name
++	 * would put the temp in the process CWD (possibly another fs → EXDEV). */
++	char tmp[PATH_MAX];
++	const char *slash = strrchr(newpath, '/');
++	size_t dirlen = slash ? (size_t)(slash - newpath) + 1 : 0;
++	if (dirlen >= sizeof(tmp))
++		return -1;
++	int len = snprintf(tmp, sizeof(tmp), "%.*s.ohos-linkat-tmp.%d",
++			   (int)dirlen, newpath, (int)getpid());
++	if (len <= 0 || len >= (int)sizeof(tmp))
++		return -1;
++
++	int dst = -1;
++	for (int i = 0; i < 100; i++) {
++		char *p = tmp + len;
++		if (i > 0)
++			snprintf(p, sizeof(tmp) - len, ".%d", i);
++		dst = openat(newdirfd, tmp,
++			     O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, mode);
++		if (dst >= 0)
++			break;
++		if (errno != EEXIST)
++			return -1;
++	}
++	if (dst < 0)
++		return -1;
++
++	int copy_rc = copy_fd_contents(src_fd, dst);
++	int e = errno;
++	close(dst);
++	if (copy_rc != 0) {
++		unlinkat(newdirfd, tmp, 0);
++		errno = e;
++		return -1;
++	}
++
++	struct stat st;
++	if (fstatat(newdirfd, newpath, &st, AT_SYMLINK_NOFOLLOW) == 0) {
++		unlinkat(newdirfd, tmp, 0);
++		errno = EEXIST;
++		return -1;
++	}
++
++	if (renameat(newdirfd, tmp, newdirfd, newpath) != 0) {
++		e = errno;
++		unlinkat(newdirfd, tmp, 0);
++		errno = e;
++		return -1;
++	}
++	return 0;
++}
++
++typedef int (*linkat_fn)(int, const char *, int, const char *, int);
++
++/* ------------------------------------------------------------------ */
++/*  splice(2): EOF on the source is reported as EPIPE instead of 0      */
++/* ------------------------------------------------------------------ */
++/*
++ * This kernel returns -1/EPIPE from splice() when the *source* pipe is at
++ * end-of-file, where Linux returns 0. read() on that same pipe correctly
++ * returns 0, so only the splice path is affected. Every splice-based copy
++ * loop therefore mistakes a normal EOF for a fatal error: GNU coreutils'
++ * cat takes that path whenever stdin and stdout are both pipes and prints
++ * "cat: -: Broken pipe" then exits 1. Measured with a standalone probe,
++ * no Bun involved.
++ *
++ * A genuine EPIPE (the destination's read end is gone) must still be
++ * reported. poll() separates the two cleanly and is non-destructive --
++ * unlike read(), it cannot consume the byte we are asked to move:
++ *
++ *   source at EOF        poll(fd_in)=POLLIN|POLLHUP  poll(fd_out)=POLLOUT
++ *   destination broken   poll(fd_in)=POLLIN          poll(fd_out)=POLLOUT|POLLERR
++ *   both at once         poll(fd_out)=POLLOUT|POLLERR
++ *
++ * So POLLERR on the destination decides it. Checking the destination FIRST
++ * makes the ambiguous "both" case resolve to the real error, which is the
++ * conservative direction: reporting a broken pipe that also happens to be
++ * at EOF loses nothing, whereas swallowing a real EPIPE would silently
++ * truncate a copy.
++ *
++ * Only reached when splice() has already failed with EPIPE; every other
++ * outcome is passed through untouched, so the cost on the normal path is
++ * one comparison. Note POLLIN is set on an EOF pipe too (a read would
++ * return 0 immediately), which is why POLLHUP -- not the absence of
++ * POLLIN -- is the EOF signal.
++ */
++typedef ssize_t (*splice_fn)(int, off_t *, int, off_t *, size_t, unsigned int);
++
++/* ------------------------------------------------------------------ */
++/*  splice(2), second defect: writing to a pipe wakes no poll()/epoll   */
++/* ------------------------------------------------------------------ */
++/*
++ * Bytes that splice() places into a pipe never wake a poll() or
++ * epoll_wait() that is already blocked on that pipe's read end. The data
++ * really is there -- a later poll, or a read(), sees it immediately -- so
++ * the pipe's readiness *state* is right and only the *wakeup* is missing.
++ * A reader blocked in read() is woken correctly, which is why the defect
++ * hides behind anything that reads synchronously.
++ *
++ * Measured with a standalone probe (no Bun involved), waiter blocked
++ * first, 4096 bytes sent 300ms later:
++ *
++ *   waiter        fed by splice()        fed by write()
++ *   poll          2000ms timeout         woken in 300ms
++ *   epoll LT      2000ms timeout         woken in 301ms
++ *   epoll ET      2000ms timeout         woken in 301ms
++ *   read          woken in 301ms         woken in 301ms
++ *
++ * It deadlocks any pipeline whose consumer polls: GNU cat feeds stdout
++ * with splice() when it is a pipe, so `cat big | bun script.js` hangs
++ * forever -- Bun sits in epoll_wait, cat fills the 512KB pipe and then
++ * blocks in splice() too. `cat big | wc -c` is fine (wc blocks in read),
++ * and `dd ... | bun script.js` is fine (dd uses write).
++ *
++ * Fix: when the destination is a pipe, move the bytes through a userspace
++ * buffer so the pipe is fed by write(), whose wakeup works. That costs one
++ * copy and gives up splice's zero-copy property on this path, which is the
++ * right trade for a shim whose job is correctness.
++ *
++ * Holding the last byte back and sending only that one with write() would
++ * have kept the zero-copy bulk transfer, and a probe confirmed it wakes the
++ * poller -- but it does not survive the real case: cat asks for 524288
++ * bytes into a 512KB pipe, splice fills the pipe and returns short, and the
++ * trailing write() is never reached. A wakeup scheme that fails exactly
++ * when the pipe is full is no use, since that is when the reader is
++ * guaranteed to be waiting.
++ */
++#ifndef SPLICE_F_NONBLOCK
++#define SPLICE_F_NONBLOCK 2
++#endif
++
++static int splice_fd_is_fifo(int fd)
++{
++	struct stat st;
++	return fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode);
++}
++
++/*
++ * One bounded chunk, source -> userspace -> destination. Returning less than
++ * `len` is allowed by splice(2) and every splice-based copy loop already
++ * handles it, so a 64KB ceiling costs nothing but bounds the stack.
++ */
++static ssize_t splice_through_buffer(int fd_in, off_t *off_in, int fd_out,
++				     size_t len, unsigned int flags)
++{
++	char buf[65536];
++	if (len > sizeof buf)
++		len = sizeof buf;
++
++	/* SPLICE_F_NONBLOCK promises not to block on the source; read() alone
++	   would, unless fd_in itself is O_NONBLOCK. POLLHUP-without-POLLIN
++	   still reports ready, so EOF keeps flowing through to the read(). */
++	if (flags & SPLICE_F_NONBLOCK) {
++		struct pollfd pfd = { .fd = fd_in, .events = POLLIN };
++		if (poll(&pfd, 1, 0) <= 0) {
++			errno = EAGAIN;
++			return -1;
++		}
++	}
++
++	ssize_t got = off_in ? pread(fd_in, buf, len, *off_in)
++			     : read(fd_in, buf, len);
++	if (got <= 0)
++		return got;	/* 0 is EOF -- the answer splice() should give */
++
++	/* These bytes are already out of the source, so a short write cannot
++	   be reported back as "not consumed" the way splice() would: it has to
++	   be retried or the data is gone. That means a SPLICE_F_NONBLOCK caller
++	   can still block here on a full destination. Losing bytes is the worse
++	   failure, and the alternative (peek at pipe space first) has no
++	   portable form. */
++	size_t done = 0;
++	while (done < (size_t)got) {
++		ssize_t w = write(fd_out, buf + done, (size_t)got - done);
++		if (w > 0) {
++			done += (size_t)w;
++			continue;
++		}
++		if (w < 0 && errno == EINTR)
++			continue;
++		if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++			struct pollfd pfd = { .fd = fd_out, .events = POLLOUT };
++			if (poll(&pfd, 1, -1) < 0 && errno != EINTR)
++				break;
++			continue;
++		}
++		break;		/* EPIPE and friends: report what did land */
++	}
++	if (done == 0)
++		return -1;	/* errno still set by write() */
++	if (off_in)
++		*off_in += (off_t)done;
++	return (ssize_t)done;
++}
++
++ssize_t splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
++	       size_t len, unsigned int flags)
++{
++	static splice_fn real = NULL;
++	if (!real)
++		real = (splice_fn)dlsym(RTLD_NEXT, "splice");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++
++	/* off_out must be NULL when the destination is a pipe (kernel rule);
++	   testing it as well keeps this path off any call the kernel would
++	   have rejected anyway. */
++	if (len > 0 && off_out == NULL && !shim_disabled("splice") &&
++	    splice_fd_is_fifo(fd_out))
++		return splice_through_buffer(fd_in, off_in, fd_out, len, flags);
++
++	ssize_t rc = real(fd_in, off_in, fd_out, off_out, len, flags);
++	if (rc >= 0 || errno != EPIPE)
++		return rc;
++	if (shim_disabled("splice"))
++		return rc;
++
++	int saved = errno;
++
++	/* Destination genuinely broken? Then EPIPE is the correct answer. */
++	struct pollfd out_pfd = { .fd = fd_out, .events = POLLOUT };
++	if (poll(&out_pfd, 1, 0) > 0 && (out_pfd.revents & (POLLERR | POLLNVAL))) {
++		errno = saved;
++		return rc;
++	}
++
++	/* Source hung up with nothing left to move: that is a plain EOF. */
++	struct pollfd in_pfd = { .fd = fd_in, .events = POLLIN };
++	if (poll(&in_pfd, 1, 0) > 0 && (in_pfd.revents & POLLHUP))
++		return 0;
++
++	errno = saved;
++	return rc;
++}
++
++/* ==================================================================== */
++/*  epoll/poll pipe-readiness repair (OHOS_TEST_STATUS.md T50)          */
++/* ==================================================================== */
++/*
++ * Third pipe defect on HarmonyOS, distinct from the two splice() ones
++ * above: a shell-created pipe (e.g. `cat big | bun script.js`) can lose
++ * its read-readiness *state* entirely. Bytes sit in the pipe buffer
++ * (FIONREAD reports them), but poll() and epoll_wait() -- even a freshly
++ * created epoll instance registering the fd for the first time -- report
++ * the fd as not-readable, and stay wrong after bytes are drained. Node.js
++ * as the reader hangs the same way, so this is a kernel pipe-state bug,
++ * not a Bun one. The repro rate tracks system load (near 100% under
++ * memory pressure, sporadic when idle).
++ *
++ * Bun cannot avoid the affected object -- the shell owns the write end --
++ * so this shim repairs readiness in userspace:
++ *
++ *   epoll_ctl(ADD/MOD)  remember (epfd, fd, event) for FIFO fds whose
++ *                       mask asks for EPOLLIN; DEL forgets. Calls arrive
++ *                       both via the libc symbol (usockets) and via raw
++ *                       syscall(SYS_epoll_ctl) (Bun's Rust event loop) --
++ *                       the syscall() override above funnels the latter
++ *                       into the same bookkeeping.
++ *   epoll_wait/pwait    when any pipe is registered on this epfd, poll
++ *                       internally in EP_PIPE_POLL_MS slices and, on an
++ *                       empty return, FIONREAD each registered pipe and
++ *                       synthesize EPOLLIN with the registered udata for
++ *                       those with bytes pending. The slicing is HIDDEN
++ *                       from the caller: an empty slice is answered by
++ *                       re-waiting, never by returning 0, until the
++ *                       caller's own timeout genuinely expires (an
++ *                       infinite wait must only return with an event or
++ *                       signal — libuv's uv__io_poll asserts exactly
++ *                       that, and the leaked premature 0 crashed pnpm
++ *                       with SIGABRT).
++ *   poll/ppoll          after the real call, patch revents for FIFO fds
++ *                       that asked for POLLIN, reported nothing, yet
++ *                       have bytes pending (covers is_readable paths).
++ *   close               drop registry entries naming the closing fd
++ *                       (whether it was an epfd or a pipe), so a reused
++ *                       fd number never inherits stale udata.
++ *
++ * EOF: the corrupted kernel never delivers EPOLLHUP either, so after the
++ * last byte is drained the reader would still wait forever. When a
++ * pipe's FIONREAD transitions had-data -> empty, one final EPOLLIN is
++ * synthesized: at EOF the read returns 0 (correct), otherwise it is a
++ * single harmless EAGAIN wakeup.
++ *
++ * EPOLLONESHOT: a synthesized event is delivered without the kernel
++ * having fired, so the entry is marked disarmed and gets no further
++ * synthesized events until the next MOD re-arms it -- mirroring kernel
++ * semantics from the caller's point of view.
++ *
++ * This is a workaround, not a cure; the kernel bug should be reported to
++ * the platform side (fd0-reader3/fd0-reader4 probes as evidence).
++ * OHOS_COMPAT_SHIM_DISABLE=epoll_pipe turns the whole interceptor off.
++ */
++
++#define EP_PIPE_POLL_MS 250
++#define EP_REG_MAX 64
++
++typedef struct {
++	int used;
++	int epfd;
++	int fd;
++	struct epoll_event ev;	/* registration mask + udata */
++	int disarmed;		/* ONESHOT: synthesized event delivered */
++	int had_data;		/* FIONREAD was non-zero at last check */
++} ep_pipe_reg_t;
++
++static ep_pipe_reg_t g_ep_pipes[EP_REG_MAX];
++static pthread_mutex_t g_ep_pipes_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static int ep_pipe_active(void)
++{
++	return !shim_disabled("epoll_pipe");
++}
++
++/* All registry mutations happen under g_ep_pipes_lock; Bun runs one
++ * epoll instance per event-loop thread, so epoll_ctl for different epfds
++ * really can arrive concurrently. */
++
++static void ep_reg_update_locked(int epfd, int fd, const struct epoll_event *ev)
++{
++	int free_slot = -1, i;
++	for (i = 0; i < EP_REG_MAX; i++) {
++		if (!g_ep_pipes[i].used) {
++			if (free_slot < 0)
++				free_slot = i;
++			continue;
++		}
++		if (g_ep_pipes[i].epfd == epfd && g_ep_pipes[i].fd == fd) {
++			g_ep_pipes[i].ev = *ev;
++			g_ep_pipes[i].disarmed = 0;
++			/* had_data deliberately kept: a MOD re-arm right
++			 * after the reader drained the pipe must not lose
++			 * the pending EOF transition. */
++			return;
++		}
++	}
++	if (free_slot < 0)
++		return;	/* full: this pipe just never gets repaired */
++	g_ep_pipes[free_slot].used = 1;
++	g_ep_pipes[free_slot].epfd = epfd;
++	g_ep_pipes[free_slot].fd = fd;
++	g_ep_pipes[free_slot].ev = *ev;
++	g_ep_pipes[free_slot].disarmed = 0;
++	g_ep_pipes[free_slot].had_data = 0;
++}
++
++static void ep_reg_del_locked(int epfd, int fd)
++{
++	int i;
++	for (i = 0; i < EP_REG_MAX; i++)
++		if (g_ep_pipes[i].used && g_ep_pipes[i].epfd == epfd &&
++		    g_ep_pipes[i].fd == fd)
++			g_ep_pipes[i].used = 0;
++}
++
++static void ep_reg_forget_fd_locked(int fd)
++{
++	int i;
++	for (i = 0; i < EP_REG_MAX; i++)
++		if (g_ep_pipes[i].used &&
++		    (g_ep_pipes[i].fd == fd || g_ep_pipes[i].epfd == fd))
++			g_ep_pipes[i].used = 0;
++}
++
++static int ep_reg_any_locked(int epfd)
++{
++	int i;
++	for (i = 0; i < EP_REG_MAX; i++)
++		if (g_ep_pipes[i].used && g_ep_pipes[i].epfd == epfd)
++			return 1;
++	return 0;
++}
++
++/* Registry bookkeeping after a real epoll_ctl(), shared by the libc
++ * symbol override and the syscall(SYS_epoll_ctl) dispatcher. */
++static int ep_shim_ctl_done(int rc, int epfd, int op, int fd,
++			    struct epoll_event *ev)
++{
++	if (rc != 0 || !ep_pipe_active())
++		return rc;
++	pthread_mutex_lock(&g_ep_pipes_lock);
++	if (op == EPOLL_CTL_DEL) {
++		ep_reg_del_locked(epfd, fd);
++	} else if (ev && (ev->events & EPOLLIN) && splice_fd_is_fifo(fd)) {
++		ep_reg_update_locked(epfd, fd, ev);
++	} else {
++		/* No EPOLLIN requested, or not a pipe: make sure a
++		 * recycled fd number doesn't stay tracked from a previous
++		 * registration. */
++		ep_reg_del_locked(epfd, fd);
++	}
++	pthread_mutex_unlock(&g_ep_pipes_lock);
++	return rc;
++}
++
++typedef int (*epoll_ctl_fn)(int, int, int, struct epoll_event *);
++
++int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
++{
++	static epoll_ctl_fn real = NULL;
++	if (!real)
++		real = (epoll_ctl_fn)dlsym(RTLD_NEXT, "epoll_ctl");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return ep_shim_ctl_done(real(epfd, op, fd, event), epfd, op, fd, event);
++}
++
++/* Clamp long waits to the poll interval when this epfd has pipes under
++ * repair; short and zero (nonblocking) timeouts pass through. */
++static int ep_shim_clamp_timeout(int epfd, int timeout)
++{
++	int any;
++	if (timeout == 0 || !ep_pipe_active())
++		return timeout;
++	if (timeout > 0 && timeout <= EP_PIPE_POLL_MS)
++		return timeout;
++	pthread_mutex_lock(&g_ep_pipes_lock);
++	any = ep_reg_any_locked(epfd);
++	pthread_mutex_unlock(&g_ep_pipes_lock);
++	return any ? EP_PIPE_POLL_MS : timeout;
++}
++
++/* After an empty real wait, synthesize EPOLLIN for registered pipes with
++ * bytes pending (plus the one-shot drained/EOF wakeup described above). */
++static int ep_shim_after_wait(int rc, int epfd, struct epoll_event *events,
++			      int maxevents)
++{
++	int i, n = 0;
++	if (rc != 0 || maxevents <= 0 || !ep_pipe_active())
++		return rc;
++	pthread_mutex_lock(&g_ep_pipes_lock);
++	for (i = 0; i < EP_REG_MAX && n < maxevents; i++) {
++		int avail = 0;
++		if (!g_ep_pipes[i].used || g_ep_pipes[i].epfd != epfd ||
++		    g_ep_pipes[i].disarmed)
++			continue;
++		if (ioctl(g_ep_pipes[i].fd, FIONREAD, &avail) != 0) {
++			/* fd is gone; the kernel drops closed fds from the
++			 * epoll set too, so stop tracking it here. */
++			g_ep_pipes[i].used = 0;
++			continue;
++		}
++		if (avail > 0) {
++			g_ep_pipes[i].had_data = 1;
++		} else if (g_ep_pipes[i].had_data) {
++			g_ep_pipes[i].had_data = 0;
++		} else {
++			continue;
++		}
++		if (g_ep_pipes[i].ev.events & EPOLLONESHOT)
++			g_ep_pipes[i].disarmed = 1;
++		events[n].events = EPOLLIN;
++		events[n].data = g_ep_pipes[i].ev.data;
++		n++;
++	}
++	pthread_mutex_unlock(&g_ep_pipes_lock);
++	return n;
++}
++
++typedef int (*epoll_pwait_fn)(int, struct epoll_event *, int, int,
++			      const sigset_t *);
++
++static long long ep_now_ms(void)
++{
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++}
++
++/* Wait with the repair slice ep_shim_clamp_timeout() dictates, but WITHOUT
++ * leaking the slicing to the caller: an empty 250ms repair poll is answered
++ * by re-waiting, never by returning 0, until the caller's own timeout
++ * genuinely expires. A premature 0 violates the epoll_wait contract — for
++ * timeout == -1 the kernel returns only with an event or a signal — and
++ * crashed libuv (uv__io_poll: "assert(timeout != -1)" when nfds == 0;
++ * pnpm --version died with SIGABRT). */
++static int ep_shim_wait(int epfd, struct epoll_event *events, int maxevents,
++			int timeout, epoll_pwait_fn real,
++			const sigset_t *sigmask)
++{
++	int slice = ep_shim_clamp_timeout(epfd, timeout);
++	if (slice == timeout)
++		return ep_shim_after_wait(real(epfd, events, maxevents,
++					       timeout, sigmask),
++					  epfd, events, maxevents);
++
++	long long deadline = 0;
++	if (timeout > 0)
++		deadline = ep_now_ms() + timeout;
++
++	for (;;) {
++		int rc = ep_shim_after_wait(real(epfd, events, maxevents,
++						 slice, sigmask),
++					    epfd, events, maxevents);
++		if (rc != 0)
++			return rc; /* real events, synthesized events, or -1/errno */
++		if (timeout > 0) {
++			long long left = deadline - ep_now_ms();
++			if (left <= 0)
++				return 0; /* caller's own timeout really expired */
++			if (left < slice)
++				slice = (int)left;
++		}
++	}
++}
++
++int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
++	       int timeout)
++{
++	/* Route through the real epoll_pwait with a NULL mask — that IS
++	 * epoll_wait at the syscall level — so both overrides share the
++	 * same hidden-slicing loop. */
++	static epoll_pwait_fn real = NULL;
++	if (!real)
++		real = (epoll_pwait_fn)dlsym(RTLD_NEXT, "epoll_pwait");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return ep_shim_wait(epfd, events, maxevents, timeout, real, NULL);
++}
++
++int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
++		int timeout, const sigset_t *sigmask)
++{
++	static epoll_pwait_fn real = NULL;
++	if (!real)
++		real = (epoll_pwait_fn)dlsym(RTLD_NEXT, "epoll_pwait");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return ep_shim_wait(epfd, events, maxevents, timeout, real, sigmask);
++}
++
++/* poll/ppoll: the real call already blocked for the full timeout, so all
++ * that is left is correcting the lie -- FIFO fds that asked for POLLIN,
++ * reported nothing, yet have bytes pending. No timeout clamping here. */
++static int ep_shim_patch_pollfds(struct pollfd *fds, nfds_t nfds, int rc)
++{
++	nfds_t i;
++	if (rc < 0 || !ep_pipe_active())
++		return rc;
++	for (i = 0; i < nfds; i++) {
++		int avail = 0;
++		if (fds[i].fd < 0 || !(fds[i].events & POLLIN) ||
++		    fds[i].revents != 0)
++			continue;
++		if (!splice_fd_is_fifo(fds[i].fd))
++			continue;
++		if (ioctl(fds[i].fd, FIONREAD, &avail) == 0 && avail > 0) {
++			fds[i].revents = POLLIN;
++			rc++;	/* poll's rc counts fds with revents set */
++		}
++	}
++	return rc;
++}
++
++typedef int (*poll_fn)(struct pollfd *, nfds_t, int);
++typedef int (*ppoll_fn)(struct pollfd *, nfds_t, const struct timespec *,
++			const sigset_t *);
++
++int poll(struct pollfd *fds, nfds_t nfds, int timeout)
++{
++	static poll_fn real = NULL;
++	if (!real)
++		real = (poll_fn)dlsym(RTLD_NEXT, "poll");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return ep_shim_patch_pollfds(fds, nfds, real(fds, nfds, timeout));
++}
++
++int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
++	  const sigset_t *sigmask)
++{
++	static ppoll_fn real = NULL;
++	if (!real)
++		real = (ppoll_fn)dlsym(RTLD_NEXT, "ppoll");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	return ep_shim_patch_pollfds(fds, nfds,
++				     real(fds, nfds, timeout, sigmask));
++}
++
++typedef int (*close_fn)(int);
++
++int close(int fd)
++{
++	static close_fn real = NULL;
++	if (!real)
++		real = (close_fn)dlsym(RTLD_NEXT, "close");
++	if (!real) {
++		errno = ENOSYS;
++		return -1;
++	}
++	/* Forget before the real close: afterwards the number can be
++	 * handed out again at any moment. Covers the fd both as a
++	 * registered pipe and as an epfd with pipes under repair. */
++	if (fd >= 0 && ep_pipe_active()) {
++		pthread_mutex_lock(&g_ep_pipes_lock);
++		ep_reg_forget_fd_locked(fd);
++		pthread_mutex_unlock(&g_ep_pipes_lock);
++	}
++	return real(fd);
++}
++
++int linkat(int olddirfd, const char *oldpath, int newdirfd,
++	  const char *newpath, int flags)
++{
++	static linkat_fn real = NULL;
++	if (!real)
++		real = (linkat_fn)dlsym(RTLD_NEXT, "linkat");
++
++	int rc = real ? real(olddirfd, oldpath, newdirfd, newpath, flags) : -1;
++	if (rc == 0)
++		return 0;
++	if (shim_disabled("linkat"))
++		return rc;
++	if (errno != EPERM && errno != EACCES)
++		return rc;
++
++	int src = openat(olddirfd, oldpath,
++			 O_RDONLY | (flags & AT_SYMLINK_FOLLOW ? 0 : O_NOFOLLOW));
++	if (src < 0)
++		return -1;
++
++	struct stat st;
++	if (fstat(src, &st) != 0) {
++		int e = errno;
++		close(src);
++		errno = e;
++		return -1;
++	}
++
++	if (copy_fd_to_path_atomic(src, newdirfd, newpath,
++				   st.st_mode & 0777) != 0) {
++		int e = errno;
++		close(src);
++		errno = e;
++		return -1;
++	}
++	close(src);
++	return 0;
++}
++
++typedef int (*symlinkat_fn)(const char *, int, const char *);
++
++int symlinkat(const char *target, int newdirfd, const char *linkpath)
++{
++	static symlinkat_fn real = NULL;
++	if (!real)
++		real = (symlinkat_fn)dlsym(RTLD_NEXT, "symlinkat");
++
++	int rc = real ? real(target, newdirfd, linkpath) : -1;
++	if (rc == 0)
++		return 0;
++	if (shim_disabled("symlinkat"))
++		return rc;
++	if (errno != EPERM && errno != EACCES)
++		return rc;
++
++	/* Resolve `target` relative to the link's directory (newdirfd), NOT the
++	 * process CWD: a package symlink's target is almost always a path
++	 * relative to the link's own dir (e.g. node_modules/.bin/cli -> ../pkg),
++	 * and resolving it against CWD would either miss or copy an unrelated
++	 * same-named file. Only handles the "target resolves to a real file"
++	 * case; a dangling/not-yet-extracted target still fails as before. */
++	int src = openat(newdirfd, target, O_RDONLY);
++	if (src < 0) {
++		errno = EPERM;
++		return -1;
++	}
++
++	struct stat st;
++	if (fstat(src, &st) != 0) {
++		int e = errno;
++		close(src);
++		errno = e;
++		return -1;
++	}
++
++	if (copy_fd_to_path_atomic(src, newdirfd, linkpath,
++				   st.st_mode & 0777) != 0) {
++		int e = errno;
++		close(src);
++		errno = e;
++		return -1;
++	}
++	close(src);
++	return 0;
++}
+diff --git a/scripts/build/source.ts b/scripts/build/source.ts
+index e57282be9a7..8da1c4441ad 100644
+--- a/scripts/build/source.ts
++++ b/scripts/build/source.ts
+@@ -670,8 +670,22 @@ export function registerDepRules(n: Ninja, cfg: Config): void {
+   // would add --target which breaks cross-compiles. cfg.hostCc (not cfg.cc):
+   // when cross-compiling for windows, cc is clang-cl and defaults to a
+   // *-windows-msvc triple — host tools must stay plain clang.
++  // Post-link sign for OHOS host only: HarmonyOS rejects unsigned ELFs at
++  // exec. Uses binary-sign-tool (from ohos-sdk build dep, always available at
++  // build time) — ohos-selfsign is compiled later inside the same ninja graph
++  // and cannot be used here. Gated on cfg.ohos: on linux the sign check is a
++  // no-op shell (`command -v` fails, `:;` exits 0) but wastes a spawn per
++  // host-tool link; on windows the POSIX `{ ...; }` / `>/dev/null` syntax
++  // isn't valid for ninja's cmd.exe invocation and lld-link receives `&&`,
++  // `{`, `command` etc. as input files (observed on windows-latest CI).
++  const hostCcCmd = cfg.ohos
++    ? `${q(cfg.hostCc)} $flags -o $out $in` +
++      ` && { command -v binary-sign-tool >/dev/null 2>&1` +
++      ` && binary-sign-tool sign -selfSign 1 -inFile $out -outFile $out.signed >/dev/null 2>&1` +
++      ` && mv -f $out.signed $out && chmod +x $out; :; }`
++    : `${q(cfg.hostCc)} $flags -o $out $in`;
+   n.rule("dep_host_cc", {
+-    command: `${q(cfg.hostCc)} $flags -o $out $in`,
++    command: hostCcCmd,
+     description: "host-cc $out",
+   });
+ 
+@@ -1472,14 +1486,22 @@ function emitCargo(n: Ninja, cfg: Config, name: string, spec: CargoBuild, input:
+     env[envKey] = cfg.msvcLinker;
+   }
+ 
+-  // Cross-compile (Android): cargo's default `cc` linker can't handle the
+-  // foreign ELF objects. Use our clang as the linker driver and pass
++  // Cross-compile (Android / OHOS): cargo's default `cc` linker can't handle
++  // the foreign ELF objects. Use our clang as the linker driver and pass
+   // --target/--sysroot through, same as the C/C++ deps do via globalFlags.
+   // The cdylib output also wants -lunwind, which lives in the NDK's
+   // bundled clang resource dir (not the sysroot), so we add that -L too.
+   if (cfg.crossTarget !== undefined && spec.rustTarget !== undefined) {
+     const envKey = `CARGO_TARGET_${spec.rustTarget.toUpperCase().replace(/-/g, "_")}_LINKER`;
+-    env[envKey] = cfg.cc;
++    // OHOS native (host==target==aarch64-unknown-linux-ohos): use the signing
++    // linker wrapper so build-script binaries are signed synchronously after
++    // each link. Unsigned ELFs trip OHOS's "Permission denied" exec guard.
++    const ohosLinker = process.env.OHOS_BUN_SIGNING_LINKER;
++    if (cfg.ohos && ohosLinker !== undefined) {
++      env[envKey] = ohosLinker;
++    } else {
++      env[envKey] = cfg.cc;
++    }
+     const linkArgs = [`-Clink-arg=--target=${cfg.crossTarget}`];
+     if (cfg.sysroot !== undefined) linkArgs.push(`-Clink-arg=--sysroot=${cfg.sysroot}`);
+     if (cfg.androidNdkRuntimeDir !== undefined) {
+diff --git a/scripts/build/tools.ts b/scripts/build/tools.ts
+index 4aa4474bcde..cae2c854000 100644
+--- a/scripts/build/tools.ts
++++ b/scripts/build/tools.ts
+@@ -283,7 +283,9 @@ export function findTool(spec: ToolSpec): FoundTool | undefined {
+ export const LLVM_VERSION = "21.1.8";
+ const LLVM_MAJOR = "21";
+ const LLVM_MINOR = "1";
+-const LLVM_VERSION_RANGE = `>=${LLVM_MAJOR}.${LLVM_MINOR}.0 <${LLVM_MAJOR}.${LLVM_MINOR}.99`;
++// OHOS needs LLVM 22+ (musl-compatible libc++). The range is
++// deliberately wide (>21 <23) so both LLVM 21 and LLVM 22 work.
++const LLVM_VERSION_RANGE = ">=21.1.0 <23.0.0";
+ 
+ /**
+  * Explicit toolchain directories, for building Bun with a self-built LLVM /
+@@ -345,6 +347,11 @@ function llvmSearchPaths(os: OS, arch: Arch): string[] {
+     paths.push(`/usr/lib/llvm${LLVM_MAJOR}/bin`);
+   }
+ 
++  if (os === "ohos") {
++    // OHOS uses LLVM 22 for musl-compatible libc++
++    paths.push("/opt/llvm-22.1.4/bin");
++  }
++
+   return paths;
+ }
+ 
+@@ -365,6 +372,7 @@ function llvmInstallHint(os: OS): string {
+   if (os === "darwin") return `Install with: brew install llvm@${LLVM_MAJOR}`;
+   if (os === "linux")
+     return `Install with: apt install clang-${LLVM_MAJOR} lld-${LLVM_MAJOR}  (or equivalent for your distro)`;
++  if (os === "ohos") return `Install LLVM 22+ and provide --ohos-sysroot and --ohos-sdk-root`;
+   if (os === "windows") return `Install LLVM ${LLVM_VERSION} from https://github.com/llvm/llvm-project/releases`;
+   return "";
+ }
+diff --git a/scripts/build/workarounds.ts b/scripts/build/workarounds.ts
+index fd190773739..92e4cb89950 100644
+--- a/scripts/build/workarounds.ts
++++ b/scripts/build/workarounds.ts
+@@ -65,6 +65,25 @@ export interface Workaround {
+ }
+ 
+ export const workarounds: Workaround[] = [
++  {
++    id: "ohos-compat-shim-embed",
++    issue: "https://github.com/social4hyq/ohos-compat-shim",
++    description:
++      "HarmonyOS app sandboxes SIGSYS-kill seccomp-filtered syscalls (close_range, fchmodat2) " +
++      "and return sandbox-specific errno from getpwuid_r/tmpfile/getcwd. A vendored copy of " +
++      "ohos-compat-shim's probe-then-fallback interposer (shims/ohos_compat_shim.c) is linked " +
++      "into the executable with its symbols re-exported, so bun and every `bun build --compile` " +
++      "output run without the LD_PRELOAD wrapper the harmonybrew formulas used to require.",
++    applies: cfg => cfg.ohos,
++    // Sandbox seccomp policy, not a toolchain bug — no toolchain bump fixes
++    // it. Re-evaluate only if HarmonyOS ever relaxes the app allowlist
++    // (probe: a plain close_range() call surviving in a hishell terminal).
++    expectedToBeFixed: () => false,
++    cleanup:
++      `Delete scripts/build/shims/ohos_compat_shim.c, needsOhosCompatShim() and its blocks in ` +
++      `scripts/build/shims.ts, the shim symbol block in src/linker.lds, restore the LD_PRELOAD ` +
++      `wrapper in the bun.rb formula, and this entry.`,
++  },
+   {
+     id: "asan-dyld-shim",
+     issue: "https://github.com/llvm/llvm-project/issues/182943",
+@@ -96,9 +115,14 @@ export const workarounds: Workaround[] = [
+       // Obsolete once clang's LLVM major catches up to (or passes) rustc's —
+       // at that point clang's own ld.lld reads rustc's bitcode and the
+       // rust-lld swap in resolveConfig() never fires.
+-      const clangMajor = Number(cfg.clangVersion!.split(".")[0]);
+-      const rustMajor = Number(cfg.rustLlvmVersion!.split(".")[0]);
+-      return clangMajor >= rustMajor;
++      // Note: same major version is NOT sufficient — clang 22.1.4 vs rustc
++      // 22.1.8: clang's lld still can't read rustc's LTO bitcode. Require
++      // clang >= rustc at full version compare.
++      const clangVersion = cfg.clangVersion!;
++      const rustVersion = cfg.rustLlvmVersion!;
++      const clangMajor = Number(clangVersion.split(".")[0]);
++      const rustMajor = Number(rustVersion.split(".")[0]);
++      return clangMajor > rustMajor || (clangMajor === rustMajor && clangVersion >= rustVersion);
+     },
+     cleanup:
+       `Delete the rust-lld swap block in resolveConfig() (config.ts), findRustLld() and its call ` +
+@@ -145,9 +169,11 @@ export const workarounds: Workaround[] = [
+       // Obsolete the same instant the rust-lld swap above is — once clang's
+       // ld.lld (built with zlib) reads rustc's bitcode, we never select
+       // rust-lld and the compressed CRTs are a non-issue.
+-      const clangMajor = Number(cfg.clangVersion!.split(".")[0]);
+-      const rustMajor = Number(cfg.rustLlvmVersion!.split(".")[0]);
+-      return clangMajor >= rustMajor;
++      const clangVersion = cfg.clangVersion!;
++      const rustVersion = cfg.rustLlvmVersion!;
++      const clangMajor = Number(clangVersion.split(".")[0]);
++      const rustMajor = Number(rustVersion.split(".")[0]);
++      return clangMajor > rustMajor || (clangMajor === rustMajor && clangVersion >= rustVersion);
+     },
+     cleanup:
+       `Delete needsMuslCrtDecompress(), MUSL_CRT_OBJECTS, the shim_crt_decompress rule, and the ` +
+diff --git a/scripts/runner.node.mjs b/scripts/runner.node.mjs
+index 1ef7223d701..e177e47d0ae 100755
+--- a/scripts/runner.node.mjs
++++ b/scripts/runner.node.mjs
+@@ -28,7 +28,8 @@ import {
+   writeFileSync,
+ } from "node:fs";
+ import { readFile } from "node:fs/promises";
+-import { availableParallelism, userInfo } from "node:os";
++import { createServer } from "node:net";
++import { availableParallelism } from "node:os";
+ import { basename, dirname, extname, join, relative, sep } from "node:path";
+ import { createInterface } from "node:readline";
+ import { setTimeout as setTimeoutPromise } from "node:timers/promises";
+@@ -49,11 +50,13 @@ import {
+   getDistroVersion,
+   getEnv,
+   getFileUrl,
++  homedir as getHomedir,
+   getHostname,
+   getLoggedInUserCountOrDetails,
+   getOs,
+   getSecret,
+   getShell,
++  getUsername,
+   getWindowsExitReason,
+   isAndroid,
+   isBuildkite,
+@@ -1315,7 +1318,24 @@ async function runTests() {
+         timeout: 60_000,
+       });
+       if (!buildResult.ok) {
+-        throw new Error(`Failed to build vendor: ${buildResult.error}`);
++        // A vendor build failure must not kill the whole run: throwing here
++        // aborts runTests before the results.json write, losing the results
++        // of every test file that already ran. Record the suite as failed
++        // and continue with the remaining vendors.
++        for (const testPath of testPaths) {
++          const title = join(relative(cwd, vendorPath), testPath).replace(/\\/g, "/");
++          failedResultsTitles.push(title);
++          failedResults.push({
++            testPath: title,
++            ok: false,
++            status: "fail",
++            tests: [],
++            errors: [],
++            stdout: "",
++            stdoutPreview: `vendor build failed: ${buildResult.error}`,
++          });
++        }
++        continue;
+       }
+ 
+       for (const testPath of testPaths) {
+@@ -1858,7 +1878,23 @@ async function spawnSafe(options) {
+ let _combinedPath = "";
+ function getCombinedPath(execPath) {
+   if (!_combinedPath) {
+-    _combinedPath = addPath(realpathSync(dirname(execPath)), process.env.PATH);
++    const paths = [realpathSync(dirname(execPath))];
++    if (process.platform === "openharmony") {
++      // `~/.harmonybrew/bin/clang(++)` resolves to ohos-sdk's older bundled
++      // clang (15.0.4, no <source_location>/C++20 libc++), not llvm@21 —
++      // both formulae ship a binary of that name and ohos-sdk's is the one
++      // linked. node-gyp finds a compiler by searching PATH for clang/cc
++      // regardless of the CC/CXX env vars, so any test that builds a native
++      // addon (napi, v8 embedder tests) silently used the wrong one and
++      // failed on missing C++20 headers. Put llvm@21's own versioned keg
++      // bin dir first so `clang`/`clang++` resolve there unambiguously.
++      const brew = spawnSync("brew", ["--prefix", "llvm@21"], { encoding: "utf-8" });
++      if (!brew.error && brew.status === 0) {
++        paths.push(join(brew.stdout.trim(), "bin"));
++      }
++    }
++    paths.push(process.env.PATH);
++    _combinedPath = addPath(...paths);
+     // If we're running bun-profile.exe, try to make a symlink to bun.exe so
+     // that anything looking for "bun" will find it
+     if (isCI && basename(execPath, extname(execPath)).toLowerCase() !== "bun") {
+@@ -1880,6 +1916,45 @@ function getCombinedPath(execPath) {
+   return _combinedPath;
+ }
+ 
++// On OHOS devices the default tmpdir often resolves onto the user-storage
++// volume (hmdfs/FUSE): regular file I/O works, but AF_UNIX bind() returns
++// EPERM, so every test that listens on a unix socket fails no matter where
++// the test itself puts it. Probe candidate roots once with a real socket
++// bind and cache the first AF_UNIX-capable one; null falls back to
++// os.tmpdir() (previous behavior) when no candidate qualifies.
++let ohosTmpRootPromise;
++function ohosUnixCapableTmpRoot() {
++  return (ohosTmpRootPromise ??= (async () => {
++    const candidates = [...new Set([process.env.TMPDIR, "/data/local/tmp", tmpdir(), "/tmp"])].filter(Boolean);
++    for (const root of candidates) {
++      let dir;
++      try {
++        dir = mkdtempSync(join(root, "buntmp-probe-"));
++      } catch {
++        continue;
++      }
++      const probePath = join(dir, "afunix-probe.sock");
++      const capable = await new Promise(resolve => {
++        const server = createServer();
++        const settle = ok => {
++          server.close();
++          try {
++            unlinkSync(probePath);
++          } catch {}
++          resolve(ok);
++        };
++        server.once("error", () => settle(false));
++        server.listen(probePath, () => settle(true));
++      });
++      if (capable) return root;
++      try {
++        rmSync(dir, { recursive: true, force: true });
++      } catch {}
++    }
++    return null;
++  })());
++}
++
+ /**
+  * @typedef {object} SpawnBunResult
+  * @extends SpawnResult
+@@ -1893,9 +1968,25 @@ function getCombinedPath(execPath) {
+  */
+ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTimeout, env, stdout, stderr }) {
+   const path = getCombinedPath(execPath);
+-  const tmpdirPath = mkdtempSync(join(tmpdir(), "buntmp-"));
+-  const { username, homedir } = userInfo();
++  // OHOS: scratch dirs must live on an AF_UNIX-capable volume (see
++  // ohosUnixCapableTmpRoot) or every unix-socket test EPERMs on bind.
++  const tmpBase = process.platform === "openharmony" ? ((await ohosUnixCapableTmpRoot()) ?? tmpdir()) : tmpdir();
++  const tmpdirPath = mkdtempSync(join(tmpBase, "buntmp-"));
++  const username = getUsername();
++  const homedir = getHomedir();
+   const shellPath = getShell();
++  // bun:ffi's TCC linker only adds the OHOS sysroot's libc/include paths
++  // (needed for headers as basic as <stdint.h>) when $OHOS_SYSROOT is set
++  // (see src/runtime/ffi/ffi_body.rs). CI sets this at job level already;
++  // fall back to `brew --prefix ohos-sdk` so ad-hoc local runs of this
++  // runner don't silently lose that include path.
++  let ohosSysroot;
++  if (process.platform === "openharmony" && !process.env.OHOS_SYSROOT) {
++    const brew = spawnSync("brew", ["--prefix", "ohos-sdk"], { encoding: "utf-8" });
++    if (!brew.error && brew.status === 0) {
++      ohosSysroot = join(brew.stdout.trim(), "native", "sysroot");
++    }
++  }
+   const bunEnv = {
+     ...process.env,
+     PATH: path,
+@@ -1915,6 +2006,14 @@ async function spawnBun(execPath, { args, cwd, timeout, gracefulTimeout, idleTim
+     BUN_INSTALL_CACHE_DIR: tmpdirPath,
+     SHELLOPTS: isWindows ? "igncr" : undefined, // ignore "\r" on Windows
+     TEST_TMPDIR: tmpdirPath, // Used in Node.js tests.
++    // The vendored Node test suite's common/tmpdir.js defaults its scratch
++    // root to a directory relative to the test file itself, which on OHOS
++    // can't hold AF_UNIX socket files or hardlinks (EPERM). Point it at a
++    // tmpdir that does. common/index.js derives its AF_UNIX pipe path via
++    // path.relative(cwd, NODE_TEST_DIR), and sockaddr_un.sun_path is capped
++    // at 108 bytes, so keep the directory name as short as possible.
++    ...(process.platform === "openharmony" ? { NODE_TEST_DIR: mkdtempSync(join(tmpBase, "nt-")) } : {}),
++    ...(ohosSysroot ? { OHOS_SYSROOT: ohosSysroot } : {}),
+     ...(typeof remapPort == "number"
+       ? { BUN_CRASH_REPORT_URL: `http://localhost:${remapPort}` }
+       : { BUN_ENABLE_CRASH_REPORTING: "0" }),
+@@ -2144,7 +2243,13 @@ async function spawnBunTest(execPath, testPath, opts = { cwd }) {
+     // setup (napi node-gyp compiles) or many subprocess spawns don't hit
+     // the file wall before any individual test times out. Kept below the
+     // per-test multiplier so the overall shard stays inside the job timeout.
+-    timeout: isReallyTest ? Math.ceil(timeout * (isAsan ? 2 : 1)) : 30_000,
++    // OHOS: fork/spawn and fs syscalls run 2-3x slower than Linux, and this
++    // outer wall-clock kill ignores a file's own setDefaultTimeout() —
++    // install/migration-heavy files were getting killed here even after
++    // raising their internal timeout past the wall.
++    timeout: isReallyTest
++      ? Math.ceil(timeout * (isAsan ? 2 : 1) * (process.platform === "openharmony" ? 3 : 1))
++      : 30_000,
+     env,
+     stdout: opts.stdout ?? pipeTestStdout(process.stdout),
+     stderr: opts.stderr ?? pipeTestStdout(process.stderr),
+diff --git a/scripts/utils.mjs b/scripts/utils.mjs
+index 75da2ff08d2..e50f4594a9e 100755
+--- a/scripts/utils.mjs
++++ b/scripts/utils.mjs
+@@ -1162,6 +1162,12 @@ export function getFileUrl(filename, line) {
+ 
+   const filePath = (cwd ? relative(cwd, filename) : filename).replace(/\\/g, "/");
+   const commit = getCommit(cwd);
++  // git may be unavailable or blocked by dubious-ownership in sandboxed
++  // environments (e.g. the OHOS container runs as root over a runner-owned
++  // checkout) — fail soft: the failure annotation just loses its link.
++  if (!baseUrl || !commit) {
++    return;
++  }
+   const url = new URL(`blob/${commit}/${filePath}`, `${baseUrl}/`).toString();
+   if (typeof line !== "undefined") {
+     return new URL(`#L${line}`, url);
+@@ -1366,7 +1372,12 @@ export function tmpdir() {
+     }
+   }
+ 
+-  if (isMacOS || isLinux) {
++  if (isMacOS || isLinux || process.platform === "openharmony") {
++    // Check TMPDIR env var first (user override for read-only /tmp, e.g. OHOS)
++    const userTmp = process.env["TMPDIR"] || process.env["TEMP"] || process.env["TMP"];
++    if (userTmp) {
++      return userTmp;
++    }
+     if (existsSync("/tmp")) {
+       return "/tmp";
+     }
+@@ -1422,7 +1433,7 @@ export function parseOs(string) {
+   if (/darwin|apple|mac/i.test(string)) {
+     return "darwin";
+   }
+-  if (/linux|android/i.test(string)) {
++  if (/linux|openharmony|android/i.test(string)) {
+     return "linux";
+   }
+   if (/freebsd/i.test(string)) {
+@@ -1612,8 +1623,20 @@ export function getHostname() {
+  * @returns {string}
+  */
+ export function getUsername() {
+-  const { username } = userInfo();
+-  return username;
++  try {
++    const { username } = userInfo();
++    return username;
++  } catch (error) {
++    // libuv's uv_os_get_passwd() throws ENOENT when the process uid has no
++    // /etc/passwd entry (e.g. some sandboxed execution contexts, including
++    // OHOS app-sandbox uids that are never registered there). Fall back to
++    // env vars, then the raw uid, instead of crashing before a single test
++    // has run.
++    if (error?.code === "ERR_SYSTEM_ERROR" && error?.info?.code === "ENOENT") {
++      return process.env.USER || process.env.LOGNAME || `uid${process.getuid?.() ?? "unknown"}`;
++    }
++    throw error;
++  }
+ }
+ 
+ /**
+@@ -1643,6 +1666,10 @@ export function getUsernameForDistro(distro) {
+  * @returns {string | undefined}
+  */
+ export function getDistro() {
++  if (process.platform === "openharmony") {
++    return "openharmony";
++  }
++
+   if (isMacOS) {
+     return "macOS";
+   }
+diff --git a/src/codegen/create-hash-table.ts b/src/codegen/create-hash-table.ts
+index 5e2ad58b951..b758d76a1f0 100644
+--- a/src/codegen/create-hash-table.ts
++++ b/src/codegen/create-hash-table.ts
+@@ -12,7 +12,9 @@ export function createHashTable(input: string, output: string): void {
+   const input_text = readFileSync(input, "utf8");
+   const to_preprocess = [...input_text.matchAll(/@begin\s+.+?@end/gs)].map(m => m[0]).join("\n");
+ 
+-  const os = platform === "win32" ? "WINDOWS" : platform.toUpperCase();
++  // WebKit has no OS(OPENHARMONY); OHOS is linux-kernel, so preprocess with
++  // the LINUX guards kept. (TARGET_PLATFORM is "openharmony" for ohos builds.)
++  const os = platform === "win32" ? "WINDOWS" : platform === "openharmony" ? "LINUX" : platform.toUpperCase();
+   const other_oses = ["WINDOWS", "DARWIN", "LINUX"].filter(x => x !== os);
+   const to_remove = new RegExp(`#if\\s+(!OS\\(${os}\\)|OS\\((${other_oses.join("|")})\\))\\n.*?#endif`, "gs");
+ 

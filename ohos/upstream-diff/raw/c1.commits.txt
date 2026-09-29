@@ -1,0 +1,37 @@
+e4cc9c7fee9 fix(ohos): clear the ohos-target clippy debt in bun_runtime
+6d4ab6ed1a7 fix(ohos): adoption batch — cwd truncation, IN_ATTRIB suppression, getgroups egid
+69e43302962 fix(ohos): epoll ADD-EEXIST re-registration and net fatal-send errno latch
+107a8876ae6 fix(ohos): clear the ohos-target clippy debt in the spawn-path crates
+7c2254b9833 fix(ohos): add IS_OHOS libc detection and the -ohos target/asset suffix
+5b812deb4c9 fix(ohos): report aarch64 from os.machine() on openharmony
+4af190243be fix(ohos): give spawned node children a working os.userInfo()
+ada3dfd10e4 fix(ohos): restore reference test runner defaults (5s timeout, honest cwd)
+e6a4f2d7afb fix(ohos): deliver PTY data/exit notifications in Terminal startup
+36dd9b86074 fix(ohos): honest deleted-cwd propagation, rlimit clamp, tmpdir probe, X_OK exec check
+c632b1e2b9b [autofix.ci] apply automated fixes
+38371c22b46 fix(ohos): use system getaddrinfo and force IPv4 when no routable IPv6
+54dc7eef051 fix(ohos): prewarm the always-on waiter thread at VM init
+d624a98d0ea fix(ohos): finish pipe-output capture (memfd→socketpair, waiter-thread default, close_range, $PWD sync)
+0c32a69fd82 fix(ohos): report "openharmony" from the C++ process.platform getter and bundle-time inlining
+ff4f267b86b fix(ohos): report process.platform as "openharmony" on OHOS builds
+fed363c7b5c fix(ohos): AF_UNIX-capable scratch tmpdir in runner; wasi-runner drops unopenable / preopen
+b2c43428922 [autofix.ci] apply automated fixes
+519c8f5e37b fix(ohos): add 5 missing OHOS cfg gates in run_command.rs
+09c6251265c fix(ohos): remove Highway SVE disabling to fix 32 test regressions
+20dfbf53f1d fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+26a02335143 fix(ohos): polyfill hn::BitsFromMask for Highway SVE/SVE2 backends
+10fa7aeecfa fix(ohos): guard cgroup v1 code with !defined(__OHOS__) in bun-spawn.cpp
+ed85521f50f fix(ohos): remove stale lifetime param from DotEnv::Loader in ohos_set_pwd
+5c8b2fbea5d fix(ohos): fall back to TCSANOW when TCSADRAIN is refused on a PTY master
+51531e8f8a0 fix(ohos): keep Capture.buf and Stdio::byte_slice pub after upstream pub(crate) narrowing
+de0c2dbfbe5 fix(ohos): stop newEnvp from dangling out of scope before execve()
+7780f3e420c fix(ohos): social4hyq container + ABI alignment + 4 sb install backports (#10)
+5f7e1d65405 fix(cross-platform): restore non-OHOS behavior for 3 regressions brought in by OHOS landing
+51181a8fe6a fix(build): qualify DestructionMode enumerators for clang-cl cross-compile
+d55ecd2e83a fix(build): cross-platform fixes for windows-x64 build
+11fca04debb fix(ohos): remove redundant V8Array std::function alias + symlink ICU into webkit prebuilt cache
+1d3713e7682 fix(ohos): resolver EACCES sandbox + napi V8 mangling + close_range skip
+d576713d37c feat(ohos): bump default test timeout to 30s on OHOS
+631c38bf7c8 fix(ohos): seccomp/SIGSYS plumbing — Error From impl + signal_code is_string
+a09c4e3714d feat(ohos): code signing — ohos_sign crate + sign-on-dlopen/spawn/install
+6ab080f0b3c feat(ohos): build infra + syscall exclusions (minimal OHOS-buildable)

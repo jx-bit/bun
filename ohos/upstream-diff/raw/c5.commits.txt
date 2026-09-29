@@ -1,0 +1,21 @@
+56283f5de94 build: keep the PCH on in CI full mode — cross lanes need its JSC declarations
+0c32a69fd82 fix(ohos): report "openharmony" from the C++ process.platform getter and bundle-time inlining
+fed363c7b5c fix(ohos): AF_UNIX-capable scratch tmpdir in runner; wasi-runner drops unopenable / preopen
+296f5666850 fix(ohos): runner env for device lane — NODE_TEST_DIR short-path tmpdir, OHOS outer wall-clock x3
+a62cc31a687 fix(ohos): runner imported getHomedir — utils exports homedir
+cf279097ffb fix(ohos): container lane followups — openharmony runner, shebang arg keepalive, ENOSPC, env fixes
+11c98ffff60 ci(ohos): container test lanes — PR triggers, parallelism, resilient results, brew drift repairs, openharmony runner support
+7418b79c812 [autofix.ci] apply automated fixes
+b7a61d3b9a0 ci(ohos): unblock ohos-full-test from the offline self-hosted runner
+b2c43428922 [autofix.ci] apply automated fixes
+c3d3a63f8aa fix(lints): sync allRustTargets and dead-code baseline with OHOS changes
+9288f9a4202 fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+20dfbf53f1d fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+aad32a625bd feat(ohos): port ohos-compat-shim from social4hyq/ohos-bun
+7780f3e420c fix(ohos): social4hyq container + ABI alignment + 4 sb install backports (#10)
+89a1b36c951 ci(cross): add darwin-arm64 cross-compile (aarch64 linux host -> Mach-O arm64)
+ac2122c966d fix(build): add linux gnu/musl cross-compile support to config.ts and flags.ts
+5f7e1d65405 fix(cross-platform): restore non-OHOS behavior for 3 regressions brought in by OHOS landing
+d55ecd2e83a fix(build): cross-platform fixes for windows-x64 build
+11fca04debb fix(ohos): remove redundant V8Array std::function alias + symlink ICU into webkit prebuilt cache
+6ab080f0b3c feat(ohos): build infra + syscall exclusions (minimal OHOS-buildable)

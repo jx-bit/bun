@@ -1,0 +1,61 @@
+53973948c35 release: prefer the self-hosted driver bun over floating tap kegs
+bd51b566a0a release: fix tag-lane publish — seed quoting, driver-bun fallback, pour hardening, body path
+aec9cdb0321 release: cut versioned releases from the container lane; retire the self-hosted release workflow
+9c5e1b1f2ee release: bilingual disclaimer (Chinese + English) on all release pages
+4f072b47fa8 release: lead release pages with Disclaimer/Known Limitations; trim Quick Install to the tarball one-liner
+b6e51965b62 release: pre-signed tarball as the install story; retire the install script
+5c9ae9db3d6 release: pre-sign OHOS binaries (signed canonical + unsigned variant)
+517c3627747 ci: join disclaimer paragraphs into single lines on release pages
+e02be33842f ci: auto-seed per-release docs and unify the release page layout
+e20463920fb ci: retire dead lanes, de-noise schedules, document the CI map
+a2ed7e91e4b ci: pair every release's install script with the assets it ships
+3465c5069f6 ci: fix publish staging — upload-artifact@v4 flattens single-file paths
+c42d6dab515 ci: make the cross binary verify step arch-aware for the linux legs
+5bac5e4c376 ci: build the five products in parallel and publish the multi-product latest on push
+651a14fb30a ci: provision the glibc sysroot for the linux-x64 leg only
+6608087aefb release: adopt the reference release-body convention (install one-liner, product table with sizes, build provenance)
+80c394db7f8 ci: fix linux-arm64 cross leg — the arch token is aarch64, not arm64
+0c11f205575 ci: adopt the reference release-title convention (Bun OHOS ...)
+10ec857a386 release: pair each versioned install script with its own bun binary
+0d89b57001b release: publish install-bun-ohos.sh with the OHOS binaries, default repo to this fork
+d9400f023b5 ci: assemble the multi-product rolling latest release (ohos-aarch64 + 4 cross targets)
+a774d027133 ci(ohos): add an ohos-target clippy lane to rust-lints
+2a831e46640 test(ohos): skip inventory ledger, libc-detection guards, platform semantics test
+374fc9134f0 docs(ohos): track the OHOS workspace README and point AI agents at it
+b5a1a28d929 ci(ohos): pin harmonybrew/core + assert sysroot contract in verify steps
+347dba76426 ci(ohos): probe the sdk sysroot layout (tap renamed ohos-sdk to ohos-sdk-native)
+bcfa600f9a4 docs(ohos): fold install-bun-ohos.sh into fulltest/ and index the test tooling
+083488b655a ci(ohos): align container gate with the 2026-09-12 tap restructure
+0bc299e9ad1 ci(ohos): stop double-running PR builds via overlapping push triggers
+cf279097ffb fix(ohos): container lane followups — openharmony runner, shebang arg keepalive, ENOSPC, env fixes
+11c98ffff60 ci(ohos): container test lanes — PR triggers, parallelism, resilient results, brew drift repairs, openharmony runner support
+88a237b0e35 fix(ohos): codesign validation + fulltest lane runner fallback
+b7a61d3b9a0 ci(ohos): unblock ohos-full-test from the offline self-hosted runner
+b70c1cfa3d4 fix(ohos_sign): replace parse_header's 4-tuple return with SectionHeaderTable struct
+9288f9a4202 fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+20dfbf53f1d fix(ohos): 3-way merge + CI trigger + Cargo.lock fix
+c662b96edcb docs(ohos): add newcomer fulltest guide + latest test report
+e61378ab2b4 test(ohos): add deploy-test-tree.sh + fix README launch command host-side background
+bf80be32829 test(ohos): add fulltest launcher/runner scripts to ohos/fulltest/
+52d34efd9ca ci(ohos): replace SWR ci-runner image with ubuntu:24.04 + musl-tools
+dedccebda6a ci(ohos): rewrite ohos-full-test.yml as two-stage build + container test
+27e9324068a fix(ohos): use system bun for test workflow (OHOS binary can't exec on Linux)
+6eb56a51086 ci(ohos): add push trigger to ohos-full-test.yml for workflow registration
+371025028db fix(ohos): switch WebKit fork from springmin to oven-sh/WebKit
+caf392d7237 ci(ohos): add ohos-full-test workflow + OPENHARMONY expectations
+7780f3e420c fix(ohos): social4hyq container + ABI alignment + 4 sb install backports (#10)
+800bf16c7e2 ci(ohos): upload bun binary artifact from github-hosted build
+89a1b36c951 ci(cross): add darwin-arm64 cross-compile (aarch64 linux host -> Mach-O arm64)
+1ff98b28e5a ci(cross): add linux-x64/windows-x64 cross-compile workflow on aarch64 host
+340bf5ed0cd ci(ohos): decouple github-hosted build from social4hyq bun-webkit bottle
+03a3da6d334 ci(ohos): pin WebKit ref + add rustup mirror fallback for self-hosted
+00abe63fd58 ci(x86): pin runner versions — ubuntu-latest->ubuntu-24.04, windows-latest->windows-2025
+74c8c04a3fa ci(ohos): harden github-hosted workflow — fix push trigger, pin container digest, scope incremental runs-on
+2a7aef5ba94 ci(x86): add github-hosted linux-x64/windows-x64/linux-arm64 build workflow
+d55ecd2e83a fix(build): cross-platform fixes for windows-x64 build
+154907929e2 ci(ohos): add github-hosted ARM64 build pipeline (ubuntu-24.04-arm + social4hyq ci-runner, --webkit=prebuilt)
+dca598c4534 ci(ohos): release workflow checkout through ghfast.top proxy
+57a27d33b79 ci(ohos): route checkout clone/fetch through ghfast.top proxy
+71aacd3983c ci(ohos): checkout the trigger commit, not hardcoded ohos-aarch64
+6ab080f0b3c feat(ohos): build infra + syscall exclusions (minimal OHOS-buildable)
+9dcaf3279e7 ci(ohos): add OHOS build/release pipeline
