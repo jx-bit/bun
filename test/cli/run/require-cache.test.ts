@@ -343,7 +343,7 @@ describe.concurrent("require.cache", () => {
       },
       // TODO: Investigate why this is so slow on Windows
       // OHOS: observed anywhere from ~64s to >90s across runs; give real margin.
-      isWindows ? 60000 : process.platform === "openharmony" ? 150_000 : 30000,
+      isWindows || isASAN ? 60000 : process.platform === "openharmony" ? 150_000 : 30000,
     );
   });
 });

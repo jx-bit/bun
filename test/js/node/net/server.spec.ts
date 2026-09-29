@@ -20,6 +20,35 @@ describe("net.createServer(connectionListener)", () => {
     expect(server).toBeInstanceOf(net.Server);
   });
 
+  // https://github.com/oven-sh/bun/issues/40917
+  it("registers the callback as a regular 'connection' listener", () => {
+    expect(server.listenerCount("connection")).toBe(1);
+    expect(server.listeners("connection")).toContain(onListen);
+
+    const socket = new net.Socket();
+    server.emit("connection", socket);
+    expect(onListen).toHaveBeenCalledTimes(1);
+    expect(onListen).toHaveBeenCalledWith(socket);
+  });
+
+  // Same no-host wildcard bind as the test below; the OHOS sandbox cannot
+  // resolve "localhost" over IPv6-only (see the comment there).
+  it.skipIf(process.platform === "openharmony")(
+    "stays a single 'connection' listener across accepted connections",
+    async () => {
+      await new Promise<void>(resolve => server.listen(0, () => resolve()));
+      const address = server.address() as net.AddressInfo;
+      for (let i = 0; i < 2; i++) {
+        const { promise, resolve } = Promise.withResolvers<net.Socket>();
+        server.once("connection", resolve);
+        await using client = net.createConnection(address);
+        await promise;
+      }
+      expect(onListen).toHaveBeenCalledTimes(2);
+      expect(server.listenerCount("connection")).toBe(1);
+    },
+  );
+
   // `server.listen()` with no host binds the IPv6 wildcard (`::`), and
   // `net.createConnection(server.address())` has no `host` field to read (only
   // `address`/`family`/`port`), so it falls back to connecting to the literal

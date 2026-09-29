@@ -124,7 +124,7 @@
   },
   "resolutions": {
     "react": "../node_modules/react",
-    "@types/node": "25.0.0",
+    "@types/node": "26.2.0",
     "@resvg/resvg-js": "npm:@ohos-npm-ports/resvg-resvg-js@2.6.2-1",
     "@napi-rs/canvas": "npm:@ohos-ports/napi-rs-canvas@0.1.80-beta.0",
     "sharp": "npm:@ohos-ports/sharp@0.34.5-beta.5"

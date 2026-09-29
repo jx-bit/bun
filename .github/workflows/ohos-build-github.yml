@@ -83,7 +83,7 @@ env:
   TAP_IN_CONTAINER: ${{ vars.OHOS_TAP_IN_CONTAINER }}
   BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: oven-sh/WebKit
-  WEBKIT_REF: 0f966e81b78c84bb23213e391bc679c4ef83e56b
+  WEBKIT_REF: 6119947592b6e1c1faef02a4c2e03174cf05d062
   RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
 
@@ -491,6 +491,11 @@ jobs:
         if: success()
         run: |
           set -e
+          # docker cp preserves the container's root ownership; this hosted
+          # runner is non-root, so the signer's write into build/release-ohos/
+          # needs the tree normalized first (the self-hosted runner ran as
+          # root and never hit this).
+          sudo chown -R "$(id -u):$(id -g)" build/release-ohos 2>/dev/null || true
           SIGNER=/tmp/ohos-selfsign
           if [ ! -x "$SIGNER" ]; then
             if ! command -v cargo >/dev/null 2>&1; then
