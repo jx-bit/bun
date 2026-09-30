@@ -85,6 +85,34 @@ export const workarounds: Workaround[] = [
       `wrapper in the bun.rb formula, and this entry.`,
   },
   {
+    id: "ohos-pthread-create-execve-interpose",
+    issue: "https://github.com/oven-sh/bun/pull/40978",
+    description:
+      "Upstream's fix for the kernel EAGAIN race (clone(CLONE_FS) failing every " +
+      "pthread_create while another thread of the process is inside execve(2), which " +
+      "killed --watch reloads and process.execve) links with -Wl,--wrap=execve " +
+      "-Wl,--wrap=pthread_create. bun-ohos links dynamically against ld-musl.so, so " +
+      "lld's --wrap can't resolve __real_execve/__real_pthread_create (only visible " +
+      "at static-link time, not in a shared object) — the linker only warns, and the " +
+      "musl loader hard-fails at process start. c-bindings.cpp's __OHOS__ branch " +
+      "reimplements the same retry algorithm as plain-named execve/pthread_create " +
+      "resolved via dlsym(RTLD_NEXT, ...), the same interposition mechanism " +
+      "ohos-compat-shim already uses for 18 other libc symbols (see " +
+      "'ohos-compat-shim-embed' above).",
+    applies: cfg => cfg.ohos,
+    // Not a toolchain version gap --wrap-against-shared-object support gaining a
+    // version threshold: it's an architectural mismatch (dynamic musl vs a
+    // linker feature built for static/versioned symbols). Re-evaluate only if
+    // bun-ohos ever links musl statically, or lld gains --wrap resolution
+    // against a symbol only present in a shared-object dependency.
+    expectedToBeFixed: () => false,
+    cleanup:
+      `Delete the #if defined(__OHOS__) branch (execve/pthread_create via dlsym) in ` +
+      `src/jsc/bindings/c-bindings.cpp, keeping only the __wrap_execve/__wrap_pthread_create ` +
+      `branch; change scripts/build/flags.ts's -Wl,--wrap=execve/pthread_create entry's ` +
+      `\`when\` back to \`c => c.linux\` (drop the !c.ohos); and remove this entry.`,
+  },
+  {
     id: "asan-dyld-shim",
     issue: "https://github.com/llvm/llvm-project/issues/182943",
     description:
