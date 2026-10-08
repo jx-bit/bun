@@ -2654,6 +2654,44 @@ mod posix_impl {
         Ok(unsafe { libc::strlen(p) })
     }
 
+    /// `process.cwd()` (OHOS): surface a rmdir'd cwd as ENOENT (Node's
+    /// uv_cwd() contract) instead of the ohos-compat-shim's `$HOME` fallback —
+    /// deliberately narrow; other getcwd callers still want the fallback.
+    #[cfg(target_env = "ohos")]
+    pub fn process_cwd(buf: &mut [u8]) -> Maybe<usize> {
+        let result = getcwd(buf);
+        if result.is_ok() && cwd_is_deleted() {
+            return Err(Error::from_code_int(libc::ENOENT, Tag::getcwd));
+        }
+        result
+    }
+
+    /// OHOS: whether the cwd was rmdir'd — readlink("/proc/self/cwd") ENOENTs
+    /// on OHOS; Linux appends " (deleted)" so readlink succeeds but stat then
+    /// ENOENTs. Both handled.
+    #[cfg(target_env = "ohos")]
+    fn cwd_is_deleted() -> bool {
+        let mut proc_buf = [0u8; 4096];
+        // SAFETY: "/proc/self/cwd" is a valid NUL-terminated path literal;
+        // proc_buf provides 4095 writable bytes + one reserved NUL slot.
+        let n = unsafe {
+            libc::readlink(
+                c"/proc/self/cwd".as_ptr(),
+                proc_buf.as_mut_ptr().cast(),
+                proc_buf.len() - 1,
+            )
+        };
+        if n > 0 {
+            proc_buf[n as usize] = 0;
+            // SAFETY: an all-zero `libc::stat` is a valid POD bit pattern.
+            let mut st: libc::stat = unsafe { core::mem::zeroed() };
+            // SAFETY: proc_buf is NUL-terminated by the assignment above.
+            return unsafe { libc::stat(proc_buf.as_ptr().cast(), &raw mut st) } < 0
+                && last_errno() == libc::ENOENT;
+        }
+        n < 0 && last_errno() == libc::ENOENT
+    }
+
     // ── link/perm/time/access group ──
     pub fn linkat(src_dir: impl AsFd, src: &ZStr, dest_dir: impl AsFd, dest: &ZStr) -> Maybe<()> {
         let src_dir = src_dir.as_fd();
