@@ -2508,15 +2508,28 @@ bun_output::declare_scope!(OhosSignRepair, hidden);
 /// lifecycle scripts run.
 #[cfg(target_env = "ohos")]
 fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
+    let debug = bun_core::getenv_z(bun_core::zstr!("OHOS_SIGN_DEBUG")).is_some();
     let dir = match Dir::open(pkg_dir) {
         Ok(d) => d,
-        Err(_) => return,
+        Err(e) => {
+            if debug {
+                bun_core::pretty_errorln!(
+                    "[ohos-sign] open {:?} failed: {:?}",
+                    bstr::BStr::new(pkg_dir),
+                    e
+                );
+            }
+            return;
+        }
     };
     let w = match Syscall::walker_skippable::walk(dir.fd(), &[], &[]) {
         Ok(w) => w,
         Err(_) => return,
     };
     let mut w = w;
+    // hmdfs reports DT_UNKNOWN for every dirent, so the walker needs the
+    // lstatat fallback or the scan silently matches nothing.
+    w.resolve_unknown_entry_types = true;
     while let Ok(Some(entry)) = w.next() {
         if entry.kind != Syscall::EntryKind::File {
             continue;
@@ -2530,10 +2543,13 @@ fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
         if !needs_sign {
             continue;
         }
-        let mut full = Vec::with_capacity(pkg_dir.len() + 1 + name.len());
+        // Use entry.path (walk-root-relative), not basename — scoped packages
+        // nest, basename yields a nonexistent path.
+        let rel = entry.path.as_bytes();
+        let mut full = Vec::with_capacity(pkg_dir.len() + 1 + rel.len());
         full.extend_from_slice(pkg_dir);
         full.push(b'/');
-        full.extend_from_slice(name);
+        full.extend_from_slice(rel);
         // Package directories are not guaranteed UTF-8; `OsStr::from_bytes`
         // accepts arbitrary path bytes.
         let os: &std::ffi::OsStr = std::os::unix::ffi::OsStrExt::from_bytes(&full);
@@ -2543,9 +2559,17 @@ fn ohos_sign_native_binaries(pkg_dir: &[u8]) {
         // a presence-only check would leave the kernel to reject it at
         // dlopen with no recovery.
         if ohos_sign::repair_codesign_if_needed(p) {
+            if debug {
+                bun_core::pretty_errorln!("[ohos-sign] {}: signed", bstr::BStr::new(&full));
+            }
             bun_output::scoped_log!(
                 OhosSignRepair,
                 "re-signed {} during install",
+                bstr::BStr::new(&full)
+            );
+        } else if debug {
+            bun_core::pretty_errorln!(
+                "[ohos-sign] {}: sign skipped/failed",
                 bstr::BStr::new(&full)
             );
         }

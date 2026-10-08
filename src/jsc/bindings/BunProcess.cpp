@@ -438,6 +438,9 @@ static char* toFileURI(std::span<const char> span)
 extern "C" size_t Bun__process_dlopen_count;
 
 extern "C" void CrashHandler__setDlOpenAction(const char* action);
+// bun_sys dlopen wrapper: on OHOS it signs the target and retries once when
+// the kernel refuses the load for a missing/stale .codesign section.
+extern "C" void* Bun__dlopen(const char* path, int flags);
 extern "C" bool Bun__VM__allowAddons(void* vm);
 extern "C" int32_t Bun__addonNeedsGlibcOnMusl(const char* path, size_t len, char* soname_out, size_t soname_cap);
 
@@ -569,7 +572,7 @@ JSC_DEFINE_HOST_FUNCTION_WITH_ATTRIBUTES(Process_functionDlopen, __attribute__((
     }
 #endif
     CrashHandler__setDlOpenAction(utf8.data());
-    void* handle = dlopen(utf8.data(), RTLD_LAZY);
+    void* handle = Bun__dlopen(utf8.data(), RTLD_LAZY);
     CrashHandler__setDlOpenAction(nullptr);
 #endif
 
