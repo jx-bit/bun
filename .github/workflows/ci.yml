@@ -1,0 +1,262 @@
+# Unified CI — GitHub Actions carrier for the official Buildkite pipeline semantics
+#
+# Upstream bun runs its build/test pipeline on Buildkite (.buildkite/ci.mjs).
+# This repository has no Buildkite infrastructure, so this workflow re-expresses
+# that pipeline's semantics on GitHub-hosted runners.
+#
+# Job ↔ official step mapping (.buildkite/ci.mjs):
+#   build        ↔ getBuildBunStep      (same ci-build profile, same CLI)
+#   test         ↔ getTestBunStep       (same runner.node.mjs, explicit --shard/--max-shards)
+#   binary-size  ↔ getBinarySizeStep    (record-only; see CI-PORTING-NOTES.md D-7)
+#
+# Every deviation from the official pipeline is catalogued in
+# .github/workflows/CI-PORTING-NOTES.md — read that before changing anything here.
+
+name: CI
+
+on:
+  push:
+    branches: [ohos-aarch64]
+  pull_request:
+    branches: [ohos-aarch64]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned by rust-toolchain.toml; set explicitly so the toolchain action and
+  # cargo agree regardless of which file the action reads.
+  RUST_TOOLCHAIN: nightly-2026-07-20
+  # Point configure at the freshly-installed llvm.org clang instead of the
+  # runner's older /usr/bin/clang (below tools.ts's minimum).
+  CC: clang
+  CXX: clang++
+
+jobs:
+  build:
+    name: Build ${{ matrix.triplet }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x64
+            runner: ubuntu-24.04
+            triplet: bun-linux-x64
+            build-dir: build/ci-linux-x64
+            exe: bun
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            triplet: bun-linux-aarch64
+            build-dir: build/ci-linux-aarch64
+            exe: bun
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Toolchain ─────────────────────────────────────────────────────
+      # Official CI bakes its toolchain into debian-13 agent images via
+      # scripts/bootstrap.sh; we install the equivalent at job start.
+      # The build enforces clang >= 21.1.0 < 23.0.0 (scripts/build/tools.ts);
+      # LLVM 21 from apt.llvm.org matches the OHOS container lane's 21.1.x.
+      - name: Install LLVM 21 + build tools
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake build-essential git curl wget gnupg lsb-release \
+            libxml2-dev nasm pkg-config
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21
+          # Expose the versioned binaries under the unversioned names the
+          # build's tool discovery looks up.
+          for t in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-strip llvm-objcopy; do
+            sudo ln -sf "/usr/bin/$t-21" "/usr/bin/$t"
+          done
+          clang --version | head -1
+          cmake --version | head -1
+          ninja --version
+
+      - name: Install Rust (rust-toolchain.toml pin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # configure + codegen scripts need bun on PATH (same as official agents,
+      # where bootstrap.sh bakes it).
+      - name: Setup Bun (codegen runtime)
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: |
+          bun --version
+          bun install --frozen-lockfile
+          cd src/node-fallbacks && bun install --frozen-lockfile
+
+      # ── Build ──────────────────────────────────────────────────────────
+      # Same profile and target flags as the official getBuildBunStep
+      # (--profile=ci-build --os --arch); webkit comes from the profile's
+      # prebuilt pin. Two deltas, both documented in CI-PORTING-NOTES.md:
+      #   --buildkite=false  (D-3) no buildkite-agent artifact upload edges
+      #   --lto=off          (D-4) hosted runners lack RAM for the ThinLTO link
+      - name: Configure + build
+        shell: bash
+        run: |
+          set -eo pipefail
+          bun scripts/build.ts \
+            --profile=ci-build \
+            --os=linux \
+            --arch=${{ matrix.arch }} \
+            --buildkite=false \
+            --lto=off \
+            --build-dir=${{ matrix.build-dir }} 2>&1 | tee build.log; rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "=== build failed (rc=$rc) — first errors ==="
+            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|collect2:|cannot find|FAILED:|panic|not found|missing" build.log | head -50 || true
+            echo "=== last 80 lines ==="
+            tail -80 build.log || true
+            exit 1
+          fi
+          echo "=== build OK ==="
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.triplet }}
+          path: ${{ matrix.build-dir }}/${{ matrix.exe }}
+          if-no-files-found: error
+
+  # ── Test shards ↔ getTestBunStep ─────────────────────────────────────
+  # Same test runner (scripts/runner.node.mjs) with the same excludes as the
+  # official pipeline (bun-types and source-lints have their own workflows).
+  # Sharding is the runner's own deterministic file partition: official runs
+  # 20 parallel linux shards on high-core agents; we run fewer, larger shards
+  # on 4-core hosted runners with a longer timeout (D-6). Every shard index
+  # below 0..max-shards-1 must exist in the matrix or part of the suite is
+  # silently uncovered.
+  test:
+    name: Test ${{ matrix.triplet }} shard ${{ matrix.shard }}/${{ matrix.max-shards }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 0, max-shards: 6 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 1, max-shards: 6 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 2, max-shards: 6 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 3, max-shards: 6 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 4, max-shards: 6 }
+          - { triplet: bun-linux-x64, runner: ubuntu-24.04, arch: x64, shard: 5, max-shards: 6 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, arch: aarch64, shard: 0, max-shards: 4 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, arch: aarch64, shard: 1, max-shards: 4 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, arch: aarch64, shard: 2, max-shards: 4 }
+          - { triplet: bun-linux-aarch64, runner: ubuntu-24.04-arm, arch: aarch64, shard: 3, max-shards: 4 }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The built bun embeds the absolute CC path it was compiled with
+      # (/usr/lib/llvm-21/bin/clang) and spawns it for N-API addon direct
+      # compilation and the node-gyp fallback — so test runners need the same
+      # clang as the build lane. Official CI gets this for free: its test
+      # agents boot the same baked image as its build agents (see D-2).
+      - name: Install LLVM 21 (N-API compile toolchain)
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends make g++ python3
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21
+          for t in clang clang++; do
+            sudo ln -sf "/usr/bin/$t-21" "/usr/bin/$t"
+          done
+
+      # Official agent images bake bun; some tests shell out to it.
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: latest
+
+      - name: Download built bun
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.triplet }}
+          path: ./artifact
+
+      # Platform smoke assertions: the runner fails closed if the shard lands
+      # on the wrong architecture. os/arch only — hosted runners match neither
+      # of the official test distros (D-8).
+      - name: Run test shard
+        shell: bash
+        env:
+          EXPECTED_PLATFORM_OS: linux
+          EXPECTED_PLATFORM_ARCH: ${{ matrix.arch }}
+        run: |
+          set -e
+          chmod +x ./artifact/bun
+          node scripts/runner.node.mjs \
+            --exec-path ./artifact/bun \
+            --shard ${{ matrix.shard }} \
+            --max-shards ${{ matrix.max-shards }} \
+            --exclude=integration/bun-types \
+            --exclude=internal/source-lints
+
+  # ── binary-size ↔ getBinarySizeStep (D-7) ────────────────────────────
+  # Record-only. The official step diffs artifact sizes against the canary
+  # baseline stored in Buildkite meta-data and fails PRs on +0.5 MB; there is
+  # no GH-side baseline store yet, so this records absolute sizes into the
+  # job summary instead. Flipping on the fail gate is a one-line change once
+  # a baseline exists.
+  binary-size:
+    name: binary-size
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download built bun (x64)
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-linux-x64
+          path: ./bin/bun-linux-x64
+      - name: Download built bun (aarch64)
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-linux-aarch64
+          path: ./bin/bun-linux-aarch64
+
+      - name: Record binary sizes
+        shell: bash
+        run: |
+          chmod +x ./bin/bun-linux-x64/bun ./bin/bun-linux-aarch64/bun
+          {
+            echo "### Binary sizes (record-only)"
+            echo ""
+            echo "| triplet | size |"
+            echo "|---|---|"
+            for t in bun-linux-x64 bun-linux-aarch64; do
+              size=$(stat -c%s "./bin/$t/bun")
+              mib=$((size / 1024 / 1024))
+              kib=$(( (size % 1024) * 100 / 1024 ))
+              echo "| $t | ${mib}.${kib} MiB |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          stat -c '%n %s' ./bin/bun-linux-x64/bun ./bin/bun-linux-aarch64/bun
