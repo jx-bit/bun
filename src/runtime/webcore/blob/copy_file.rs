@@ -844,29 +844,6 @@ impl CopyFile {
                         let _ = self.do_copy_file_range::<{ TryWith::CopyFileRange }, false>();
                     }
 
-                    // Overshoot guard: for a bounded slice destination the file
-                    // must end at offset+max_length, but a device filesystem was
-                    // observed to overshoot the copy syscall's count (probe 3/3:
-                    // a slice(0,N) destination ended up holding the full source).
-                    // No-op when the copy is honest — trim only what ran over.
-                    if self.max_length != MAX_SIZE
-                        && matches!(
-                            self.destination_file_store.pathlike,
-                            PathOrFileDescriptor::Path(_)
-                        )
-                    {
-                        if let Ok(dest_st) = bun_sys::fstat(self.destination_fd) {
-                            let expected = self.offset.saturating_add(self.max_length);
-                            let size = SizeType::try_from(dest_st.st_size).unwrap_or(expected);
-                            if size > expected {
-                                let _ = bun_sys::ftruncate(
-                                    self.destination_fd,
-                                    i64::try_from(expected).expect("int cast"),
-                                );
-                            }
-                        }
-                    }
-
                     self.do_close();
                     return;
                 }
