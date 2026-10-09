@@ -370,6 +370,14 @@ impl CopyFile {
 
         let mut has_unset_append = false;
 
+        // OHOS: device filesystems were observed to ignore the copy syscalls'
+        // count (probe: count=10, 5 MB written and reported), so the fast
+        // paths cannot bound a slice-window copy there. The read/write
+        // fallback copies exactly `remain` bytes.
+        if cfg!(target_env = "ohos") {
+            return self.fallback_read_write(remain, unknown_size, &mut total_written);
+        }
+
         // If they can't use copy_file_range, they probably also can't
         // use sendfile() or splice()
         if !bun_sys::copy_file::can_use_copy_file_range_syscall() {
@@ -490,6 +498,15 @@ impl CopyFile {
             }
 
             // wrote zero bytes means EOF
+            // A lying filesystem can ignore the copy count (device probe:
+            // count=10, 5 MB written and reported). Clamp so the reported
+            // total never exceeds the destination slice window; the file
+            // overrun itself is trimmed by the overshoot guard.
+            let written = if unknown_size {
+                written
+            } else {
+                (written as usize).min(remain) as isize
+            };
             total_written += u64::try_from(written).expect("int cast");
             if written == 0 {
                 break;
