@@ -370,6 +370,14 @@ impl CopyFile {
 
         let mut has_unset_append = false;
 
+        // OHOS: device filesystems were observed to ignore the copy syscalls'
+        // count (probe: count=10, 5 MB written and reported), so the fast
+        // paths cannot bound a slice-window copy there. The read/write
+        // fallback copies exactly `remain` bytes.
+        if cfg!(target_env = "ohos") {
+            return self.fallback_read_write(remain, unknown_size, &mut total_written);
+        }
+
         // If they can't use copy_file_range, they probably also can't
         // use sendfile() or splice()
         if !bun_sys::copy_file::can_use_copy_file_range_syscall() {
@@ -490,6 +498,15 @@ impl CopyFile {
             }
 
             // wrote zero bytes means EOF
+            // A lying filesystem can ignore the copy count (device probe:
+            // count=10, 5 MB written and reported). Clamp so the reported
+            // total never exceeds the destination slice window; the file
+            // overrun itself is trimmed by the overshoot guard.
+            let written = if unknown_size {
+                written
+            } else {
+                (written as usize).min(remain) as isize
+            };
             total_written += u64::try_from(written).expect("int cast");
             if written == 0 {
                 break;
@@ -825,6 +842,29 @@ impl CopyFile {
                         let _ = self.do_copy_file_range::<{ TryWith::CopyFileRange }, true>();
                     } else {
                         let _ = self.do_copy_file_range::<{ TryWith::CopyFileRange }, false>();
+                    }
+
+                    // Overshoot guard: for a bounded slice destination the file
+                    // must end at offset+max_length, but a device filesystem was
+                    // observed to overshoot the copy syscall's count (probe 3/3:
+                    // a slice(0,N) destination ended up holding the full source).
+                    // No-op when the copy is honest — trim only what ran over.
+                    if self.max_length != MAX_SIZE
+                        && matches!(
+                            self.destination_file_store.pathlike,
+                            PathOrFileDescriptor::Path(_)
+                        )
+                    {
+                        if let Ok(dest_st) = bun_sys::fstat(self.destination_fd) {
+                            let expected = self.offset.saturating_add(self.max_length);
+                            let size = SizeType::try_from(dest_st.st_size).unwrap_or(expected);
+                            if size > expected {
+                                let _ = bun_sys::ftruncate(
+                                    self.destination_fd,
+                                    i64::try_from(expected).expect("int cast"),
+                                );
+                            }
+                        }
                     }
 
                     self.do_close();
