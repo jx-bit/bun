@@ -240,7 +240,9 @@ jobs:
               || { echo "::error::no ohos-sdk* keg carries native/sysroot (SDK layout drift)"; exit 1; }
             echo "OK  sysroot -> $sysroot"
             echo "=== clang ==="; $(brew --prefix llvm@21)/bin/clang --version | head -1
-            echo "=== bun-bootstrap ==="; $(brew --prefix bun-bootstrap)/bin/bun --version
+            echo "=== bun-bootstrap/bun ==="; \
+            bbd="$(brew --prefix bun-bootstrap 2>/dev/null)/bin/bun"; \
+            [ -x "$bbd" ] || bbd="$(brew --prefix bun)/bin/bun"; "$bbd" --version
             echo "=== openssl@3 lib ==="; ls "$(brew --prefix openssl@3)/lib"/libssl* 2>/dev/null | head -3
           '
 
@@ -355,7 +357,7 @@ jobs:
       # (esbuild, lezer-cpp for cppbind) actually landed in node_modules.
       - name: bun install (root + node-fallbacks)
         run: |
-          BUN=$(docker exec "$CONTAINER" bash -lc 'brew --prefix bun-bootstrap')/bin/bun
+          BUN=$(docker exec "$CONTAINER" bash -lc 'bbd="$(brew --prefix bun-bootstrap 2>/dev/null)/bin/bun"; [ -x "$bbd" ] || bbd="$(brew --prefix bun)/bin/bun"; echo "$bbd"')/bin/bun
           docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun && $BUN install" 2>&1 | tail -30
           docker exec -e BUN_INSTALL_IGNORE_SCRIPTS=1 "$CONTAINER" bash -lc "cd /workspace/bun/src/node-fallbacks && $BUN install" 2>&1 | tail -30
           # Verify deps actually installed (the | tail above masks the exit code;
