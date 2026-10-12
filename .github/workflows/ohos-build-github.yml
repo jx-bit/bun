@@ -168,7 +168,7 @@ jobs:
           # No --force-bottle: it is mutually exclusive with --build-bottle.
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --build-bottle $TAP/bun" 2>&1 | tail -40; then
+              "$BREW_ENV brew install --only-dependencies --build-bottle bun ohos-sdk" 2>&1 | tail -40; then
               break
             fi
             [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; echo "pour_failed=true" >> "$GITHUB_OUTPUT"; break; }
@@ -192,7 +192,8 @@ jobs:
           # formula itself remains in the tap); our lane still drives bun
           # install + the build scripts through it, so pour it explicitly.
           docker exec "$CONTAINER" bash -lc "$BREW_ENV brew install bun-bootstrap" 2>&1 | tail -3 \
-            || echo "::warning::bun-bootstrap install failed — build driver bun unavailable"
+            || $BREW_ENV brew install bun 2>&1 | tail -3 \
+            || echo "::warning::bun-bootstrap/bun pour failed — build driver bun unavailable"
           # cargo (OHOS-host rust nightly) links libz. The dependency tree
           # drifts when `brew update` refreshes the index (09-07: the pour
           # set flipped from libedit+libffi to bzip2+libxml2 and zlib
@@ -226,7 +227,7 @@ jobs:
           # installs) and NOT JSON-derived direct deps (the image ships no
           # jq); rename tracking is the daily canary's job.
           docker exec -e SDK_FORMULA="$SDK_FORMULA" "$CONTAINER" bash -lc '
-            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun-bootstrap openssl@3 cmake ninja zlib; do
+            for f in llvm@21 "${SDK_FORMULA:-ohos-sdk}" icu4c@78 bun openssl@3 cmake ninja zlib; do
               p=$(brew --prefix "$f" 2>/dev/null) && [ -d "$p" ] \
                 && echo "OK  $f -> $p" \
                 || { echo "::error::$f NOT installed (formula missing/renamed in the floating tap, or silent trust rejection)"; exit 1; }
@@ -271,7 +272,7 @@ jobs:
             'tar -xzf /tmp/brew-prefix.tar.gz -C /storage/Users/currentUser && rm /tmp/brew-prefix.tar.gz'
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --build-bottle $TAP/bun" 2>&1 | tail -20; then
+              "$BREW_ENV brew install --only-dependencies --build-bottle bun ohos-sdk" 2>&1 | tail -20; then
               echo "::notice::pour verified after snapshot restore"
               break
             fi
