@@ -671,7 +671,7 @@ pub use open_for_writing_mod::{open_for_writing, open_for_writing_impl};
 
 #[cfg(not(windows))]
 use core::ffi::c_int;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use crate::closer::Closer;
 pub use crate::waker::Waker;
@@ -773,6 +773,7 @@ type EventType = KEvent;
 
 pub struct IoRequestLoop {
     pub(crate) pending: RequestQueue,
+    pub(crate) sleeping: AtomicBool,
     pub(crate) waker: Waker,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(crate) epoll_fd: Fd,
@@ -807,6 +808,7 @@ impl IoRequestLoop {
         let loop_ = unsafe { (*LOOP.get_unchecked()).assume_init_mut() };
         *loop_ = IoRequestLoop {
             pending: RequestQueue::default(),
+            sleeping: AtomicBool::new(false),
             waker: Waker::init().unwrap_or_else(|_| panic!("failed to initialize waker")),
             #[cfg(any(target_os = "linux", target_os = "android"))]
             epoll_fd: Fd::INVALID,
@@ -941,7 +943,12 @@ impl IoRequestLoop {
         unsafe {
             let loop_p = LOOP.get_unchecked().cast::<IoRequestLoop>();
             (*core::ptr::addr_of!((*loop_p).pending)).push(request);
-            (*core::ptr::addr_of!((*loop_p).waker)).wake();
+            // Coalesce the wake: the IO thread clears `sleeping` when it starts
+            // a drain and sets it right before blocking, so `false` here means
+            // it is awake and will re-check `pending` before epoll_wait.
+            if (*core::ptr::addr_of!((*loop_p).sleeping)).swap(false, Ordering::AcqRel) {
+                (*core::ptr::addr_of!((*loop_p).waker)).wake();
+            }
         }
     }
 
@@ -973,6 +980,9 @@ impl IoRequestLoop {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(crate) fn tick_epoll(&self) {
         loop {
+            // Awake: schedules made during this drain skip their wake and are
+            // picked up by the batch below.
+            self.sleeping.store(false, Ordering::Relaxed);
             // Process pending requests
             {
                 let mut pending = self.pending.pop_batch().iterator();
@@ -1033,6 +1043,18 @@ impl IoRequestLoop {
                 }
             }
 
+            // Sleep gate (double-checked): mark the loop as sleeping, then
+            // re-check for requests that raced the mark. The waker counter is
+            // drained on the waker event, so a skipped wake can never strand a
+            // request.
+            if !self.pending.is_empty() {
+                continue;
+            }
+            self.sleeping.store(true, Ordering::Release);
+            if !self.pending.is_empty() {
+                continue;
+            }
+
             // Zero-initialised (`epoll_event: Zeroable`) so the post-wait
             // `&events[..rc]` is a safe slice into an initialised array.
             let mut events: [EventType; 256] = [bun_core::ffi::zeroed(); 256];
@@ -1066,7 +1088,11 @@ impl IoRequestLoop {
                     // `repr(transparent)`, so its address equals the sentinel
                     // stored in `load()` — no need to re-deref the cell.
                     if event.u64 == core::ptr::from_ref(self) as usize as u64 {
-                        // Edge-triggered: no need to read the eventfd counter
+                        // Drain the waker's counter. With the sleep gate above
+                        // this is normally 0/1, but on OHOS an undrained counter
+                        // kept re-firing readiness (~1500 wakes/s observed
+                        // starving an install to ~3 bytes of work per switch).
+                        self.waker.wait();
                         continue;
                     }
                 }
@@ -1983,7 +2009,9 @@ pub mod waker {
         }
 
         pub fn init() -> crate::error::Result<Self> {
-            match bun_sys::eventfd(0, 0) {
+            // Non-blocking: the loop drains on the waker event; a spurious
+            // ready-report with an empty counter must not block this thread.
+            match bun_sys::eventfd(0, libc::EFD_NONBLOCK) {
                 Ok(fd) => Ok(Self::init_with_file_descriptor(fd)),
                 Err(err) => Err(bun_errno::SystemErrno::init(i64::from(err.errno))
                     .map(crate::Error::Sys)
