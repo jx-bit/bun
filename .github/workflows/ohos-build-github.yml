@@ -147,15 +147,12 @@ jobs:
           # warnings below judge `docker exec | tail` pipelines, and without
           # it tail's exit 0 always wins — a failed pour is reported as
           # success and the retry never fires (2026-09-14 finding).
-          # Do NOT `brew update` here. The image bakes a tap state and a
-          # Cellar that were poured together — they are mutually consistent.
-          # Refreshing the tap past the baked state breaks that pairing: the
-          # refreshed formulas point at bottle files the storage has since
-          # purged (20261012: ohos-sdk@26.0.0.18 404, every variant), so the
-          # pour dies before any compilation. The baked pair is the frozen
-          # toolchain contract — same model as the reference implementations.
-          # OHOS_CORE_PIN stays unset for the same reason: re-pinning after a
-          # (removed) update was the fast-forward this freeze replaces.
+          # brew update refreshes the taps to the CURRENT state: the bun
+          # formula now lives in harmonybrew/core and the ohos-sdk bottle was
+          # rebuilt (rebuild1) — both required for the pour below. The pinned
+          # state's bottles were purged from the storage (20261012).
+          docker exec "$CONTAINER" bash -lc "$BREW_ENV brew update --quiet" \
+            || echo "::warning::brew update failed; continuing with baked index"
           # Retry once after 90s for transient atomgit CDN 404s (social4hyq
           # build.sh lines 41-48 — brew reuses partial work).
           # --build-bottle (not --include-build: Harmonybrew's brew fork does
@@ -168,7 +165,7 @@ jobs:
           # No --force-bottle: it is mutually exclusive with --build-bottle.
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --build-bottle bun ohos-sdk" 2>&1 | tail -40; then
+              "$BREW_ENV brew install --build-bottle bun ohos-sdk" 2>&1 | tail -40; then
               break
             fi
             [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; echo "pour_failed=true" >> "$GITHUB_OUTPUT"; break; }
@@ -272,7 +269,7 @@ jobs:
             'tar -xzf /tmp/brew-prefix.tar.gz -C /storage/Users/currentUser && rm /tmp/brew-prefix.tar.gz'
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --build-bottle bun ohos-sdk" 2>&1 | tail -20; then
+              "$BREW_ENV brew install --build-bottle bun ohos-sdk" 2>&1 | tail -20; then
               echo "::notice::pour verified after snapshot restore"
               break
             fi
